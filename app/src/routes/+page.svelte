@@ -1,26 +1,10 @@
 <script lang="ts">
-	import { onMount } from "svelte";
-	import { parse } from "$lib/engine/parse";
-	import { AccordionStore } from "$lib/engine/store.svelte";
+	import { session, isTauriEnv, loadSample, openFile } from "$lib/session.svelte.ts";
 	import ContextSummary from "$lib/ui/ContextSummary.svelte";
 	import ContextTimeline from "$lib/ui/ContextTimeline.svelte";
 	import Timeline from "$lib/ui/Timeline.svelte";
 
-	let store = $state<AccordionStore | null>(null);
-	let error = $state("");
 	let view = $state<"summary" | "timeline">("summary");
-
-	onMount(async () => {
-		try {
-			const res = await fetch("/sample-session.jsonl");
-			if (!res.ok) throw new Error(`failed to load sample (${res.status})`);
-			const parsed = parse(await res.text());
-			store = new AccordionStore(parsed);
-			if (typeof window !== "undefined") (window as any).__store = store; // debug handle
-		} catch (e) {
-			error = e instanceof Error ? e.message : String(e);
-		}
-	});
 
 	const fmt = (n: number) => n.toLocaleString();
 
@@ -39,28 +23,55 @@
 
 <svelte:head><title>Accordion</title></svelte:head>
 
-{#if error}
+{#if session.error && !session.store}
 	<div class="fallback">
-		<h1>🪗 Accordion</h1>
-		<p class="err">Couldn't load the session: {error}</p>
+		<span class="logo">🪗</span>
+		<p class="err">{session.error}</p>
+		{#if isTauriEnv}
+			<button class="btn-open" onclick={openFile}>Open session file…</button>
+		{/if}
+		<button class="btn-ghost" onclick={loadSample}>Load sample</button>
 	</div>
-{:else if !store}
-	<div class="fallback"><p class="muted">Loading session…</p></div>
+{:else if !session.store}
+	<div class="fallback">
+		<span class="hero-logo">🪗</span>
+		<h1>Accordion</h1>
+		<p class="sub">Context-window visualizer for pi and Claude Code sessions</p>
+		{#if isTauriEnv}
+			<button class="btn-open" onclick={openFile}>Open session file…</button>
+			<p class="hint mono">
+				pi → ~/.pi/agent/sessions/ &nbsp;·&nbsp; Claude → ~/.claude/projects/
+			</p>
+		{:else}
+			<p class="hint">Run the native app (<code>npm run tauri dev</code>) to open live sessions.</p>
+		{/if}
+		<button class="btn-ghost" onclick={loadSample}>Load sample (982 blocks)</button>
+		{#if session.error}<p class="err">{session.error}</p>{/if}
+	</div>
 {:else}
+	{@const s = session.store}
 	<div class="app">
 		<header class="topbar">
 			<div class="brand">
 				<span class="logo">🪗</span>
 				<div class="titles">
-					<div class="t1">{store.meta.title}</div>
+					<div class="t1">
+						{session.filePath ? baseName(session.filePath) : s.meta.title}
+						{#if session.live}<span class="live-dot" title="Live — polling for changes"></span>{/if}
+					</div>
 					<div class="t2 mono">
-						{store.meta.model || store.meta.format}
-						{#if store.meta.cwd}· {baseName(store.meta.cwd)}{/if}
-						· {store.blocks.length} blocks
+						{s.meta.model || s.meta.format}
+						{#if s.meta.cwd}· {baseName(s.meta.cwd)}{/if}
+						· {s.blocks.length} blocks
 					</div>
 				</div>
 			</div>
-			<a class="nav" href="/map" data-sveltekit-reload={false}>Map view →</a>
+			<div class="nav-row">
+				{#if isTauriEnv}
+					<button class="nav" onclick={openFile}>Open…</button>
+				{/if}
+				<a class="nav" href="/map" data-sveltekit-reload={false}>Map view →</a>
+			</div>
 		</header>
 
 		<section class="contextpane">
@@ -69,21 +80,21 @@
 				<button class:on={view === "timeline"} onclick={() => (view = "timeline")}>Timeline</button>
 			</div>
 			{#if view === "summary"}
-				<ContextSummary {store} onpick={pick} />
+				<ContextSummary store={s} onpick={pick} />
 			{:else}
-				<ContextTimeline {store} onpick={pick} />
+				<ContextTimeline store={s} onpick={pick} />
 			{/if}
 		</section>
 
 		<div class="main">
 			<main class="scroll">
-				<Timeline {store} />
+				<Timeline store={s} />
 			</main>
 
 			<aside>
 				<div class="ctl">
 					<label class="ctl-l" for="budget">
-						Context budget <b class="mono">{fmt(store.budget)}</b>
+						Context budget <b class="mono">{fmt(s.budget)}</b>
 					</label>
 					<input
 						id="budget"
@@ -91,18 +102,18 @@
 						min="12000"
 						max="160000"
 						step="2000"
-						value={store.budget}
-						oninput={(e) => store!.setBudget(+e.currentTarget.value)}
+						value={s.budget}
+						oninput={(e) => s.setBudget(+e.currentTarget.value)}
 					/>
-					<button class="btn" onclick={() => store!.resetAll()}>Reset all to auto</button>
+					<button class="btn" onclick={() => s.resetAll()}>Reset all to auto</button>
 				</div>
 
 				<div class="feed">
 					<div class="feed-h">Activity</div>
-					{#if store.log.length === 0}
+					{#if s.log.length === 0}
 						<div class="empty muted">Fold, unfold or pin a block — moves show here, attributed.</div>
 					{/if}
-					{#each store.log as ev (ev.n)}
+					{#each s.log as ev (ev.n)}
 						<div class="ev">
 							<span class="who who-{ev.by}">{ev.by}</span>
 							<span class="ev-a">{ev.action}</span>
@@ -127,10 +138,59 @@
 		flex-direction: column;
 		align-items: center;
 		justify-content: center;
-		gap: 8px;
+		gap: 12px;
 	}
 	.fallback .err {
 		color: var(--danger);
+		font-size: 13px;
+	}
+	.hero-logo {
+		font-size: 48px;
+		line-height: 1;
+	}
+	.fallback h1 {
+		font-size: 22px;
+		font-weight: 700;
+		margin: 0;
+	}
+	.sub {
+		font-size: 13px;
+		color: var(--muted);
+		margin: 0;
+	}
+	.btn-open {
+		margin-top: 8px;
+		background: var(--accent);
+		color: #fff;
+		border: none;
+		padding: 10px 24px;
+		border-radius: var(--radius-sm);
+		font-size: 14px;
+		font-weight: 600;
+		cursor: pointer;
+		transition: opacity 120ms ease;
+	}
+	.btn-open:hover {
+		opacity: 0.85;
+	}
+	.btn-ghost {
+		background: transparent;
+		border: 1px solid var(--line);
+		color: var(--muted);
+		padding: 7px 18px;
+		border-radius: var(--radius-sm);
+		font-size: 13px;
+		cursor: pointer;
+		transition: color 120ms ease, border-color 120ms ease;
+	}
+	.btn-ghost:hover {
+		color: var(--text);
+		border-color: var(--muted);
+	}
+	.hint {
+		font-size: 11px;
+		color: var(--faint);
+		margin: 0;
 	}
 
 	.topbar {
@@ -161,10 +221,27 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 		max-width: 52vw;
+		display: flex;
+		align-items: center;
+		gap: 7px;
 	}
 	.t2 {
 		font-size: 11px;
 		color: var(--muted);
+	}
+	.live-dot {
+		display: inline-block;
+		width: 7px;
+		height: 7px;
+		border-radius: 50%;
+		background: var(--ok);
+		flex: 0 0 auto;
+	}
+	.nav-row {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		flex: 0 0 auto;
 	}
 	.nav {
 		font-size: 12px;
@@ -174,6 +251,9 @@
 		border: 1px solid var(--line);
 		border-radius: var(--radius-sm);
 		white-space: nowrap;
+		background: transparent;
+		cursor: pointer;
+		transition: background 120ms ease;
 	}
 	.nav:hover {
 		background: var(--panel-2);

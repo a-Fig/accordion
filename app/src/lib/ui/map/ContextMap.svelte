@@ -126,6 +126,20 @@
 	let nudge = $state(0); // user density adjustment (± px per cell)
 	const GAP = 4;
 
+	// ---- scroll smoothness: while the stage is actively scrolling, suppress
+	//      per-tile :hover. Otherwise ~1k tiles sliding under a STATIONARY cursor
+	//      each fire :hover in/out → a repaint per tile per frame (a repaint storm
+	//      that has nothing to do with the user actually hovering). We flip the
+	//      grid to pointer-events:none during scroll, then restore ~140ms after it
+	//      settles — so scrolling is pure layer compositing, no paint.
+	let scrolling = $state(false);
+	let scrollTimer: ReturnType<typeof setTimeout> | undefined;
+	function onScroll() {
+		if (!scrolling) scrolling = true;
+		clearTimeout(scrollTimer);
+		scrollTimer = setTimeout(() => (scrolling = false), 140);
+	}
+
 	function fit() {
 		if (!stage || zoom !== "grid") return;
 		// reserve room for the two boxes' chrome (borders, padding, gap)
@@ -244,6 +258,7 @@
 	<div
 		class="stage"
 		class:isgrid={zoom === "grid"}
+		class:scrolling
 		bind:this={stage}
 		role="toolbar"
 		tabindex="0"
@@ -251,6 +266,7 @@
 		onclick={onClick}
 		ondblclick={onDbl}
 		onkeydown={onKey}
+		onscroll={onScroll}
 	>
 		{#if zoom === "grid"}
 			{#snippet tile(t: { b: Block; face: number })}
@@ -452,6 +468,9 @@
 		flex-direction: column;
 		gap: 16px;
 		width: 100%;
+		/* promote the scroll content to its own GPU layer: once painted, scrolling
+		   is a cheap layer translation rather than a repaint of the tiles. */
+		transform: translateZ(0);
 	}
 	.box {
 		border-radius: 14px;
@@ -476,11 +495,13 @@
 		justify-content: center;
 		width: 100%;
 	}
+	/* while scrolling, make tiles transparent to the pointer so a stationary cursor
+	   doesn't trigger :hover on every tile that slides past it (repaint storm). */
+	.stage.scrolling .grid {
+		pointer-events: none;
+	}
 	.cell {
 		box-sizing: border-box;
-		/* skip painting tiles outside the viewport → smooth scroll over ~1k tiles */
-		content-visibility: auto;
-		contain-intrinsic-size: var(--cell) var(--cell);
 		border-radius: 3px;
 		cursor: pointer;
 		box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.22);

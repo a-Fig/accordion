@@ -156,6 +156,17 @@ export class AccordionStore {
 		this.refold();
 	}
 
+	/**
+	 * Live mode: append blocks streamed from the pi link, then re-fold. Blocks
+	 * arrive in conversation order and are append-only (the live context grows;
+	 * folding is the only mutation, and that is the store's own decision).
+	 */
+	appendBlocks(blocks: Block[]): void {
+		if (!blocks.length) return;
+		this.blocks.push(...blocks);
+		this.refold();
+	}
+
 	/** Resize the protected working tail, then re-fold so the change takes effect. */
 	setProtect(n: number): void {
 		this.protectTokens = Math.max(0, Math.round(n));
