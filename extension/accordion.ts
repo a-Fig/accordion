@@ -6,7 +6,14 @@
  * the new ones to the Accordion GUI over a WebSocket, awaits a fold plan, and
  * applies it to the messages pi is about to send. The GUI runs the engine.
  *
- * Safety (see docs/adr/0001-pi-live-integration.md):
+ * Connection model: "pull" (see docs/adr/0001-pi-live-integration.md). Each pi
+ * session binds an EPHEMERAL loopback port and advertises itself by writing a
+ * descriptor to ~/.accordion/sessions/<id>.json (see ../app/src/lib/live/registry).
+ * The app watches that directory, lists every live session, and connects to the
+ * one the user picks. `/accordion` writes a one-shot focus request so the app
+ * foregrounds itself on this session. The extension never launches the app.
+ *
+ * Safety:
  *   • No GUI connected, or the plan reply times out → pass messages through
  *     UNMODIFIED. We never corrupt context.
  *   • pi's native /compact is suppressed ONLY while the GUI is attached.
@@ -20,17 +27,35 @@
  *   { "extensions": ["<repo>/extension/accordion.ts"] }
  */
 import { WebSocketServer, type WebSocket } from "ws";
+import * as os from "node:os";
+import * as path from "node:path";
+import * as fs from "node:fs";
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 
 import { linearize, applyPlan, type PiMessage } from "../app/src/lib/live/mapping";
 import { DEFAULT_PORT, PROTOCOL_VERSION, type FoldOp, type ServerMessage } from "../app/src/lib/live/protocol";
+import {
+	REGISTRY_PROTOCOL,
+	REGISTRY_DIR,
+	SESSIONS_SUBDIR,
+	FOCUS_FILE,
+	HEARTBEAT_INTERVAL_MS,
+	type SessionEntry,
+	type FocusRequest,
+} from "../app/src/lib/live/registry";
 
 const REQUEST_TIMEOUT_MS = 250; // how long pi waits on the GUI before passing through
 
+// Base dir is overridable for tests (smoke.mjs) so they don't touch the real home.
+const HOME = process.env.ACCORDION_HOME || os.homedir();
+const REGISTRY_ROOT = path.join(HOME, REGISTRY_DIR);
+const SESSIONS_DIR = path.join(REGISTRY_ROOT, SESSIONS_SUBDIR);
+const FOCUS_PATH = path.join(REGISTRY_ROOT, FOCUS_FILE);
+
 export default function accordionLive(pi: ExtensionAPI): void {
 	let wss: WebSocketServer | null = null;
-	let client: WebSocket | null = null; // the GUI (one at a time in M1)
+	let client: WebSocket | null = null; // the GUI (one driver at a time in M1)
 	let sessionId = "";
 	let meta = { title: "pi session", cwd: "", model: "", format: "pi" as const };
 
@@ -38,6 +63,14 @@ export default function accordionLive(pi: ExtensionAPI): void {
 	let reqSeq = 0;
 	let epoch = 0; // bumped on every new GUI connection; invalidates in-flight requests
 	const pending = new Map<number, (ops: FoldOp[]) => void>();
+
+	// ── discovery (registry) state ──────────────────────────────────────────────
+	let port = 0; // actual ephemeral port, filled once the server is listening
+	let startedAt = 0;
+	let model = "";
+	let tokens: number | null = null;
+	let contextWindow: number | null = null;
+	let heartbeat: ReturnType<typeof setInterval> | null = null;
 
 	const attached = (): boolean => !!client && client.readyState === 1; /* OPEN */
 
@@ -55,10 +88,95 @@ export default function accordionLive(pi: ExtensionAPI): void {
 		}
 	}
 
+	// ── registry file: advertise this session for the app to discover ───────────
+	function buildEntry(): SessionEntry {
+		return {
+			registryProtocol: REGISTRY_PROTOCOL,
+			protocolVersion: PROTOCOL_VERSION,
+			sessionId,
+			port,
+			pid: process.pid,
+			cwd: meta.cwd,
+			title: meta.title,
+			model,
+			tokens,
+			contextWindow,
+			startedAt,
+			heartbeatAt: Date.now(),
+		};
+	}
+
+	/** Atomic write (temp + rename) so the app never reads a half-written file. */
+	function writeEntry(): void {
+		if (!port || !sessionId) return;
+		try {
+			fs.mkdirSync(SESSIONS_DIR, { recursive: true });
+			const target = path.join(SESSIONS_DIR, `${sessionId}.json`);
+			const tmp = `${target}.${process.pid}.tmp`;
+			fs.writeFileSync(tmp, JSON.stringify(buildEntry()));
+			fs.renameSync(tmp, target);
+		} catch {
+			/* discovery is best-effort; never let it break a session */
+		}
+	}
+
+	function deleteEntry(): void {
+		if (!sessionId) return;
+		try {
+			fs.unlinkSync(path.join(SESSIONS_DIR, `${sessionId}.json`));
+		} catch {
+			/* already gone */
+		}
+	}
+
+	/** /accordion writes a one-shot request for the (already-open) app to focus us. */
+	function writeFocusRequest(): void {
+		if (!sessionId) return;
+		try {
+			fs.mkdirSync(REGISTRY_ROOT, { recursive: true });
+			const req: FocusRequest = { sessionId, ts: Date.now() };
+			const tmp = `${FOCUS_PATH}.${process.pid}.tmp`;
+			fs.writeFileSync(tmp, JSON.stringify(req));
+			fs.renameSync(tmp, FOCUS_PATH);
+		} catch {
+			/* best-effort */
+		}
+	}
+
+	/** Pull model id + live usage off the hook context (best-effort). */
+	function refreshFromCtx(ctx: ExtensionContext): void {
+		try {
+			const m = ctx.getModel?.();
+			if (m?.id) {
+				model = m.id;
+				meta.model = m.id;
+				if (typeof m.contextWindow === "number") contextWindow = m.contextWindow;
+			}
+			const u = ctx.getContextUsage?.();
+			if (u) {
+				tokens = u.tokens;
+				if (typeof u.contextWindow === "number") contextWindow = u.contextWindow;
+			}
+		} catch {
+			/* optional APIs */
+		}
+	}
+
 	function startServer(): void {
 		if (wss) return;
 		try {
-			wss = new WebSocketServer({ host: "127.0.0.1", port: DEFAULT_PORT });
+			// port 0 ⇒ OS assigns a free ephemeral port (one server per pi session).
+			wss = new WebSocketServer({ host: "127.0.0.1", port: 0 }, () => {
+				const addr = wss?.address();
+				if (addr && typeof addr === "object") {
+					port = addr.port;
+					writeEntry(); // advertise immediately, now that the port is known
+					if (!heartbeat) {
+						heartbeat = setInterval(writeEntry, HEARTBEAT_INTERVAL_MS);
+						heartbeat.unref?.(); // never keep the process alive for a heartbeat
+					}
+				}
+			});
 		} catch {
 			wss = null;
 			return;
@@ -93,7 +211,7 @@ export default function accordionLive(pi: ExtensionAPI): void {
 			ws.on("error", drop);
 		});
 		wss.on("error", () => {
-			/* e.g. port already in use — run headless (passthrough) */
+			/* e.g. unexpected bind failure — run headless (passthrough) */
 			wss = null;
 		});
 	}
@@ -119,13 +237,15 @@ export default function accordionLive(pi: ExtensionAPI): void {
 
 	// ── lifecycle ──────────────────────────────────────────────────────────────
 	pi.on("session_start", (_event, ctx: ExtensionContext) => {
-		sessionId = `s-${Date.now()}`;
+		sessionId = `s-${process.pid}-${Date.now()}`;
 		sentCount = 0;
+		startedAt = Date.now();
 		try {
-			meta = { title: "pi session", cwd: (process?.cwd?.() ?? ""), model: "", format: "pi" };
+			meta = { title: "pi session", cwd: process?.cwd?.() ?? "", model: "", format: "pi" };
 		} catch {
 			/* keep defaults */
 		}
+		refreshFromCtx(ctx); // model may be known already
 		startServer();
 		try {
 			ctx.ui.setStatus("accordion", ctx.ui.theme.fg("accent", "\u{1FA97} accordion"));
@@ -138,8 +258,11 @@ export default function accordionLive(pi: ExtensionAPI): void {
 	// Returning `undefined` keeps pi's original messages (documented passthrough);
 	// only an explicit `{ messages }` replaces them. Every passthrough path below
 	// returns undefined, so we never alter a model call without a plan.
-	pi.on("context", async (event, _ctx) => {
+	pi.on("context", async (event, ctx: ExtensionContext) => {
 		const myEpoch = epoch;
+		// Refresh model/usage in memory only — NO disk I/O on the model-call critical
+		// path. The 5s heartbeat persists these to the registry for the sidebar.
+		refreshFromCtx(ctx);
 		const all = linearize(event.messages as unknown as PiMessage[]);
 		if (!attached()) return; // no GUI → pass through untouched
 
@@ -169,6 +292,11 @@ export default function accordionLive(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", () => {
+		if (heartbeat) {
+			clearInterval(heartbeat);
+			heartbeat = null;
+		}
+		deleteEntry(); // stop advertising — the app drops our row immediately
 		flushPending(); // resolve any awaiting context hook as passthrough
 		try {
 			client?.close();
@@ -184,16 +312,23 @@ export default function accordionLive(pi: ExtensionAPI): void {
 		client = null;
 	});
 
-	// ── /accordion : quick status in the terminal ───────────────────────────────
+	// ── /accordion : focus the app on this session + show status ────────────────
 	pi.registerCommand("accordion", {
-		description: "Show Accordion live-link status (GUI attached? blocks streamed?)",
+		description: "Focus the Accordion app on this pi session (and show live-link status)",
 		handler: async (_args: string, ctx: ExtensionCommandContext) => {
+			writeFocusRequest();
 			const lines = [
-				`Accordion live link — port ${DEFAULT_PORT}`,
+				`Accordion live link — port ${port || "(starting)"}`,
 				`GUI: ${attached() ? "ATTACHED — folding driven by the app" : "detached — passthrough, native /compact allowed"}`,
 				`blocks streamed this connection: ${sentCount}`,
+				`Asked the Accordion app to focus this session (open it if it isn't running).`,
 			];
 			ctx.ui.notify(lines.join("\n"), "info");
 		},
 	});
 }
+
+// DEFAULT_PORT is retained in protocol.ts only as the browser dev-loop fallback
+// (the desktop app discovers ephemeral ports via the registry); reference it so
+// the import graph and the constant's purpose stay explicit.
+export const BROWSER_FALLBACK_PORT = DEFAULT_PORT;

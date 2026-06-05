@@ -28,7 +28,12 @@
 /** Bump on any breaking change to the message shapes below. */
 export const PROTOCOL_VERSION = 1;
 
-/** Default loopback port the extension listens on / the GUI dials. */
+/**
+ * Browser dev-loop fallback port only. In the desktop ("pull") model each pi
+ * session binds an EPHEMERAL port and advertises it via the registry (registry.ts),
+ * which the app discovers — so this constant is NOT what a real session listens on.
+ * It is just the default the browser manual-connect input pre-fills.
+ */
 export const DEFAULT_PORT = 4317;
 
 /**
