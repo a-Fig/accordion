@@ -43,6 +43,35 @@ export async function loadSample() {
 	}
 }
 
+/**
+ * Where the Open dialog should land: a user's agent-session folders, in
+ * preference order. pi first (this app is pi-centric), then Claude Code, then
+ * home. Existence-checked so we never point the picker at a missing folder.
+ */
+async function defaultOpenDir(): Promise<string | undefined> {
+	try {
+		const [{ homeDir, join }, { exists }] = await Promise.all([
+			import("@tauri-apps/api/path"),
+			import("@tauri-apps/plugin-fs"),
+		]);
+		const home = await homeDir();
+		const candidates = [
+			await join(home, ".pi", "agent", "sessions"),
+			await join(home, ".claude", "projects"),
+		];
+		for (const dir of candidates) {
+			try {
+				if (await exists(dir)) return dir;
+			} catch {
+				/* permission / transient — try the next candidate */
+			}
+		}
+		return home;
+	} catch {
+		return undefined; // not Tauri / path API unavailable — let the dialog default
+	}
+}
+
 export async function openFile() {
 	session.error = "";
 	try {
@@ -52,6 +81,7 @@ export async function openFile() {
 		]);
 		const selected = await open({
 			title: "Open session file",
+			defaultPath: await defaultOpenDir(),
 			filters: [{ name: "JSONL", extensions: ["jsonl"] }],
 		});
 		if (!selected || typeof selected !== "string") return;

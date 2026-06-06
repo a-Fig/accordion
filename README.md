@@ -67,9 +67,9 @@ Drag any session `.jsonl` onto the window, or use the bundled sample. Everything
 [VISION.md](VISION.md) is the north star — the finished product we're building toward. What exists **today**:
 
 - **A desktop app** (`app/`, Tauri + SvelteKit) — the *separate window*. It renders an
-  agent's context window as a foldable map (the Map view) or timeline (Classic), with a
-  token budget and a protected working tail. It opens saved `.jsonl` sessions, and —
-  new — attaches to a **live** pi session.
+  agent's context window as a foldable map, with a token budget and a protected working
+  tail. It opens saved `.jsonl` sessions (the Open dialog lands in `~/.pi/agent/sessions`
+  or `~/.claude/projects`), and — new — attaches to a **live** pi session.
 - **A live link** (`extension/accordion.ts` + `app/src/lib/live/`). A pi extension
   streams a running session's context to the app over a local WebSocket; the app
   **auto-discovers** every running pi (the "pull" model) and shows it in a Sessions
@@ -104,7 +104,7 @@ watch its context populate live.
 
 - [x] Core fold/unfold engine — reversible, tool-pair safe
 - [x] Rolling automatic folding + manual expansion, protected working tail
-- [x] The separate window — desktop app: Map & Classic views, budget, inspector
+- [x] The separate window — desktop app: Map view, budget, inspector
 - [x] Live link to a running pi session + auto-discovery *(view only — empty fold plan)*
 - [ ] Steer a live session — apply the fold plan to what the agent is shown
 - [ ] LLM-generated summaries, computed once and cached

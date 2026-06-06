@@ -7,14 +7,13 @@ about **how to work in the code**, not what the product is.
 ## Where the live work is
 
 The active surface is the **desktop app** in `app/` — a Tauri 2 + SvelteKit window
-that visualizes an agent's context window. Two routes:
-
-- `/`  — **Classic** view (`routes/+page.svelte`): `ContextSummary` / `ContextTimeline`
-  toggle on top, a scrollable `Timeline` of `BlockCard`s, activity feed.
-- `/map` — **Map** app (`routes/map/+page.svelte`): an abstraction-first view.
-  In the desktop app it's a shell — a **`SessionsSidebar`** (live pi sessions, pull
-  model) + the session view: `MapHeader` (composition strip + budget) + `ContextMap`
-  + `Inspector` (on-demand text panel). This is where most recent design iteration lives.
+that visualizes an agent's context window. A **single route** (`routes/+page.svelte`):
+the **Map** app, an abstraction-first view. In the desktop app it's a shell — a
+**`SessionsSidebar`** (live pi sessions via the pull model, minimizable to a slim icon
+rail, plus a pinned **Demo session** that loads the bundled sample) + the session view:
+`MapHeader` (composition strip + budget) + `ContextMap` + `Inspector` (on-demand text
+panel). The old **Classic** view (summary/timeline of `BlockCard`s) was removed; its
+components (`ContextSummary` / `ContextTimeline` / `Timeline` / `BlockCard`) are gone.
 
 The current pi extension is **`extension/accordion.ts`** (the live link — see below).
 `src/` (repo root) and `visualizer/` are the *older* pi-extension POC and the

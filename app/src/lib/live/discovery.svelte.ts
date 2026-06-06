@@ -10,6 +10,12 @@
 import { isTauriEnv } from "../session.svelte";
 import { isLiveEntry, type SessionEntry, type FocusRequest } from "./registry";
 
+/**
+ * Sentinel session id for the bundled demo transcript. It isn't a live pi
+ * session, so the poller must never reap it from `discovery.selected` (see poll).
+ */
+export const DEMO_ID = "__demo__";
+
 export const discovery = $state<{ sessions: SessionEntry[]; selected: string | null; ready: boolean }>({
 	sessions: [],
 	selected: null,
@@ -58,8 +64,12 @@ async function poll(): Promise<void> {
 		live.sort((a, b) => a.startedAt - b.startedAt);
 		discovery.sessions = live;
 		discovery.ready = true;
-		if (discovery.selected && !live.some((s) => s.sessionId === discovery.selected)) {
-			discovery.selected = null; // the session we were looking at is gone
+		if (
+			discovery.selected &&
+			discovery.selected !== DEMO_ID &&
+			!live.some((s) => s.sessionId === discovery.selected)
+		) {
+			discovery.selected = null; // the live session we were looking at is gone
 		}
 
 		// Consume any new focus request into the pending slot (replacing an older one).

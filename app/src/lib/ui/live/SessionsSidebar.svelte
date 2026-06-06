@@ -5,13 +5,44 @@
 		sessions,
 		selected,
 		connected,
+		demoSelected = false,
 		onselect,
+		ondemo,
 	}: {
 		sessions: SessionEntry[];
 		selected: string | null;
 		connected: boolean;
+		demoSelected?: boolean;
 		onselect: (s: SessionEntry) => void;
+		ondemo: () => void;
 	} = $props();
+
+	const STORE_KEY = "accordion.sidebar.collapsed";
+
+	function loadCollapsed(): boolean {
+		if (typeof localStorage === "undefined") return false;
+		return localStorage.getItem(STORE_KEY) === "1";
+	}
+
+	let collapsed = $state(loadCollapsed());
+
+	$effect(() => {
+		if (typeof localStorage !== "undefined") {
+			localStorage.setItem(STORE_KEY, collapsed ? "1" : "0");
+		}
+	});
+
+	// Cmd/Ctrl+B toggles the rail — the near-universal "toggle sidebar" shortcut.
+	$effect(() => {
+		function onKey(e: KeyboardEvent) {
+			if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "b") {
+				e.preventDefault();
+				collapsed = !collapsed;
+			}
+		}
+		window.addEventListener("keydown", onKey);
+		return () => window.removeEventListener("keydown", onKey);
+	});
 
 	function baseName(p: string): string {
 		return p ? p.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || p : "";
@@ -29,42 +60,92 @@
 		if (n >= 1000) return `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k`;
 		return String(n);
 	}
+	function label(s: SessionEntry): string {
+		return baseName(s.cwd) || s.title || "session";
+	}
 </script>
 
-<aside class="rail">
-	<div class="head">
-		<span class="logo">🪗</span>
-		<span class="ttl">Sessions</span>
-		<span class="count">{sessions.length}</span>
-	</div>
-
-	{#if sessions.length === 0}
-		<div class="empty">
-			<p>No live pi sessions.</p>
-			<p class="hint">Start <code>pi</code> in a project — it shows up here on its own.</p>
-		</div>
-	{:else}
-		<ul class="list">
+<aside class="rail" class:collapsed>
+	{#if collapsed}
+		<!-- Slim icon rail: sessions stay glanceable; click a dot to switch, logo to expand. -->
+		<button class="icon logo-btn" title="Expand sidebar  (Ctrl/Cmd+B)" onclick={() => (collapsed = false)}>
+			🪗
+		</button>
+		<div class="icon-list">
 			{#each sessions as s (s.sessionId)}
-				{@const p = pct(s)}
 				{@const isSel = s.sessionId === selected}
-				<li>
-					<button class="row" class:sel={isSel} onclick={() => onselect(s)} title={s.cwd}>
-						<span class="dot" class:on={isSel && connected}></span>
-						<span class="body">
-							<span class="t1">{baseName(s.cwd) || s.title}</span>
-							<span class="t2 mono">{shortModel(s.model)}</span>
-						</span>
-						{#if p !== null}
-							<span class="usage" title={`${s.tokens} / ${s.contextWindow} tokens`}>
-								<span class="bar"><span class="fill" class:hot={p >= 80} style:width={`${p}%`}></span></span>
-								<span class="pct mono">{fmtTokens(s.tokens)}</span>
-							</span>
-						{/if}
-					</button>
-				</li>
+				<button
+					class="icon dot-btn"
+					class:sel={isSel}
+					title={label(s)}
+					aria-label={label(s)}
+					onclick={() => onselect(s)}
+				>
+					<span class="dot" class:on={isSel && connected}></span>
+				</button>
 			{/each}
-		</ul>
+		</div>
+		<button
+			class="icon dot-btn demo-icon"
+			class:sel={demoSelected}
+			title="Demo session (bundled sample)"
+			aria-label="Demo session"
+			onclick={ondemo}
+		>
+			<span class="dot demo"></span>
+		</button>
+	{:else}
+		<div class="head">
+			<span class="logo">🪗</span>
+			<span class="ttl">Sessions</span>
+			<span class="count">{sessions.length}</span>
+			<button class="collapse" title="Collapse sidebar  (Ctrl/Cmd+B)" aria-label="Collapse sidebar" onclick={() => (collapsed = true)}>
+				«
+			</button>
+		</div>
+
+		<div class="scroll">
+			{#if sessions.length === 0}
+				<div class="empty">
+					<p>No live pi sessions.</p>
+					<p class="hint">Start <code>pi</code> in a project — it shows up here on its own.</p>
+				</div>
+			{:else}
+				<ul class="list">
+					{#each sessions as s (s.sessionId)}
+						{@const p = pct(s)}
+						{@const isSel = s.sessionId === selected}
+						<li>
+							<button class="row" class:sel={isSel} onclick={() => onselect(s)} title={s.cwd}>
+								<span class="dot" class:on={isSel && connected}></span>
+								<span class="body">
+									<span class="t1">{label(s)}</span>
+									<span class="t2 mono">{shortModel(s.model)}</span>
+								</span>
+								{#if p !== null}
+									<span class="usage" title={`${s.tokens} / ${s.contextWindow} tokens`}>
+										<span class="bar"><span class="fill" class:hot={p >= 80} style:width={`${p}%`}></span></span>
+										<span class="pct mono">{fmtTokens(s.tokens)}</span>
+									</span>
+								{/if}
+							</button>
+						</li>
+					{/each}
+				</ul>
+			{/if}
+		</div>
+
+		<!-- Bundled demo, pinned at the foot of the list and clearly not live. -->
+		<div class="demo-foot">
+			<button class="row demo" class:sel={demoSelected} onclick={ondemo} title="Bundled sample session — read-only demo">
+				<span class="dot demo"></span>
+				<span class="body">
+					<span class="t1">Demo session</span>
+					<span class="t2">Bundled sample · read-only</span>
+				</span>
+				<span class="badge">demo</span>
+			</button>
+		</div>
 	{/if}
 </aside>
 
@@ -78,7 +159,56 @@
 		border-right: 1px solid var(--line);
 		background: var(--panel);
 		overflow: hidden;
+		transition: width 160ms ease;
 	}
+	.rail.collapsed {
+		width: 52px;
+		align-items: center;
+		gap: 4px;
+		padding: 8px 0;
+	}
+
+	/* ---- collapsed icon rail ---- */
+	.icon {
+		width: 38px;
+		height: 38px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		border: 1px solid transparent;
+		border-radius: var(--radius-sm);
+		background: transparent;
+		cursor: pointer;
+		flex: 0 0 auto;
+		transition: background 110ms ease, border-color 110ms ease;
+	}
+	.icon:hover {
+		background: var(--panel-2);
+	}
+	.logo-btn {
+		font-size: 18px;
+		margin-bottom: 2px;
+	}
+	.icon-list {
+		flex: 1;
+		min-height: 0;
+		width: 100%;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 2px;
+		overflow-y: auto;
+		overflow-x: hidden;
+	}
+	.dot-btn.sel {
+		background: var(--panel-2);
+		border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+	}
+	.demo-icon {
+		margin-top: auto;
+	}
+
+	/* ---- expanded header ---- */
 	.head {
 		display: flex;
 		align-items: center;
@@ -105,6 +235,27 @@
 		border-radius: 999px;
 		padding: 1px 8px;
 	}
+	.collapse {
+		background: transparent;
+		border: none;
+		color: var(--faint);
+		font-size: 15px;
+		line-height: 1;
+		padding: 2px 4px;
+		border-radius: 5px;
+		cursor: pointer;
+		transition: color 110ms ease, background 110ms ease;
+	}
+	.collapse:hover {
+		color: var(--text);
+		background: var(--panel-2);
+	}
+
+	.scroll {
+		flex: 1;
+		min-height: 0;
+		overflow-y: auto;
+	}
 	.empty {
 		padding: 18px 14px;
 		color: var(--muted);
@@ -127,9 +278,6 @@
 		list-style: none;
 		margin: 0;
 		padding: 6px;
-		overflow-y: auto;
-		flex: 1;
-		min-height: 0;
 	}
 	.row {
 		width: 100%;
@@ -161,6 +309,10 @@
 	.dot.on {
 		background: var(--ok);
 		box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 22%, transparent);
+	}
+	.dot.demo {
+		background: transparent;
+		border: 1px dashed var(--muted);
 	}
 	.body {
 		min-width: 0;
@@ -210,5 +362,23 @@
 	.pct {
 		font-size: 10px;
 		color: var(--faint);
+	}
+
+	/* ---- demo foot ---- */
+	.demo-foot {
+		flex: 0 0 auto;
+		padding: 6px;
+		border-top: 1px solid var(--line);
+	}
+	.badge {
+		flex: 0 0 auto;
+		font-size: 9px;
+		letter-spacing: 0.06em;
+		text-transform: uppercase;
+		color: var(--faint);
+		background: var(--panel-2);
+		border: 1px solid var(--line);
+		border-radius: 4px;
+		padding: 1px 5px;
 	}
 </style>
