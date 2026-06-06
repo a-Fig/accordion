@@ -5,11 +5,35 @@
  * different essence when folded: a tool_call keeps WHAT it did, a tool_result
  * keeps only its shape and a taste of WHAT it saw. No LLM here yet — these are
  * structured digests so behaviour is reproducible and debuggable.
+ *
+ * Every digest carries a leading `{#<id> FOLDED}` tag. This is the engine's
+ * source-of-truth string: it is what the GUI renders for a folded block, what
+ * `digestTokens` counts, AND (in live mode) the exact text the agent receives in
+ * place of the folded content. The agent reads the id from the tag and can call the
+ * `unfold` tool with it to pull the block back to full content. Keeping the tag here
+ * — not bolted on at the wire — guarantees the GUI shows precisely what the model
+ * sees and the saved-tokens figure includes the tag's real cost.
  */
 import type { Block } from "./types";
 import { estTokens, clip, firstLine, BLOCK_OVERHEAD } from "./tokens";
 
+/**
+ * The folded-block marker the agent sees and passes back to `unfold`. The id is the
+ * durable block id (`a:…` / `r:…` / `u:…` / `s:…`); the skill `accordion-context-folding`
+ * teaches agents to parse it. One definition so the engine, the live link, and the
+ * skill never drift.
+ */
+export function foldTag(id: string): string {
+	return `{#${id} FOLDED}`;
+}
+
+/** The full folded representation: the `{#<id> FOLDED}` tag followed by the per-kind body. */
 export function digest(b: Block): string {
+	return `${foldTag(b.id)} ${digestBody(b)}`;
+}
+
+/** The per-kind essence kept when a block is folded (without the tag). */
+function digestBody(b: Block): string {
 	switch (b.kind) {
 		case "user":
 			return "“" + clip(b.text, 100) + "”";

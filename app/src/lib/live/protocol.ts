@@ -26,7 +26,7 @@
  */
 
 /** Bump on any breaking change to the message shapes below. */
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 
 /**
  * Browser dev-loop fallback port only. In the desktop ("pull") model each pi
@@ -62,7 +62,16 @@ export interface WireBlock {
 	isError?: boolean;
 }
 
-/** One fold instruction: replace block `id`'s content with `digestText`. */
+/**
+ * One fold instruction: replace block `id`'s content with `digestText`.
+ *
+ * Since protocol v3, `digestText` carries a leading `{#<id> FOLDED}` tag so the live
+ * agent can SEE that this content was compacted (not lost) and ask for it back via the
+ * `unfold` tool, passing that same id. The tag is produced by the ENGINE's `digest()`
+ * (so the GUI renders, and token-accounts, the exact string the agent receives — one
+ * source of truth); the GUI's `computeFoldOps` sends `store.digestOf(b)` verbatim and
+ * the extension substitutes it opaquely.
+ */
 export interface FoldOp {
 	id: string;
 	digestText: string;
@@ -109,7 +118,27 @@ export interface StreamMessage {
 	contentIndex: number;
 }
 
-export type ServerMessage = HelloMessage | SyncMessage | StreamMessage;
+/**
+ * Sent by the extension when the live AGENT calls the `unfold` tool, asking the GUI
+ * to restore folded blocks to full content (protocol v3 — "the agent can pull its
+ * own context back"). `ids` are the durable block ids the agent read from the
+ * `{#<id> FOLDED}` tags in its context. The GUI resolves each id to a block and marks
+ * it unfolded (sticky; provenance "agent"), then replies via `unfoldResult`
+ * (correlated by `reqId`).
+ *
+ * This is a STATE change only: the restored content reaches the model at the NEXT
+ * `context` hook (the unfolded block simply no longer appears in the fold plan), so the
+ * agent's past context changes on its next turn. We deliberately do NOT echo the full
+ * content back in the tool result for now — testing whether the past-context change
+ * alone suffices (echoing is a documented fallback).
+ */
+export interface UnfoldRequestMessage {
+	type: "unfoldRequest";
+	reqId: number;
+	ids: string[];
+}
+
+export type ServerMessage = HelloMessage | SyncMessage | StreamMessage | UnfoldRequestMessage;
 
 // ── Client → server (GUI → extension) ────────────────────────────────────────
 
@@ -126,14 +155,41 @@ export interface AttachMessage {
 	protocolVersion: number;
 }
 
-export type ClientMessage = PlanMessage | AttachMessage;
+/** One block restored by an `unfoldResult`. */
+export interface UnfoldRestored {
+	/** The durable block id the agent referenced (now held unfolded). */
+	id: string;
+	kind: WireBlock["kind"];
+	/** Short human label for a useful confirmation, e.g. "tool_result read_file · turn 12". */
+	label: string;
+}
+
+/**
+ * The GUI's reply to an `unfoldRequest` (protocol v3). `restored` lists the blocks
+ * that resolved and are now held unfolded (NO content — the content returns to the
+ * agent at its next `context` hook); `missing` lists ids the GUI could not resolve
+ * (unknown / not in this session). The extension formats this into the `unfold`
+ * tool's confirmation for the agent.
+ */
+export interface UnfoldResultMessage {
+	type: "unfoldResult";
+	reqId: number;
+	restored: UnfoldRestored[];
+	missing: string[];
+}
+
+export type ClientMessage = PlanMessage | AttachMessage | UnfoldResultMessage;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 export function isServerMessage(v: unknown): v is ServerMessage {
-	return !!v && typeof v === "object" && "type" in v && ((v as any).type === "hello" || (v as any).type === "sync" || (v as any).type === "stream");
+	if (!v || typeof v !== "object" || !("type" in v)) return false;
+	const t = (v as any).type;
+	return t === "hello" || t === "sync" || t === "stream" || t === "unfoldRequest";
 }
 
 export function isClientMessage(v: unknown): v is ClientMessage {
-	return !!v && typeof v === "object" && "type" in v && ((v as any).type === "plan" || (v as any).type === "attach");
+	if (!v || typeof v !== "object" || !("type" in v)) return false;
+	const t = (v as any).type;
+	return t === "plan" || t === "attach" || t === "unfoldResult";
 }

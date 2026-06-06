@@ -13,9 +13,9 @@
 import { session } from "../session.svelte";
 import { AccordionStore } from "../engine/store.svelte";
 import { wireToBlock } from "./mapping";
-import { computeFoldOps } from "./plan";
+import { computeFoldOps, resolveUnfold } from "./plan";
 import { folding } from "./folding.svelte";
-import { DEFAULT_PORT, PROTOCOL_VERSION, isServerMessage, type ServerMessage, type PlanMessage, type FoldOp } from "./protocol";
+import { DEFAULT_PORT, PROTOCOL_VERSION, isServerMessage, type ServerMessage, type PlanMessage, type FoldOp, type UnfoldResultMessage } from "./protocol";
 import { ghostStart, ghostEnd, ghostClearAll } from "./ghostState.svelte";
 
 let socket: WebSocket | null = null;
@@ -116,6 +116,23 @@ export function connectLive(port: number = DEFAULT_PORT): void {
 				ws.send(JSON.stringify(reply));
 			} catch {
 				/* socket gone — extension will time out and pass through */
+			}
+		} else if (msg.type === "unfoldRequest") {
+			// The live agent asked (via the `unfold` tool) to restore folded blocks it saw
+			// tagged `{#<id> FOLDED}`. Resolve each id and hold it unfolded with provenance
+			// "agent" — so it shows in the activity log as agent-initiated and the human
+			// stays the source of truth (they can re-fold it). This is a STATE change only:
+			// the restored content reaches the agent at its NEXT context hook (the block
+			// drops out of the fold plan). Unfolding only ever shows the model MORE of its
+			// own original context, so there is no provider-safety risk to guard here.
+			const { restored, missing } = session.store
+				? resolveUnfold(session.store, msg.ids)
+				: { restored: [], missing: msg.ids };
+			const reply: UnfoldResultMessage = { type: "unfoldResult", reqId: msg.reqId, restored, missing };
+			try {
+				ws.send(JSON.stringify(reply));
+			} catch {
+				/* socket gone — the tool will time out and tell the agent to retry */
 			}
 		} else if (msg.type === "stream") {
 			// Ghost lifecycle — presentation only; ghosts NEVER enter session.store.blocks.

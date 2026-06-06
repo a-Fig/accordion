@@ -30,11 +30,13 @@ import { WebSocketServer, type WebSocket } from "ws";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as fs from "node:fs";
+import { fileURLToPath } from "node:url";
+import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 
 import { linearize, applyPlan, type PiMessage } from "../app/src/lib/live/mapping";
-import { DEFAULT_PORT, PROTOCOL_VERSION, type FoldOp, type ServerMessage, type StreamMessage } from "../app/src/lib/live/protocol";
+import { DEFAULT_PORT, PROTOCOL_VERSION, type FoldOp, type ServerMessage, type StreamMessage, type UnfoldRequestMessage, type UnfoldResultMessage } from "../app/src/lib/live/protocol";
 import {
 	REGISTRY_PROTOCOL,
 	REGISTRY_DIR,
@@ -46,6 +48,9 @@ import {
 } from "../app/src/lib/live/registry";
 
 const REQUEST_TIMEOUT_MS = 250; // how long pi waits on the GUI before passing through
+// Unfold replies arrive during the agent's OWN turn (not on the model-call critical
+// path), so a generous wait is fine — the user's next message isn't blocked.
+const UNFOLD_TIMEOUT_MS = 2000;
 
 // Base dir is overridable for tests (smoke.mjs) so they don't touch the real home.
 const HOME = process.env.ACCORDION_HOME || os.homedir();
@@ -63,6 +68,9 @@ export default function accordionLive(pi: ExtensionAPI): void {
 	let reqSeq = 0;
 	let epoch = 0; // bumped on every new GUI connection; invalidates in-flight requests
 	const pending = new Map<number, (ops: FoldOp[]) => void>();
+	// Unfold requests: keyed by reqId, resolved when the GUI replies (or null on flush).
+	let unfoldSeq = 0;
+	const pendingUnfold = new Map<number, (res: { restored: Array<{ id: string; kind: string; label: string }>; missing: string[] } | null) => void>();
 	// Last messages snapshot seen at `context` or `agent_end`. Used by the
 	// `message_end` committed-streaming path to build a full array for linearize
 	// without losing global turn/order numbering (see Phase 3 in ADR 0003).
@@ -95,6 +103,10 @@ export default function accordionLive(pi: ExtensionAPI): void {
 	function flushPending(): void {
 		for (const resolve of pending.values()) resolve([]);
 		pending.clear();
+		// In-flight unfold requests (if any) must also be resolved. null signals "not
+		// attached" — the tool returns a safe "did not respond" message to the agent.
+		for (const resolve of pendingUnfold.values()) resolve(null);
+		pendingUnfold.clear();
 	}
 
 	function send(ws: WebSocket, m: ServerMessage): void {
@@ -286,6 +298,16 @@ export default function accordionLive(pi: ExtensionAPI): void {
 						resolve(Array.isArray(msg.ops) ? msg.ops : []);
 					}
 				}
+				if (msg?.type === "unfoldResult" && typeof msg.reqId === "number") {
+					const resolve = pendingUnfold.get(msg.reqId);
+					if (resolve) {
+						pendingUnfold.delete(msg.reqId);
+						resolve({
+							restored: Array.isArray(msg.restored) ? msg.restored : [],
+							missing: Array.isArray(msg.missing) ? msg.missing : [],
+						});
+					}
+				}
 			});
 			const drop = () => {
 				if (client === ws) client = null;
@@ -315,6 +337,22 @@ export default function accordionLive(pi: ExtensionAPI): void {
 				resolve(ops);
 			});
 			send(ws, { type: "sync", reqId, full, blocks });
+		});
+	}
+
+	/** Ask the GUI to restore a set of folded blocks; mirrors requestPlan in structure. */
+	function requestUnfold(ids: string[]): Promise<{ restored: Array<{ id: string; kind: string; label: string }>; missing: string[] } | null> {
+		return new Promise((resolve) => {
+			const ws = client;
+			if (!ws || ws.readyState !== 1) return resolve(null);
+			const reqId = ++unfoldSeq;
+			// Generous timeout: this runs during the agent's own turn, not on the critical
+			// model-call path, so 2 s gives the GUI time to process and reply.
+			const timer = setTimeout(() => {
+				if (pendingUnfold.has(reqId)) { pendingUnfold.delete(reqId); resolve(null); }
+			}, UNFOLD_TIMEOUT_MS);
+			pendingUnfold.set(reqId, (res) => { clearTimeout(timer); resolve(res); });
+			send(ws, { type: "unfoldRequest", reqId, ids } as UnfoldRequestMessage);
 		});
 	}
 
@@ -579,6 +617,66 @@ export default function accordionLive(pi: ExtensionAPI): void {
 			];
 			ctx.ui.notify(lines.join("\n"), "info");
 		},
+	});
+
+	// ── unfold tool: let the live agent restore its own folded context ─────────
+	// "GUI drives, extension is thin": the extension makes no unfold decisions. It
+	// relays the agent's request to the GUI and reports back what the GUI scheduled.
+	// The actual content restoration happens at the NEXT `context` hook — the unfolded
+	// block simply doesn't appear in the fold plan — so the agent's past context changes
+	// on its next turn. We don't echo the full content back: the past-context change
+	// is the primary mechanism; echoing is a documented fallback if needed.
+	pi.registerTool({
+		name: "unfold",
+		label: "Unfold Context",
+		description:
+			"Restore folded context. Accordion (the live context manager attached to this session) may replace older parts of YOUR OWN context with a short summary tagged like `{#a:resp-abc:p0 FOLDED}`. The original content is preserved, not lost. Call this tool with the id(s) from those tags to restore the full content. The restored content reappears in your context on your NEXT turn (your past context changes); this call confirms what was scheduled. Only unfold what you actually need — it costs tokens.",
+		promptSnippet: "unfold(ids) — restore context folded by Accordion (blocks tagged {#<id> FOLDED}).",
+		promptGuidelines: [
+			"When you see a `{#<id> FOLDED}` marker in your context, that block was compacted by Accordion to save tokens — the full content is preserved, not lost. If the summary is not enough for your current task, call `unfold` with the id(s) from the marker(s) to restore them; the content returns on your next turn.",
+		],
+		parameters: Type.Object({
+			ids: Type.Array(Type.String({ description: "A durable block id copied from a {#<id> FOLDED} tag, e.g. a:resp-abc:p0" }), {
+				description: "One or more block ids to restore to full content.",
+			}),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+			const ids = Array.isArray(params.ids) ? params.ids.filter((s) => typeof s === "string" && s.trim()).map((s) => s.trim()) : [];
+			if (!ids.length) {
+				return { content: [{ type: "text", text: 'No block ids given. Pass the id(s) from a {#<id> FOLDED} tag, e.g. unfold({ids:["a:resp-abc:p0"]}).' }] };
+			}
+			if (!attached()) {
+				return { content: [{ type: "text", text: "Accordion isn't attached, so nothing in your context is folded right now — it is already full." }] };
+			}
+			const res = await requestUnfold(ids);
+			if (res === null) {
+				return { content: [{ type: "text", text: "Accordion did not respond. Folded content restores automatically if it detaches; otherwise try again." }], isError: true };
+			}
+			const lines: string[] = [];
+			if (res.restored.length) {
+				lines.push(`Unfolded ${res.restored.length} block(s); full content returns on your next turn:`);
+				for (const r of res.restored) lines.push(`  • ${r.label} (${r.id})`);
+			}
+			if (res.missing.length) {
+				lines.push(`Not found (already full, or not in this session's context): ${res.missing.join(", ")}`);
+			}
+			if (!lines.length) lines.push("Nothing to unfold.");
+			return { content: [{ type: "text", text: lines.join("\n") }], details: res };
+		},
+	});
+
+	// ── skill discovery: expose the unfold skill to pi's skill loader ──────────
+	// The skill directory is written by a separate agent; we just point pi at it.
+	// Best-effort: a missing directory or any unexpected error must NEVER crash a session.
+	pi.on("resources_discover", () => {
+		try {
+			const here = path.dirname(fileURLToPath(import.meta.url));
+			const skillDir = path.join(here, "skills", "accordion-context-folding");
+			if (fs.existsSync(skillDir)) return { skillPaths: [skillDir] };
+		} catch {
+			/* best-effort — never break a session over skill discovery */
+		}
+		return {};
 	});
 }
 

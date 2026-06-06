@@ -86,6 +86,18 @@ model call altered. Armed, `computePlan` mirrors the engine's fold decisions int
 via `computeFoldOps` (`plan.ts`), guarded so only **durable-id** `text`/`thinking`/
 `tool_result` blocks are ever folded (`isDurableId`; `applyPlan` enforces the same).
 
+**M3 — agent self-unfold ([ADR 0005](docs/adr/0005-agent-unfold.md)):** the engine's
+`digest()` now prefixes every folded block's digest with `{#<id> FOLDED}` (the durable
+block id from ADR 0003). This is the single source of truth: the GUI renders the exact
+string the agent receives, and token accounting includes the tag — no separate wire
+representation, no drift. The extension registers an `unfold` pi tool: the agent calls
+`unfold({ids: [...]})` with id(s) copied from the tags, the GUI marks those blocks
+unfolded (sticky, provenance `"agent"`), and the full content returns on the agent's
+**next turn** (state-change-only; no content echo in the tool result this cut). Agent
+unfolds are visible in the activity log; the human can re-fold them. The skill
+`accordion-context-folding` is auto-exposed via `resources_discover` so the agent knows
+what the tags mean and how to call the tool — no manual skill loading required.
+
 **Known characteristic:** the view syncs on pi's `context` hook, which fires *before*
 each model call — so an assistant reply is only seen at the *next* model call (i.e. the
 next user turn for a plain reply; immediately for tool-using turns). Closing that gap
