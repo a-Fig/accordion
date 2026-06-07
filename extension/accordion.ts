@@ -69,6 +69,8 @@ export default function accordionLive(pi: ExtensionAPI): void {
 	let epoch = 0; // bumped on every new GUI connection; invalidates in-flight requests
 	const pending = new Map<number, (ops: FoldOp[]) => void>();
 	// Unfold requests: keyed by reqId, resolved when the GUI replies (or null on flush).
+	// Deliberately NOT reset on reconnect (unlike reqSeq): a late reply from a superseded
+	// GUI can never alias a fresh request's reqId, and flushPending() drains the map anyway.
 	let unfoldSeq = 0;
 	const pendingUnfold = new Map<number, (res: { restored: Array<{ code: string; kind: string; label: string }>; missing: string[] } | null) => void>();
 	// Last messages snapshot seen at `context` or `agent_end`. Used by the
@@ -630,22 +632,22 @@ export default function accordionLive(pi: ExtensionAPI): void {
 		name: "unfold",
 		label: "Unfold Context",
 		description:
-			"Restore folded context. Accordion (the live context manager attached to this session) may replace older parts of YOUR OWN context with a short summary tagged like `{#3f9a FOLDED}`. The original content is preserved, not lost. Call this tool with the short code(s) from those tags to restore the full content. The restored content reappears in your context on your NEXT turn (your past context changes); this call confirms what was scheduled. Only unfold what you actually need — it costs tokens.",
+			"Restore folded context. Accordion (the live context manager attached to this session) may replace older parts of YOUR OWN context with a short summary tagged like `{#3f9a2c FOLDED}`. The original content is preserved, not lost. Call this tool with the short code(s) from those tags to restore the full content. The restored content reappears in your context on your NEXT turn (your past context changes); this call confirms what was scheduled. Only unfold what you actually need — it costs tokens.",
 		promptSnippet: "unfold(codes) — restore context folded by Accordion (blocks tagged {#<code> FOLDED}).",
 		promptGuidelines: [
-			"When you see a `{#<code> FOLDED}` marker in your context (e.g. `{#3f9a FOLDED}`), that block was compacted by Accordion to save tokens — the full content is preserved, not lost. If the summary is not enough for your current task, call `unfold` with the code(s) from the marker(s) to restore them; the content returns on your next turn.",
+			"When you see a `{#<code> FOLDED}` marker in your context (e.g. `{#3f9a2c FOLDED}`), that block was compacted by Accordion to save tokens — the full content is preserved, not lost. If the summary is not enough for your current task, call `unfold` with the code(s) from the marker(s) to restore them; the content returns on your next turn.",
 		],
 		parameters: Type.Object({
-			ids: Type.Array(Type.Union([Type.String(), Type.Number()]), {
-				description: "One or more fold codes copied from {#<code> FOLDED} tags (e.g. \"3f9a\"). Strings; a purely numeric code may be passed as a number.",
+			codes: Type.Array(Type.String({ description: 'A fold code copied verbatim from a {#<code> FOLDED} tag, e.g. "3f9a2c". Always a string (codes may have leading zeros).' }), {
+				description: "One or more fold codes to restore to full content.",
 			}),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
-			const codes = Array.isArray(params.ids)
-				? params.ids.map((s) => String(s).trim()).filter((s) => s.length > 0)
+			const codes = Array.isArray(params.codes)
+				? params.codes.map((s) => String(s).trim()).filter((s) => s.length > 0)
 				: [];
 			if (!codes.length) {
-				return { content: [{ type: "text", text: 'No fold codes given. Pass the code(s) from a {#<code> FOLDED} tag, e.g. unfold({ids:["3f9a"]}).' }] };
+				return { content: [{ type: "text", text: 'No fold codes given. Pass the code(s) from a {#<code> FOLDED} tag, e.g. unfold({codes:["3f9a2c"]}).' }] };
 			}
 			if (!attached()) {
 				return { content: [{ type: "text", text: "Accordion isn't attached, so nothing in your context is folded right now — it is already full." }] };
@@ -657,12 +659,12 @@ export default function accordionLive(pi: ExtensionAPI): void {
 			const lines: string[] = [];
 			if (res.restored.length) {
 				lines.push(`Unfolded ${res.restored.length} block(s); full content returns on your next turn:`);
-				for (const r of res.restored) lines.push(`  • ${r.label} (#${r.code})`);
+				for (const r of res.restored) lines.push(`  • ${r?.label ?? "block"} (#${r?.code ?? "?"})`);
 			}
 			if (res.missing.length) {
 				lines.push(`No folded block for: ${res.missing.map((c) => "#" + c).join(", ")} (already full, or not in this session's context).`);
 			}
-			if (!lines.length) lines.push("Nothing to unfold.");
+			// Every input code resolves to restored or missing, so `lines` is always non-empty.
 			return { content: [{ type: "text", text: lines.join("\n") }], details: res };
 		},
 	});

@@ -27,9 +27,9 @@ function blk(o: Partial<Block> & { id: string; kind: BlockKind }): Block {
 }
 
 describe("foldCode", () => {
-	it("is a short 4-char base36 code", () => {
-		expect(foldCode("a:f2965ed9-323d-4c24-b489-d93e8c55c59e:p0")).toMatch(/^[0-9a-z]{4}$/);
-		expect(foldCode("u:1780799122422")).toMatch(/^[0-9a-z]{4}$/);
+	it("is a short 6-char base36 code", () => {
+		expect(foldCode("a:f2965ed9-323d-4c24-b489-d93e8c55c59e:p0")).toMatch(/^[0-9a-z]{6}$/);
+		expect(foldCode("u:1780799122422")).toMatch(/^[0-9a-z]{6}$/);
 	});
 	it("is deterministic and id-specific (same id → same code, different id → usually different)", () => {
 		const a = foldCode("a:resp-abc:p0");
@@ -50,13 +50,19 @@ describe("foldTag", () => {
 });
 
 describe("digest tag", () => {
-	const kinds: BlockKind[] = ["user", "text", "thinking", "tool_call", "tool_result"];
-
-	it("prepends the {#<code> FOLDED} tag for every kind", () => {
-		for (const kind of kinds) {
+	it("prepends the {#<code> FOLDED} tag for FOLDABLE kinds (text/thinking/tool_result)", () => {
+		for (const kind of ["text", "thinking", "tool_result"] as BlockKind[]) {
 			const id = `a:${kind}:p0`;
 			const b = blk({ id, kind, toolName: "grep", callId: "c1" });
 			expect(digest(b).startsWith(`{#${foldCode(id)} FOLDED} `)).toBe(true);
+		}
+	});
+
+	it("does NOT tag user / tool_call (they are never sent folded → no handle to show)", () => {
+		for (const kind of ["user", "tool_call"] as BlockKind[]) {
+			const id = `a:${kind}:p0`;
+			const b = blk({ id, kind, toolName: "grep", callId: "c1" });
+			expect(digest(b)).not.toContain("FOLDED");
 		}
 	});
 

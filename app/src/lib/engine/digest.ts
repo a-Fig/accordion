@@ -21,14 +21,25 @@
  * (~1.68M) keeps collisions rare; the rare collision is handled by `resolveUnfold`
  * unfolding every folded block that shares the code (cheap and harmless).
  */
-import type { Block } from "./types";
+import type { Block, BlockKind } from "./types";
 import { estTokens, clip, firstLine, BLOCK_OVERHEAD } from "./tokens";
 
 /**
+ * Kinds that the live link can actually fold and send to the agent (mirrored by
+ * `computeFoldOps` / `applyPlan`). A `tool_call` is never folded (it would orphan its
+ * result) and a `user` block (intent) is never folded. ONLY these kinds get a
+ * `{#code FOLDED}` tag — so the agent is never shown a handle for a block it can't
+ * actually unfold. Defined here (the engine) so the live layer imports one definition.
+ */
+export const FOLDABLE_KINDS: ReadonlySet<BlockKind> = new Set<BlockKind>(["text", "thinking", "tool_result"]);
+
+/**
  * Short, stable handle for a block, derived purely from its durable id (FNV-1a → base36,
- * 4 chars). Stateless and deterministic so the engine, the live link, and the
- * `accordion-context-folding` skill never drift. Not collision-free by construction —
- * `resolveUnfold` resolves a code to ALL folded blocks that carry it.
+ * 6 chars). Stateless and deterministic so the engine, the live link, and the
+ * `accordion-context-folding` skill never drift. Not collision-free by construction, but
+ * a 6-char base36 space (~2.2B) makes a collision vanishingly rare even across a
+ * thousand-block session (~0.02%); the rare collision is handled by `resolveUnfold`
+ * restoring ALL folded blocks that carry the code.
  */
 export function foldCode(id: string): string {
 	let h = 0x811c9dc5; // FNV-1a 32-bit
@@ -36,17 +47,23 @@ export function foldCode(id: string): string {
 		h ^= id.charCodeAt(i);
 		h = Math.imul(h, 0x01000193);
 	}
-	return (h >>> 0).toString(36).padStart(4, "0").slice(-4);
+	return (h >>> 0).toString(36).padStart(6, "0").slice(-6);
 }
 
-/** The folded-block marker the agent sees and passes back to `unfold`, e.g. `{#3f9a FOLDED}`. */
+/** The folded-block marker the agent sees and passes back to `unfold`, e.g. `{#3f9a2c FOLDED}`. */
 export function foldTag(id: string): string {
 	return `{#${foldCode(id)} FOLDED}`;
 }
 
-/** The full folded representation: the `{#<code> FOLDED}` tag followed by the per-kind body. */
+/**
+ * The full folded representation. Foldable kinds get the `{#<code> FOLDED}` tag followed
+ * by the per-kind body; non-foldable kinds (user / tool_call) get the body alone — they
+ * are never sent folded to the agent, so tagging them would show a handle the agent can
+ * never use and make the GUI render diverge from what the model actually sees.
+ */
 export function digest(b: Block): string {
-	return `${foldTag(b.id)} ${digestBody(b)}`;
+	const body = digestBody(b);
+	return FOLDABLE_KINDS.has(b.kind) ? `${foldTag(b.id)} ${body}` : body;
 }
 
 /** The per-kind essence kept when a block is folded (without the tag). */

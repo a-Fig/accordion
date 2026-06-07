@@ -26,10 +26,7 @@ import type { AccordionStore } from "../engine/store.svelte";
 import type { Block } from "../engine/types";
 import type { FoldOp, UnfoldRestored } from "./protocol";
 import { isDurableId } from "./mapping";
-import { foldCode } from "../engine/digest";
-
-/** Kinds that are safe to fold. Never `user` (intent) or `tool_call` (orphans result). */
-const FOLDABLE_KINDS = new Set(["text", "thinking", "tool_result"]);
+import { foldCode, FOLDABLE_KINDS } from "../engine/digest";
 
 /**
  * Compute the fold plan for the current store state: one `FoldOp` per block that
@@ -79,7 +76,11 @@ export function resolveUnfold(store: AccordionStore, codes: string[]): { restore
 	const restored: UnfoldRestored[] = [];
 	const missing: string[] = [];
 	for (const code of codes) {
-		const matches = store.blocks.filter((b) => store.isFolded(b) && foldCode(b.id) === code);
+		// Mirror EXACTLY the set `computeFoldOps` sends: folded, a foldable kind, and a
+		// durable id. So the agent can only ever restore something it was actually shown a
+		// `{#code FOLDED}` tag for — never a human pin, a locally-folded user/tool_call, or
+		// a positional-id block that was never on the wire.
+		const matches = store.blocks.filter((b) => store.isFolded(b) && FOLDABLE_KINDS.has(b.kind) && isDurableId(b.id) && foldCode(b.id) === code);
 		if (!matches.length) {
 			missing.push(code);
 			continue;

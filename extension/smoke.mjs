@@ -739,11 +739,11 @@ if (!unfoldTool) {
 	fails.push("unfold tool was not registered");
 } else {
 	// no codes → guidance, no round-trip
-	const r0 = await unfoldTool.execute("tc0", { ids: [] }, undefined, undefined, ctx);
+	const r0 = await unfoldTool.execute("tc0", { codes: [] }, undefined, undefined, ctx);
 	if (!r0?.content?.[0]?.text?.includes("No fold codes")) fails.push("unfold([]) did not return the no-codes guidance");
 
 	// not attached (no GUI connected here) → safe message, no hang
-	const r1 = await unfoldTool.execute("tc1", { ids: ["3f9a"] }, undefined, undefined, ctx);
+	const r1 = await unfoldTool.execute("tc1", { codes: ["3f9a2c"] }, undefined, undefined, ctx);
 	if (!r1?.content?.[0]?.text?.includes("isn't attached")) fails.push("unfold while detached did not return the not-attached message");
 
 	// attached round-trip: connect a GUI that answers unfoldRequest
@@ -774,15 +774,14 @@ if (!unfoldTool) {
 			wsu.send(JSON.stringify({ type: "plan", reqId: m.reqId, ops: [] }));
 		}
 	});
-	// also pass a numeric code (3133) to prove the tool coerces it to a string
-	const r2 = await unfoldTool.execute("tc2", { ids: ["3f9a", 3133] }, undefined, undefined, ctx);
+	const r2 = await unfoldTool.execute("tc2", { codes: ["3f9a2c", "00abcd"] }, undefined, undefined, ctx);
 	const txt = r2?.content?.[0]?.text ?? "";
 	if (!sawUnfoldReq) fails.push("unfold (attached) did not send an unfoldRequest to the GUI");
-	else if (!sawUnfoldReq.codes.includes("3f9a")) fails.push("unfoldRequest missing the requested code");
-	else if (!sawUnfoldReq.codes.includes("3133")) fails.push("unfold did not coerce a numeric code to a string");
+	else if (!sawUnfoldReq.codes.includes("3f9a2c")) fails.push("unfoldRequest missing the requested code");
+	else if (!sawUnfoldReq.codes.includes("00abcd")) fails.push("unfoldRequest dropped a leading-zero code");
 	if (!txt.includes("Unfolded 1 block")) fails.push("unfold tool result did not confirm the restored block");
-	if (!txt.includes("#3f9a")) fails.push("unfold tool result did not list the restored code");
-	if (!txt.includes("#3133")) fails.push("unfold tool result did not report the missing code");
+	if (!txt.includes("#3f9a2c")) fails.push("unfold tool result did not list the restored code");
+	if (!txt.includes("#00abcd")) fails.push("unfold tool result did not report the missing code");
 	await new Promise((resolve) => { wsu.on("close", resolve); wsu.close(); });
 }
 

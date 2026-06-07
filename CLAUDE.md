@@ -91,10 +91,11 @@ via `computeFoldOps` (`plan.ts`), guarded so only **durable-id** `text`/`thinkin
 `<code>` is a short stateless hash of the durable block id (`foldCode` — a raw id is a
 UUID/timestamp, too noisy to repeat). This is the single source of truth: the GUI renders
 the exact string the agent receives, and token accounting includes the tag — no separate
-wire representation, no drift. The extension registers an `unfold` pi tool: the agent
-calls `unfold({ids: [...]})` with code(s) copied from the tags, the GUI resolves each code
-to its folded block(s) (a rare hash collision restores all matches) and marks them
-unfolded (sticky, provenance `"agent"`), and the full content returns on the agent's
+wire representation, no drift (only foldable kinds — text/thinking/tool_result — are tagged,
+since only those are ever sent folded). The extension registers an `unfold` pi tool: the
+agent calls `unfold({codes: [...]})` with code(s) copied from the tags, the GUI resolves
+each code to its folded block(s) (a rare hash collision restores all matches) and marks
+them unfolded (sticky, provenance `"agent"`), and the full content returns on the agent's
 **next turn** (state-change-only; no content echo this cut). The agent can only unfold a
 block that is actually folded — it can't downgrade a human pin. Agent unfolds show in the
 activity log; the human can re-fold them. The skill `accordion-context-folding` is

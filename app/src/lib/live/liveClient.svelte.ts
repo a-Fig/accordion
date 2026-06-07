@@ -125,9 +125,12 @@ export function connectLive(port: number = DEFAULT_PORT): void {
 			// This is a STATE change only: the restored content reaches the agent at its NEXT
 			// context hook (the block drops out of the fold plan). Unfolding only ever shows
 			// the model MORE of its own original context, so there is no provider-safety risk.
-			const { restored, missing } = session.store
-				? resolveUnfold(session.store, msg.codes)
-				: { restored: [], missing: msg.codes };
+			const codes = Array.isArray(msg.codes) ? msg.codes : [];
+			// Only act while ARMED. Disarmed, the agent's real context is full (no tags were
+			// applied), so an unfold request is stale/meaningless — applying a sticky "agent"
+			// override then would silently leak a block from the budget on the next arm.
+			const { restored, missing } =
+				folding.enabled && session.store ? resolveUnfold(session.store, codes) : { restored: [], missing: codes };
 			const reply: UnfoldResultMessage = { type: "unfoldResult", reqId: msg.reqId, restored, missing };
 			try {
 				ws.send(JSON.stringify(reply));

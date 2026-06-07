@@ -56,7 +56,7 @@ estimate).
 
 ### 2. The handle is a short *hash* of the durable id — stateless, readable
 
-`<code>` is a 4-char base36 hash of the block's durable id (FNV-1a → base36, last 4
+`<code>` is a 6-char base36 hash of the block's durable id (FNV-1a → base36, last 6
 chars), computed by `foldCode(id)` in `digest.ts`. It is a **pure function of the id**:
 no counter, no per-session map, no reset wiring, and globally stable (the same block
 yields the same code in every session). `unfold` resolves a code back to the block(s)
@@ -68,12 +68,19 @@ characters of line-noise repeated on every folded block. Unusable. The hash keep
 single-source-of-truth property (still derived in `digest()`, still what the GUI shows
 and token-accounts) while being short and readable.
 
+The tag is added **only for foldable kinds** (text / thinking / tool_result — the set in
+`FOLDABLE_KINDS`). A `user` or `tool_call` block is never sent folded, so tagging it would
+show the agent a handle it could never use and make the GUI render diverge from the model
+view; those kinds get the bare digest body.
+
 **Collisions** are handled by resolution, not avoidance: `resolveUnfold` restores EVERY
-folded block whose code matches the requested one. A 4-char base36 space (~1.68M) makes
-collisions rare (birthday ≈1% even at ~200 folded blocks), and the consequence of one is
-merely that two blocks restore together — harmless, since unfolding only ever shows the
-model more of its own content. This keeps `foldCode` a pure function (no "codes already
-issued" registry).
+folded block whose code matches the requested one. The length was set to 6 chars (~2.2B
+space) after the first cut used 4 (~1.68M): at realistic session sizes the birthday
+probability of *some* collision is ~25% for 4 chars (≈982 blocks) but ~0.02% for 6 — two
+extra characters per tag for a ~1000× lower collision rate. Even when a collision does
+occur the consequence is benign (two blocks restore together — unfolding only ever shows
+the model more of its own content), so this stays a pure function with no "codes already
+issued" registry.
 
 **Rejected: the raw durable id as the handle.** Correct and absolutely stable, but the
 id is a UUID/timestamp — far too long and noisy to repeat on every folded block (tried
@@ -91,16 +98,20 @@ spreads uniformly across all id kinds and lets us tune the length.
 The Accordion extension registers a pi tool named `unfold`. Signature:
 
 ```
-unfold({ids: string[]})   // each entry is a fold code from a {#<code> FOLDED} tag
+unfold({codes: string[]})   // each entry is a fold code from a {#<code> FOLDED} tag
 ```
 
-The agent passes code(s) read from the `{#<code> FOLDED}` tags (a purely numeric code may
-be passed as a number; the tool coerces it). "GUI drives, extension is thin": the
-extension relays the request over the wire (`unfoldRequest{codes}`); the **GUI** resolves
-each code to its folded block(s) and marks them unfolded with provenance `"agent"` and
-override `"unfolded"` (sticky — protected from auto-refold), then replies
-(`unfoldResult`). The tool result is a confirmation of what was scheduled; it does NOT
-echo the full block content back in the tool result.
+The agent passes code(s) read from the `{#<code> FOLDED}` tags, as strings (codes can have
+leading zeros, so the schema is string-only — a numeric arg would drop a leading zero and
+silently miss). "GUI drives, extension is thin": the extension relays the request over the
+wire (`unfoldRequest{codes}`); the **GUI** resolves each code to its folded block(s) —
+matching only blocks that were actually sent folded (folded + foldable kind + durable id,
+mirroring `computeFoldOps`) — and marks them unfolded with provenance `"agent"` and
+override `"unfolded"` (sticky — protected from auto-refold), then replies (`unfoldResult`).
+The GUI only acts on an unfold request while folding is **armed**; disarmed, the agent's
+real context is full, so a stale request is answered as all-missing rather than applying a
+sticky override. The tool result is a confirmation of what was scheduled; it does NOT echo
+the full block content back.
 
 The restored content returns to the agent on its **next turn** via the normal mechanism:
 its past context changes (the block drops out of the fold plan), so the next `context`
@@ -170,6 +181,10 @@ the `hello` handshake.
 5. The `unfold` tool does not alter the message array mid-turn. Restoration happens at
    the next `context` hook, consistent with the protocol rule that message array changes
    only apply at `context` (ADR 0001).
+6. An unfold request only mutates state while folding is **armed** and only for blocks
+   that were actually folded (folded + foldable kind + durable id). A stale request — e.g.
+   sent after the human disarmed, or naming a pin / never-folded block — is answered as
+   all-missing and changes nothing. The agent can request, never force.
 
 ## Watch item: agent context regrowth
 
@@ -191,14 +206,20 @@ no automatic mitigation is included in this cut.
   skips blocks with `override: "unfolded"`. If the human wants them re-folded, they
   act in the GUI.
 
+**Deferred (review follow-ups):** `resolveUnfold` calls `store.unfold` per matched block,
+which runs a full `refold()` each time — O(M·N). Fine for realistic unfolds (1–2 codes)
+but a batch `unfold-many → single refold` is the optimization if large multi-code unfolds
+become common. (See also the §3 deferred same-turn echo and §4 only-when-armed injection.)
+
 ## Verification
 
-Extension `smoke.mjs`: the `unfold` round-trip (no-codes and detached guards, a numeric
-code coerced to a string, then an attached request → `unfoldRequest{codes}` → mock-GUI
+Extension `smoke.mjs`: the `unfold` round-trip (no-codes and detached guards, a
+leading-zero code preserved, then an attached request → `unfoldRequest{codes}` → mock-GUI
 `unfoldResult` → confirmation result) and `resources_discover` skill exposure. Unit tests
-(`vitest`): `foldCode` shape/determinism, the `{#<code> FOLDED}` tag, and tag-aware token
-accounting (`digest.test.ts`); the GUI's `resolveUnfold` (restores by code sticky/
-agent-provenance, **refuses a human-pinned or already-full block** → reports missing,
-**unfolds all blocks sharing a colliding code**, drops from the next fold plan) and the
-code-tagged `digestText` (`plan.test.ts`); the `isDurableId` guard (already covered). Full
-gate: `svelte-check` 0/0/0, `vitest` (66), `npm run build`, extension smoke.
+(`vitest`): `foldCode` shape/determinism, the `{#<code> FOLDED}` tag is added only for
+foldable kinds (not user/tool_call), and tag-aware token accounting (`digest.test.ts`); the
+GUI's `resolveUnfold` (restores by code sticky/agent-provenance, **refuses a human-pinned
+or already-full block** → reports missing, **unfolds all blocks sharing a colliding code**,
+drops from the next fold plan) and the code-tagged `digestText` (`plan.test.ts`); the
+`isDurableId` guard (already covered). Full gate: `svelte-check` 0/0/0, `vitest` (67),
+`npm run build`, extension smoke.
