@@ -23,11 +23,10 @@
  * Ops follow block order, matching the conversation's linear order.
  */
 import type { AccordionStore } from "../engine/store.svelte";
-import type { FoldOp } from "./protocol";
+import type { Block } from "../engine/types";
+import type { FoldOp, UnfoldRestored } from "./protocol";
 import { isDurableId } from "./mapping";
-
-/** Kinds that are safe to fold. Never `user` (intent) or `tool_call` (orphans result). */
-const FOLDABLE_KINDS = new Set(["text", "thinking", "tool_result"]);
+import { foldCode, FOLDABLE_KINDS } from "../engine/digest";
 
 /**
  * Compute the fold plan for the current store state: one `FoldOp` per block that
@@ -45,4 +44,51 @@ export function computeFoldOps(store: AccordionStore): FoldOp[] {
 		ops.push({ id: b.id, digestText });
 	}
 	return ops;
+}
+
+/** Short, human-readable label for an unfold confirmation (e.g. "tool_result read_file · turn 12"). */
+export function blockLabel(b: Block): string {
+	const where = b.turn > 0 ? `turn ${b.turn}` : "preamble";
+	return b.toolName ? `${b.kind} ${b.toolName} · ${where}` : `${b.kind} · ${where}`;
+}
+
+/**
+ * Resolve an agent `unfold` request against the live store (protocol v3). For each
+ * `code` the agent sent (read from a `{#<code> FOLDED}` tag), restore EVERY folded
+ * block carrying that code and record it; a code that matches no folded block is
+ * reported in `missing`.
+ *
+ * Why all matches: the code is a short hash of the durable id (see `foldCode`), so it
+ * can rarely collide. Restoring every folded block that shares the code is the cheap,
+ * stateless way to handle that — an extra restored block is harmless (it only shows the
+ * model more of its own content).
+ *
+ * Restoring uses `store.unfold(id, "agent")` — a sticky override (protected from
+ * auto-refold) with provenance "agent" so the activity log shows the agent pulled it
+ * back and the human stays the source of truth (free to re-fold it). Guarding on
+ * `isFolded` is the safety pillar: the agent can only restore what was actually folded,
+ * so it can never downgrade a human pin or flip an auto-managed block to a sticky
+ * agent-unfold. It can request, never force. This MUTATES the store; the restored
+ * content reaches the model at the next `context` hook (the block drops out of
+ * `computeFoldOps`). Pure of the wire — the caller sends the result.
+ */
+export function resolveUnfold(store: AccordionStore, codes: string[]): { restored: UnfoldRestored[]; missing: string[] } {
+	const restored: UnfoldRestored[] = [];
+	const missing: string[] = [];
+	for (const code of codes) {
+		// Mirror EXACTLY the set `computeFoldOps` sends: folded, a foldable kind, and a
+		// durable id. So the agent can only ever restore something it was actually shown a
+		// `{#code FOLDED}` tag for — never a human pin, a locally-folded user/tool_call, or
+		// a positional-id block that was never on the wire.
+		const matches = store.blocks.filter((b) => store.isFolded(b) && FOLDABLE_KINDS.has(b.kind) && isDurableId(b.id) && foldCode(b.id) === code);
+		if (!matches.length) {
+			missing.push(code);
+			continue;
+		}
+		for (const b of matches) {
+			store.unfold(b.id, "agent");
+			restored.push({ code, kind: b.kind, label: blockLabel(b) });
+		}
+	}
+	return { restored, missing };
 }

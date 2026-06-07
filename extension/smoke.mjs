@@ -44,10 +44,14 @@ function readOnlyEntry() {
 // ── mock pi ──────────────────────────────────────────────────────────────────
 const handlers = {};
 let accordionCmd = null;
+let unfoldTool = null; // captured registerTool def for the `unfold` tool (M3)
 const pi = {
 	on: (name, fn) => (handlers[name] = fn),
 	registerCommand: (name, def) => {
 		if (name === "accordion") accordionCmd = def.handler;
+	},
+	registerTool: (def) => {
+		if (def && def.name === "unfold") unfoldTool = def;
 	},
 	appendEntry: () => {},
 };
@@ -715,6 +719,72 @@ if (!posContextReturn || !posContextReturn.messages) {
 		fails.push("anchor-less path: empty-digest op altered a message — guard failed to refuse it");
 }
 
+// ── M3: unfold tool + skill discovery ────────────────────────────────────────
+// The agent can restore its own folded context. The `unfold` tool round-trips to the
+// GUI: it sends `unfoldRequest`, the GUI replies `unfoldResult`, and the tool returns
+// a confirmation (state-change-only — no content echo). Also assert the guards
+// (no-ids, not-attached) and that `resources_discover` exposes the standalone skill.
+
+// resources_discover must point pi at the standalone skill directory.
+if (handlers.resources_discover) {
+	const rd = await Promise.resolve(handlers.resources_discover({ type: "resources_discover", cwd: process.cwd(), reason: "startup" }, ctx));
+	const paths = (rd && Array.isArray(rd.skillPaths)) ? rd.skillPaths : [];
+	if (!paths.some((p) => p.endsWith(path.join("skills", "accordion-context-folding"))))
+		fails.push(`resources_discover did not expose the accordion-context-folding skill dir (got ${JSON.stringify(paths)})`);
+} else {
+	fails.push("resources_discover handler was not registered");
+}
+
+if (!unfoldTool) {
+	fails.push("unfold tool was not registered");
+} else {
+	// no codes → guidance, no round-trip
+	const r0 = await unfoldTool.execute("tc0", { codes: [] }, undefined, undefined, ctx);
+	if (!r0?.content?.[0]?.text?.includes("No fold codes")) fails.push("unfold([]) did not return the no-codes guidance");
+
+	// not attached (no GUI connected here) → safe message, no hang
+	const r1 = await unfoldTool.execute("tc1", { codes: ["3f9a2c"] }, undefined, undefined, ctx);
+	if (!r1?.content?.[0]?.text?.includes("isn't attached")) fails.push("unfold while detached did not return the not-attached message");
+
+	// attached round-trip: connect a GUI that answers unfoldRequest
+	let sawUnfoldReq = null;
+	const wsu = new WebSocket(`ws://127.0.0.1:${PORT}`);
+	await new Promise((resolve, reject) => {
+		const t = setTimeout(() => reject(new Error("unfold attach timed out")), 2000);
+		wsu.on("error", reject);
+		wsu.on("message", (data) => {
+			const m = JSON.parse(data.toString());
+			if (m.type === "hello") { clearTimeout(t); resolve(); }
+		});
+	});
+	wsu.removeAllListeners("message");
+	wsu.on("message", (data) => {
+		const m = JSON.parse(data.toString());
+		if (m.type === "unfoldRequest") {
+			sawUnfoldReq = m;
+			// restore the first code; report the rest missing
+			wsu.send(JSON.stringify({
+				type: "unfoldResult",
+				reqId: m.reqId,
+				restored: m.codes.slice(0, 1).map((code) => ({ code, kind: "tool_result", label: "tool_result grep · turn 3" })),
+				missing: m.codes.slice(1),
+			}));
+		} else if (m.type === "sync") {
+			// attach-flush / view syncs: answer with an empty plan so nothing hangs
+			wsu.send(JSON.stringify({ type: "plan", reqId: m.reqId, ops: [] }));
+		}
+	});
+	const r2 = await unfoldTool.execute("tc2", { codes: ["3f9a2c", "00abcd"] }, undefined, undefined, ctx);
+	const txt = r2?.content?.[0]?.text ?? "";
+	if (!sawUnfoldReq) fails.push("unfold (attached) did not send an unfoldRequest to the GUI");
+	else if (!sawUnfoldReq.codes.includes("3f9a2c")) fails.push("unfoldRequest missing the requested code");
+	else if (!sawUnfoldReq.codes.includes("00abcd")) fails.push("unfoldRequest dropped a leading-zero code");
+	if (!txt.includes("Unfolded 1 block")) fails.push("unfold tool result did not confirm the restored block");
+	if (!txt.includes("#3f9a2c")) fails.push("unfold tool result did not list the restored code");
+	if (!txt.includes("#00abcd")) fails.push("unfold tool result did not report the missing code");
+	await new Promise((resolve) => { wsu.on("close", resolve); wsu.close(); });
+}
+
 // ── assertions ───────────────────────────────────────────────────────────────
 if (!seen.hello) fails.push("never received hello");
 if (!seen.flushOnAttach) fails.push("GUI received no history flush on attach (would stay empty until first message — the bug)");
@@ -755,6 +825,7 @@ console.log(
 		`stream(start/end/abort) ✓  no-content-on-frame ✓  delta-dropped ✓  ` +
 		`message_end ghost-sweep ✓  agent_end ghost-sweep ✓  ` +
 			`resumed-session attach-flush ✓  getBranch fallback ✓  ` +
-				`anchor-less positional-id round-trip ✓  applyPlan guard (positional + empty-digest refused) ✓`,
+				`anchor-less positional-id round-trip ✓  applyPlan guard (positional + empty-digest refused) ✓  ` +
+					`unfold tool (no-ids / detached guards, attached round-trip) ✓  skill discovery ✓`,
 );
 process.exit(0);
