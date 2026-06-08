@@ -89,6 +89,11 @@ export function connectLive(port: number = DEFAULT_PORT): void {
 			session.error = "";
 			session.live = true;
 			session.filePath = null;
+			// A live pi session is steerable, never a read-only recording. Reset here —
+			// alongside the authoritative store rebuild — so the READ-ONLY badge can never
+			// stick when attaching after viewing a Claude Code transcript, regardless of
+			// which caller reached connectLive.
+			session.readOnly = false;
 				// Safety (review Q5b): every new live attach starts DISARMED - folding is
 				// opt-in per session, never silently carried from a previously armed agent.
 				folding.enabled = false;

@@ -15,11 +15,13 @@ export const session = $state<{
 	filePath: string | null;
 	error: string;
 	live: boolean;
+	readOnly: boolean;
 }>({
 	store: null,
 	filePath: null,
 	error: "",
 	live: false,
+	readOnly: false,
 });
 
 let _pollInterval: ReturnType<typeof setInterval> | null = null;
@@ -37,6 +39,7 @@ export async function loadSample() {
 		const text = await res.text();
 		session.store = new AccordionStore(parse(text));
 		session.filePath = null;
+		session.readOnly = false;
 		_expose();
 	} catch (e) {
 		session.error = e instanceof Error ? e.message : String(e);
@@ -86,7 +89,34 @@ export async function openFile() {
 		});
 		if (!selected || typeof selected !== "string") return;
 		await _load(selected, readTextFile);
+		session.readOnly = true;
 		_startPolling(selected, readTextFile);
+	} catch (e) {
+		session.error = e instanceof Error ? e.message : String(e);
+	}
+}
+
+/**
+ * Read a Claude Code transcript via the native command. The JS fs plugin's scope does
+ * NOT cover programmatic reads of ~/.claude/projects/** (only dialog-picked files), so
+ * the load + tail goes through Rust, which owns ~/.claude access and confines the path
+ * to the projects root.
+ */
+async function readClaudeSession(path: string): Promise<string> {
+	const { invoke } = await import("@tauri-apps/api/core");
+	return await invoke<string>("read_claude_session", { path });
+}
+
+/**
+ * Load a specific Claude Code transcript read-only and tail it for appends.
+ * Reuses the existing _load + _startPolling with a native (scope-safe) read function.
+ */
+export async function loadFilePath(path: string): Promise<void> {
+	session.error = "";
+	try {
+		await _load(path, readClaudeSession);
+		session.readOnly = true;
+		_startPolling(path, readClaudeSession);
 	} catch (e) {
 		session.error = e instanceof Error ? e.message : String(e);
 	}
