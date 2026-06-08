@@ -62,6 +62,10 @@ export function buildDisplay(
 		}
 		if (firstMember.get(b.id) === g) {
 			// Emit the group once, at its first member; the rest of its range is skipped below.
+			// NOTE: a member id absent from `blocks` is silently dropped here, so the group can
+			// render with fewer tiles than `memberIds`. Safe for the only caller (always the full
+			// `olderBlocks` slice, which covers every older block); a future caller passing a
+			// trimmed slice would lose member tiles without warning.
 			const members = g.memberIds.map((id) => byId.get(id)).filter((x): x is Block => !!x);
 			if (!g.folded) {
 				// UNFOLDED — members live. folded=false always wins over peek.

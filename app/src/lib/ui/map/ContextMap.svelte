@@ -340,8 +340,11 @@
 		const idEl = t.closest<HTMLElement>("[data-id]");
 		const groupEl = t.closest<HTMLElement>("[data-group]");
 		// A block click: a data-id element exists and is either outside any group
-		// container, or is INSIDE it (i.e. the groupEl contains the idEl — meaning
-		// the data-id is the more-specific descendant).
+		// container, or is INSIDE one (groupEl.contains(idEl) — the data-id is the
+		// more-specific descendant). The open band carries data-group, so a member
+		// tile's data-id sits inside it; the contains() check is what lets the member
+		// win over the band. A click on the band background (no data-id) falls through
+		// to the group below → toggle peek / collapse, never a dead no-op.
 		const isBlockClick = !!idEl && (!groupEl || groupEl.contains(idEl));
 		if (isBlockClick && idEl!.dataset.id) return { kind: "block", id: idEl!.dataset.id };
 		if (groupEl?.dataset.group) return { kind: "group", gid: groupEl.dataset.group };
@@ -371,7 +374,9 @@
 			// Selecting the group gives the Inspector context (its first member) and lights the
 			// parent tile's `.sel` highlight (keyed off member inclusion). This is pure selection,
 			// NOT a wire mutation.
-			if (grp && grp.memberIds[0] !== selectedId) onselect(grp.memberIds[0]);
+			// Length guard: createGroup enforces >= 2 members, so an empty group is an invariant
+			// violation — but read defensively so a bad state never sets selection to undefined.
+			if (grp && grp.memberIds.length > 0 && grp.memberIds[0] !== selectedId) onselect(grp.memberIds[0]);
 			// A FOLDED parent tile toggles PEEK (open-for-viewing, wire UNCHANGED). An UNFOLDED
 			// group's dull parent already has its own row buttons (Re-fold / Delete), so a plain
 			// click there is a no-op — unfolding/refolding is deliberate via those buttons only.
@@ -610,8 +615,11 @@
 									{@const live = seg.row.live}
 									<!-- OPEN GROUP — its own full-width row at natural height (NOT a grid track, so the
 									     band can't overflow/overlap the tiles). live=false → PEEK (dull preview, wire
-									     unchanged); live=true → UNFOLDED (members live). Accented left edge = one group. -->
-									<div class="group-band" class:live>
+									     unchanged); live=true → UNFOLDED (members live). Accented left edge = one group.
+									     data-group on the band itself: clicking the band background/padding resolves to
+									     the group (toggle peek / collapse), while a member tile's data-id still wins via
+									     groupEl.contains(idEl) in resolveHit — so no region of the band is a dead no-op. -->
+									<div class="group-band" class:live data-group={g.id}>
 										<div
 											class="cell face f{faceFor(store.groupLiveTokens(g))} group-tile group-tile-open"
 											class:sel={selectedId !== null && g.memberIds.includes(selectedId)}
@@ -1031,7 +1039,7 @@
 		100% { transform: scale(1); }
 	}
 	.cell.sel {
-		/* inset-only so paint-containment (content-visibility) never clips it */
+		/* inset-only: an outset ring would clip against neighbouring tiles in the dense grid */
 		box-shadow: inset 0 0 0 2px var(--accent), inset 0 0 0 3px rgba(0, 0, 0, 0.55);
 		filter: brightness(1.18);
 		z-index: 3;
