@@ -18,10 +18,15 @@ function blk(i: number, tokens: number): Block {
 		by: null,
 	};
 }
-function makeStore(n: number, tokens = 1000): AccordionStore {
+function makeStore(n: number, tokens?: number): AccordionStore;
+function makeStore(tokens: number[]): AccordionStore;
+function makeStore(nOrTokens: number | number[], tokens = 1000): AccordionStore {
+	const blocks = Array.isArray(nOrTokens)
+		? nOrTokens.map((tok, i) => blk(i, tok))
+		: Array.from({ length: nOrTokens }, (_, i) => blk(i, tokens));
 	const parsed: ParsedSession = {
 		meta: { format: "pi", title: "t", cwd: "", model: "" },
-		blocks: Array.from({ length: n }, (_, i) => blk(i, tokens)),
+		blocks,
 		lineCount: 0,
 		skipped: 0,
 	};
@@ -71,6 +76,38 @@ describe("protected working tail is never folded", () => {
 		expect(s.protectedFromIndex).toBe(0); // everything protected now
 		expect(s.isFolded(s.blocks[1])).toBe(false); // healed
 		expect(s.blocks[1].override).toBe(null);
+	});
+
+	it("caps whole-block overshoot at 25% instead of protecting a huge boundary block", () => {
+		const s = makeStore([1000, 25_000, 5000, 6000, 7000]);
+		s.setProtect(20_000); // cap = 25k
+
+		// Newest three blocks total 18k. Pulling in the next older 25k block would make
+		// the protected tail 43k, so it stays foldable even though the target is not met.
+		expect(s.protectedFromIndex).toBe(2);
+		expect(s.protectedTokens).toBe(18_000);
+		expect(s.isProtected(s.blocks[1])).toBe(false);
+		expect(s.isProtected(s.blocks[2])).toBe(true);
+	});
+
+	it("allows ordinary whole-block slack up to the 25% cap", () => {
+		const s = makeStore([1000, 7000, 6000, 12_000]);
+		s.setProtect(20_000); // cap = 25k
+
+		// 12k + 6k is under target; adding 7k reaches exactly the 25k cap, so it is
+		// accepted and becomes the first protected block.
+		expect(s.protectedFromIndex).toBe(1);
+		expect(s.protectedTokens).toBe(25_000);
+	});
+
+	it("still protects the newest block even when it alone exceeds the cap", () => {
+		const s = makeStore([1000, 1000, 40_000]);
+		s.setProtect(20_000); // cap = 25k, but newest block is indivisible
+
+		expect(s.protectedFromIndex).toBe(2);
+		expect(s.protectedTokens).toBe(40_000);
+		expect(s.isProtected(s.blocks[2])).toBe(true);
+		expect(s.isProtected(s.blocks[1])).toBe(false);
 	});
 });
 
