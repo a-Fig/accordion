@@ -238,12 +238,15 @@ export class AccordionStore {
 		if (!this.blocks.length) return 0;
 		const target = this.protectTokens;
 		const cap = target * PROTECT_OVERFLOW_CAP;
-		let sum = 0;
-		for (let i = this.blocks.length - 1; i >= 0; i--) {
+		// Always absorb the newest block unconditionally — it is indivisible and the
+		// protected tail must never be empty while a session has blocks.
+		let sum = this.blocks[this.blocks.length - 1].tokens;
+		if (sum >= target) return this.blocks.length - 1;
+		for (let i = this.blocks.length - 2; i >= 0; i--) {
 			const next = sum + this.blocks[i].tokens;
-			// The newest block is indivisible and always protected. For older blocks, stop
-			// before adding one that would push the protected tail beyond the overflow cap.
-			if (i < this.blocks.length - 1 && next > cap) return i + 1;
+			// Stop before adding an older block that would push the protected tail beyond
+			// the overflow cap.
+			if (next > cap) return i + 1;
 			sum = next;
 			if (sum >= target) return i;
 		}
