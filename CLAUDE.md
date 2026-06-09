@@ -14,8 +14,15 @@ the **Map** app, an abstraction-first view. In the desktop app it's a shell — 
 to a slim icon rail, plus a pinned **Demo session** that loads the bundled sample) + the
 session view:
 `MapHeader` (composition strip + budget) + `ContextMap` + `Inspector` (on-demand text
-panel). The old **Classic** view (summary/timeline of `BlockCard`s) was removed; its
-components (`ContextSummary` / `ContextTimeline` / `Timeline` / `BlockCard`) are gone.
+panel). `ContextMap` carries a **2-way segmented control: `Map` | `Transcript`** — **Map**
+is the abstraction (the uniform dice-square grid) and **Transcript** is the concretion (a
+readable, scrollable full-chat view: blocks as cards in conversation order, each with a
+kind-colored left spine and a role label — You / Assistant / Thinking / Tool call / Tool
+result; live blocks show full text, folded blocks show the exact `{#code FOLDED}` digest the
+agent sees; inline Fold/Unfold per card + double-click to fold, single click = inspect).
+The old **Classic** view (summary/timeline of `BlockCard`s) and the earlier 3-way
+**Grid / Turns / Chains** zoom switch were both removed; their components
+(`ContextSummary` / `ContextTimeline` / `Timeline` / `BlockCard`) and `chains.ts` are gone.
 
 The current pi extension is **`extension/accordion.ts`** (the live link — see below).
 `src/` (repo root) and `visualizer/` are the *older* pi-extension POC and the
@@ -47,7 +54,9 @@ standalone HTML visualizer — not the focus; touch only if asked. Don't confuse
     candidates from blocks with `i < protectedFromIndex` — i.e. older than the tail. Manual
     `fold()` is also refused in the protected tail, and a folded block that later becomes
     protected heals back to live; `pin()` remains allowed because it keeps content open.
-    `setProtect(n)` resizes the tail and re-folds — wired to a header slider (0–60k).
+    `setProtect(n)` resizes the tail and re-folds — wired to an on-bar draggable handle
+    on the composition strip (0–60k, step 2k; the real refold is deferred to pointer-release
+    so dragging doesn't re-fold continuously).
 - `tokens.ts` (chars/4 estimate) · `digest.ts` (what a kind collapses to when folded).
 
 Folding is **content substitution, never removal** — provider-safe and fully reversible.
@@ -133,8 +142,8 @@ next user turn for a plain reply; immediately for tool-using turns). Closing tha
 - In the **Map Grid**: every block is the **same-size square**, laid out in strict
   conversation order (uniform size ⇒ no reflow holes ⇒ linearity is free). Token
   **weight is read as a dice face 1–6** (more pips = heavier block). Current
-  thresholds in `ContextMap.svelte → faceFor()`: ≥500→2, ≥1500→3, ≥5000→4, ≥10000→5,
-  ≥50000→6, else 1. Arrow keys traverse blocks (←/→ = prev/next, ↑/↓ = ± one row).
+  thresholds in `ContextMap.svelte → faceFor()` (upper bounds, "up to"): ≤100→1, ≤500→2,
+  ≤1.5k→3, ≤5k→4, ≤15k→5, >15k→6. Arrow keys traverse blocks (←/→ = prev/next, ↑/↓ = ± one row).
   The grid is split into **two rounded boxes stacked like paragraphs**, divided at
   `store.protectedFromIndex`: the top box holds older/foldable blocks (thin border);
   the bottom box holds the protected tail and has a **meaningfully thicker, accented
@@ -192,8 +201,8 @@ Environment gotchas (Windows, this repo's usual setup):
 ## Data & security
 
 - Dev sample: `app/static/sample-session.jsonl` — a real ~130k-token / ~982-block pi
-  session. Most blocks are small (<500 tok); the largest is ~5k, so dice faces 5–6
-  won't appear on this sample.
+  session. Most blocks are small (<500 tok); the largest is ~5k, so under the current
+  faceFor() bounds the sample spans roughly faces 1–4 (face 6 = >15k won't appear).
 - **This repo is public.** The sample once contained a live API key (redacted to
   `REDACTED_API_KEY`). **Never commit real keys** — scan sample data before pushing.
 

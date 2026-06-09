@@ -6,7 +6,8 @@
 	import { nextVacated } from "./drain";
 	import AnimatedNumber from "$lib/ui/AnimatedNumber.svelte";
 	import { buildDisplay, segmentDisplay, type DisplayRow } from "$lib/engine/display";
-	import { chainsOf } from "./chains";
+	import Icon from "$lib/ui/Icon.svelte";
+	import SegControl from "$lib/ui/SegControl.svelte";
 
 	let {
 		store,
@@ -14,75 +15,41 @@
 		onselect,
 	}: { store: AccordionStore; selectedId: string | null; onselect: (id: string) => void } = $props();
 
-	let zoom = $state<"grid" | "turns" | "chains">("grid");
+	// Two lenses on the same context:
+	//  • map        — the abstraction: shape, weight, fold state at a glance (the grid).
+	//  • transcript — the concretion: the actual text, readable top-to-bottom. Folded
+	//                 blocks show their digest (the exact {#code FOLDED} string the agent
+	//                 sees); live blocks show full text. Fold/unfold inline.
+	let view = $state<"map" | "transcript">("map");
+	// Human-readable role label for a transcript message header.
+	const ROLE: Record<Block["kind"], string> = {
+		user: "You",
+		text: "Assistant",
+		thinking: "Thinking",
+		tool_call: "Tool call",
+		tool_result: "Tool result",
+	};
 
 	// ---- weight as dice faces: every tile is the same square; token weight is
 	//      read as a die face 1–6 (more pips = heavier block). -----------------
+	// Upper-bound labels — a face N tile holds blocks UP TO the listed token count
+	// (face 6 is the open-ended top tier). These mirror faceFor()'s cut-offs exactly.
 	const FACES = [
-		{ f: 1, hint: "100" },
-		{ f: 2, hint: "500" },
-		{ f: 3, hint: "1.5k" },
-		{ f: 4, hint: "5k" },
-		{ f: 5, hint: "10k" },
-		{ f: 6, hint: "50k" },
+		{ f: 1, lbl: "up to 100 tok" },
+		{ f: 2, lbl: "up to 500 tok" },
+		{ f: 3, lbl: "up to 1.5k tok" },
+		{ f: 4, lbl: "up to 5k tok" },
+		{ f: 5, lbl: "up to 15k tok" },
+		{ f: 6, lbl: "past 15k tok" },
 	] as const;
 	function faceFor(tok: number): number {
-		return tok >= 50000 ? 6 : tok >= 10000 ? 5 : tok >= 5000 ? 4 : tok >= 1500 ? 3 : tok >= 500 ? 2 : 1;
+		return tok > 15000 ? 6 : tok > 5000 ? 5 : tok > 1500 ? 4 : tok > 500 ? 3 : tok > 100 ? 2 : 1;
 	}
+	// Legend hover: reveal a face's token range the instant the cursor crosses a die
+	// (pointerenter per die — no native-title delay), so values surface even mid-move.
+	let hoveredFace = $state<number | null>(null);
+	const hotFace = $derived(hoveredFace !== null ? FACES[hoveredFace] : null);
 
-	// ---- row groupings (turns / chains) ------------------------------------
-	interface Unit {
-		key: string;
-		turn: number;
-		label: string;
-		blocks: Block[];
-		full: number;
-		live: number;
-		foldedCount: number;
-	}
-	function measure(blocks: Block[]) {
-		let full = 0,
-			live = 0,
-			folded = 0;
-		for (const b of blocks) {
-			full += b.tokens;
-			live += store.effTokens(b);
-			if (store.isFolded(b)) folded++;
-		}
-		return { full, live, folded };
-	}
-	const units = $derived.by<Unit[]>(() => {
-		if (zoom === "grid") return [];
-		const out: Unit[] = [];
-		if (zoom === "turns") {
-			const m = new Map<number, Block[]>();
-			for (const b of store.blocks) {
-				if (!m.has(b.turn)) m.set(b.turn, []);
-				m.get(b.turn)!.push(b);
-			}
-			for (const [turn, blocks] of [...m.entries()].sort((a, b) => a[0] - b[0])) {
-				const mm = measure(blocks);
-				out.push({ key: "t" + turn, turn, label: turn === 0 ? "pre" : "T" + turn, blocks, full: mm.full, live: mm.live, foldedCount: mm.folded });
-			}
-		} else {
-			const seen = new Map<number, number>();
-			for (const blocks of chainsOf(store.blocks)) {
-				const turn = blocks[0]?.turn ?? 0;
-				const isUser = blocks.length === 1 && blocks[0].kind === "user";
-				let label: string;
-				if (isUser) label = turn === 0 ? "pre" : "T" + turn;
-				else {
-					const n = (seen.get(turn) ?? 0) + 1;
-					seen.set(turn, n);
-					label = `T${turn}.${n}`;
-				}
-				const mm = measure(blocks);
-				out.push({ key: blocks[0].id, turn, label, blocks, full: mm.full, live: mm.live, foldedCount: mm.folded });
-			}
-		}
-		return out;
-	});
-	const maxFull = $derived(units.reduce((m, u) => Math.max(m, u.full), 1));
 
 	// ---- grid tiles: every block is the same square, in conversation order.
 	//      uniform size ⇒ strict order with no reflow holes (linearity for free).
@@ -160,10 +127,36 @@
 		clearTimeout(scrollTimer);
 		scrollTimer = setTimeout(() => (scrolling = false), 140);
 	}
-	onDestroy(() => clearTimeout(scrollTimer));
+
+	// ---- single- vs double-click disambiguation -------------------------------
+	// A plain click INSPECTS (opens the panel); a double-click FOLDS. The browser
+	// fires two `click`s before `dblclick`, so we DEFER the inspect action and cancel it
+	// if a second click arrives — otherwise double-clicking to fold would flash the side
+	// panel open first. The 2nd click (`e.detail >= 2`) cancels the pending inspect the
+	// instant it lands, so a fold never flashes regardless of the timer; the timer is just
+	// the fallback that COMMITS a genuine single click. Range-select (shift) is immediate.
+	const DBL_GUARD = 250;
+	let clickTimer: ReturnType<typeof setTimeout> | undefined;
+	function clearPendingClick() {
+		if (clickTimer) {
+			clearTimeout(clickTimer);
+			clickTimer = undefined;
+		}
+	}
+	function deferClick(fn: () => void) {
+		clearPendingClick();
+		clickTimer = setTimeout(() => {
+			clickTimer = undefined;
+			fn();
+		}, DBL_GUARD);
+	}
+	onDestroy(() => {
+		clearTimeout(scrollTimer);
+		clearPendingClick();
+	});
 
 	function fit() {
-		if (!stage || zoom !== "grid") return;
+		if (!stage || view !== "map") return;
 		// reserve room for the two boxes' chrome (borders, padding, gap)
 		const CHROME_H = 84;
 		const CHROME_W = 56; // box inner padding + the left token rail
@@ -188,7 +181,7 @@
 	});
 	$effect(() => {
 		// refit when these change
-		void zoom;
+		void view;
 		void nudge;
 		void count;
 		fit();
@@ -277,15 +270,28 @@
 		void store;
 		untrack(() => {
 			clearRange();
+			clearPendingClick(); // drop any deferred inspect bound to the old session
 			peeked = new Set();
 		});
 	});
 	$effect(() => {
-		if (zoom !== "grid")
+		if (view !== "map")
 			untrack(() => {
 				clearRange();
+				clearPendingClick(); // a pending map inspect must not fire after leaving the grid
 				peeked = new Set();
 			});
+	});
+	// Reconcile: an Inspector "Unfold to context" or "Delete group" action makes a peeked
+	// group go live or vanish. Drop stale peek entries so the band doesn't persist after
+	// the group is no longer folded (unfolded → live) or no longer exists (deleted).
+	$effect(() => {
+		const live = store.groups; // re-run when groups change
+		void live;
+		untrack(() => {
+			const next = new Set([...peeked].filter((gid) => store.groupById(gid)?.folded));
+			if (next.size !== peeked.size) peeked = next;
+		});
 	});
 
 	// ---- hit-testing helpers --------------------------------------------------
@@ -331,6 +337,13 @@
 	}
 
 	function onClick(e: MouseEvent) {
+		// A 2nd+ click in a double/triple sequence: cancel the pending single-click inspect
+		// and let onDbl handle the fold. Fires the instant the 2nd click lands, so a fold
+		// never flashes the panel even if the clicks are slower than DBL_GUARD.
+		if (e.detail > 1) {
+			clearPendingClick();
+			return;
+		}
 		const hit = resolveHit(e);
 
 		if (hit.kind === "group") {
@@ -339,17 +352,21 @@
 			// can't nest or overlap), so shift-clicking one must NOT hijack the gesture — ignore
 			// it and let the user pick a plain block to close the range.
 			if (e.shiftKey && rangeAnchorId) return;
-			const grp = store.groupById(gid);
-			// Selecting the group gives the Inspector context (its first member) and lights the
-			// parent tile's `.sel` highlight (keyed off member inclusion). This is pure selection,
-			// NOT a wire mutation.
-			// Length guard: createGroup enforces >= 2 members, so an empty group is an invariant
-			// violation — but read defensively so a bad state never sets selection to undefined.
-			if (grp && grp.memberIds.length > 0 && grp.memberIds[0] !== selectedId) onselect(grp.memberIds[0]);
-			// A FOLDED parent tile toggles PEEK (open-for-viewing, wire UNCHANGED). An UNFOLDED
-			// group's dull parent already has its own row buttons (Re-fold / Delete), so a plain
-			// click there is a no-op — unfolding/refolding is deliberate via those buttons only.
-			if (grp?.folded) togglePeek(gid);
+			// Defer the select+peek so a double-click (which COLLAPSES the group) doesn't flash
+			// the Inspector / a peek-open first.
+			deferClick(() => {
+				const grp = store.groupById(gid);
+				// Select the GROUP id so the Inspector shows group mode. Call unconditionally so the
+				// parent's toggle (selectedId === id ? null : id) can DESELECT on a re-click — matching
+				// block behavior; the togglePeek below keeps the peek band in sync per click.
+				// Length guard: createGroup enforces >= 2 members, so an empty group is an invariant
+				// violation — but read defensively so a bad state never sets selection to undefined.
+				if (grp && grp.memberIds.length > 0) onselect(gid);
+				// A FOLDED parent tile toggles PEEK (open-for-viewing, wire UNCHANGED). An UNFOLDED
+				// group's dull parent already shows its state in the Inspector, so a plain
+				// click there only selects it — peek on folded groups is preserved.
+				if (grp?.folded) togglePeek(gid);
+			});
 			return;
 		}
 
@@ -357,7 +374,9 @@
 		const id = hit.id;
 		const bl = store.get(id);
 
-		if (e.shiftKey && rangeAnchorId) {
+		// Range-select → groups is a map-only gesture; in transcript a click only inspects.
+		if (view === "map" && e.shiftKey && rangeAnchorId) {
+			clearPendingClick(); // a deliberate range gesture — act now, drop any pending inspect
 			// Extend the range — but only to a groupable block. A protected-tail block, or one
 			// already in a group, can't complete a valid range; hint instead of a phantom span.
 			if (!bl || store.isProtected(bl) || store.groupOf(bl)) {
@@ -369,15 +388,19 @@
 			return;
 		}
 
-		// Plain click on a block tile: inspect, and anchor a range only if this block could
-		// actually start one (older + ungrouped) — otherwise leave no dangling anchor.
-		onselect(id);
-		rangeAnchorId = bl && !store.isProtected(bl) && !store.groupOf(bl) ? id : null;
-		rangeEndId = null;
-		groupErr = false;
+		// Plain click on a block: inspect, and (map only) anchor a range if this block could
+		// actually start one (older + ungrouped). DEFERRED so a double-click folds the block
+		// without opening the side panel first.
+		deferClick(() => {
+			onselect(id);
+			rangeAnchorId = view === "map" && bl && !store.isProtected(bl) && !store.groupOf(bl) ? id : null;
+			rangeEndId = null;
+			groupErr = false;
+		});
 	}
 
 	function onDbl(e: MouseEvent) {
+		clearPendingClick(); // cancel the pending single-click inspect/peek — this is a fold
 		const hit = resolveHit(e);
 		if (hit.kind === "group") {
 			// Double-click a parent (collapsed / peek / unfolded) → COLLAPSE. Never unfolds —
@@ -410,7 +433,7 @@
 	// is NOT collapsed to one stop here (the members are individually traversable). Only the
 	// GRID collapses; Turns/Chains render every member as its own ribbon tile.
 	const collapsedGroupOf = (b: Block): Group | undefined => {
-		if (zoom !== "grid") return undefined;
+		if (view !== "map") return undefined;
 		const g = store.groupOf(b);
 		return g?.folded && !peeked.has(g.id) ? g : undefined;
 	};
@@ -429,9 +452,9 @@
 		if (!b) return;
 		const g = collapsedGroupOf(b);
 		if (g) {
-			// Select the group's first member (Inspector context) and scroll its parent tile —
-			// the folded-group tile carries data-group, not data-id.
-			if (g.memberIds[0] !== selectedId) onselect(g.memberIds[0]);
+			// Select the GROUP id so the Inspector shows group mode, and scroll the
+			// folded-group tile (carries data-group, not data-id).
+			if (g.id !== selectedId) onselect(g.id);
 			const esc = g.id.replace(/"/g, '\\"');
 			stage?.querySelector<HTMLElement>(`[data-group="${esc}"]`)?.scrollIntoView({ block: "nearest", inline: "nearest" });
 			return;
@@ -447,13 +470,17 @@
 		const order = navOrder;
 		if (!order.length) return;
 		// Map the current selection to a position in `order`. A selection sitting on a hidden
-		// group member maps to its group's stop (the first member).
+		// group member maps to its group's stop (the first member). A group id maps to its
+		// first member's stop (the collapsed-group stop already represents memberIds[0]).
 		let pos = -1;
 		if (selectedId) {
-			const sel = store.blocks.findIndex((b) => b.id === selectedId);
+			// If selectedId is a group id, use its first member as the representative block.
+			const grpSel = store.groupById(selectedId);
+			const repBlockId = grpSel ? grpSel.memberIds[0] : selectedId;
+			const sel = store.blocks.findIndex((b) => b.id === repBlockId);
 			if (sel !== -1) {
 				const g = collapsedGroupOf(store.blocks[sel]);
-				const repId = g ? g.memberIds[0] : selectedId;
+				const repId = g ? g.memberIds[0] : repBlockId;
 				pos = order.findIndex((i) => store.blocks[i].id === repId);
 			}
 		}
@@ -462,7 +489,7 @@
 			focusStop(order[key === "ArrowLeft" || key === "ArrowUp" ? order.length - 1 : 0]);
 			return;
 		}
-		const step = zoom === "grid" ? cols : 1; // ↑/↓ jump a full row (in tile/stop space)
+		const step = view === "map" ? cols : 1; // map: ↑/↓ jump a full row; transcript: one message
 		let p = pos;
 		if (key === "ArrowRight") p = pos + 1;
 		else if (key === "ArrowLeft") p = pos - 1;
@@ -476,52 +503,104 @@
 <!-- svelte-ignore a11y_click_events_have_key_events -->
 <div class="map">
 	<div class="toolbar">
-		<div class="seg">
-			<button class:on={zoom === "grid"} onclick={() => (zoom = "grid")}>Grid</button>
-			<button class:on={zoom === "turns"} onclick={() => (zoom = "turns")}>Turns</button>
-			<button class:on={zoom === "chains"} onclick={() => (zoom = "chains")}>Chains</button>
-		</div>
+		<!-- View segmented control: Map (abstraction) / Transcript (concretion) -->
+		<SegControl
+			options={[
+				{ id: "map", label: "Map", icon: "layout-grid" },
+				{ id: "transcript", label: "Transcript", icon: "file-text" },
+			]}
+			value={view}
+			onchange={(v) => (view = v as "map" | "transcript")}
+		/>
 
-		{#if zoom === "grid"}
-			<span class="tiers">
-				<span class="tlbl">tokens</span>
-				{#each FACES as f}
-					<i class="die face f{f.f}" title="face {f.f} · {f.hint} tokens"></i>
-				{/each}
-			</span>
+		<div class="tb-divider"></div>
+
+		{#if view === "map"}
+			<!-- Token-tier legend: dice faces. Hovering (even while moving) reveals each
+			     face's token range instantly via a gliding tooltip — discover by accident. -->
+			<div class="tiers">
+				<span class="tlbl">WEIGHT</span>
+				<!-- svelte-ignore a11y_no_static_element_interactions -->
+				<div class="tier-strip" onpointerleave={() => (hoveredFace = null)}>
+					{#each FACES as f, i}
+						<!-- svelte-ignore a11y_no_static_element_interactions -->
+						<i
+							class="die face f{f.f}"
+							class:hot={hoveredFace === i}
+							onpointerenter={() => (hoveredFace = i)}
+						></i>
+					{/each}
+					{#if hotFace}
+						<span class="die-pop" style:left="{(hoveredFace ?? 0) * 20 + 8}px">
+							face {hotFace.f} · {hotFace.lbl}
+						</span>
+					{/if}
+				</div>
+			</div>
+
 			<span class="grow"></span>
+
+			<!-- Range-select chip / hint -->
 			{#if rangeCount >= 2}
-				<span class="range-bar" class:err={groupErr}>
+				<div class="range-bar" class:err={groupErr}>
 					<span class="range-chip">
-						<b>{rangeCount}</b> blocks <span class="arrow">→</span> group
-						<span class="dim">· Enter to create</span>
+						<Icon name="corner-down-right" size={11} />
+						<b>{rangeCount}</b> blocks → group
+						<span class="dim">· Enter</span>
 					</span>
+					{#if groupErr}<span class="range-err">overlaps a group or protected tail</span>{/if}
 					<button class="group-btn" onclick={handleCreateGroup}>Group</button>
-					{#if groupErr}<span class="range-err">overlaps a group or the protected tail</span>{/if}
-					<button class="range-clear" onclick={clearRange} title="Clear selection (Esc)">✕</button>
-				</span>
+					<button class="range-clear" onclick={clearRange} title="Clear selection (Esc)">
+						<Icon name="x" size={11} />
+					</button>
+				</div>
+				<div class="tb-divider"></div>
 			{:else if rangeAnchorId}
-				<span class="range-hint dim">shift-click another block to complete range</span>
+				<span class="range-hint dim">shift-click to complete range</span>
+				<div class="tb-divider"></div>
 			{/if}
-			<span class="legend"><i class="sw solid"></i>live <i class="sw hatch"></i>folded
-				<span class="dim">· ←→↑↓ move</span></span>
-			<span class="density">
-				<button onclick={() => (nudge -= 1)} aria-label="Smaller tiles" title="Smaller">−</button>
-				<button onclick={() => (nudge = 0)} class="reset" title="Reset density">{cell}px</button>
-				<button onclick={() => (nudge += 1)} aria-label="Larger tiles" title="Larger">+</button>
-			</span>
+
+			<!-- Live/folded legend + density — pushed to the right -->
+			<div class="legend">
+				<span class="sw-pair"><i class="sw solid"></i><span class="sw-lbl">live</span></span>
+				<span class="sw-pair"><i class="sw hatch"></i><span class="sw-lbl">folded</span></span>
+			</div>
+
+			<div class="tb-divider"></div>
+
+			<!-- Density control -->
+			<div class="density">
+				<button onclick={() => (nudge -= 1)} aria-label="Smaller tiles" title="Smaller tiles">
+					<Icon name="minus" size={12} />
+				</button>
+				<button class="density-readout" onclick={() => (nudge = 0)} title="Reset density">{cell}px</button>
+				<button onclick={() => (nudge += 1)} aria-label="Larger tiles" title="Larger tiles">
+					<Icon name="plus" size={12} />
+				</button>
+			</div>
 		{:else}
-			<span class="count mono">{units.length} {zoom} · {store.blocks.length} blocks</span>
+			<!-- Transcript mode info -->
+			<span class="count mono">{store.blocks.length} blocks · {store.foldedCount} folded</span>
+
 			<span class="grow"></span>
-			<span class="legend"><i class="sw solid"></i>live <i class="sw hatch"></i>folded
-				<span class="dim">· click = inspect · dbl-click = fold</span></span>
+
+			<!-- Live/folded legend — pushed right to match the map toolbar -->
+			<div class="legend">
+				<span class="sw-pair"><i class="sw solid"></i><span class="sw-lbl">live</span></span>
+				<span class="sw-pair"><i class="sw hatch"></i><span class="sw-lbl">folded</span></span>
+			</div>
+
+			<div class="tb-divider"></div>
+
+			<span class="dim" style="font-size:var(--fs-xs)">click = inspect · dbl-click = fold</span>
 		{/if}
 	</div>
 
 	<!-- svelte-ignore a11y_click_events_have_key_events -->
 	<div
 		class="stage"
-		class:isgrid={zoom === "grid"}
+		class:isgrid={view === "map"}
+		class:istranscript={view === "transcript"}
 		class:scrolling
 		bind:this={stage}
 		role="toolbar"
@@ -532,7 +611,7 @@
 		onkeydown={onKeydown}
 		onscroll={onScroll}
 	>
-		{#if zoom === "grid"}
+		{#if view === "map"}
 			{#snippet ghostTile(g: Ghost)}
 				<div
 					class="cell ghost k-{g.kind}"
@@ -572,7 +651,7 @@
 												<!-- COLLAPSED: one folder tile standing in for the range. -->
 												<div
 													class="cell face f{gface} group-tile"
-													class:sel={selectedId !== null && g.memberIds.includes(selectedId)}
+													class:sel={selectedId === g.id}
 													data-group={g.id}
 													title={groupTip(g)}
 												></div>
@@ -591,7 +670,7 @@
 									<div class="group-band" class:live data-group={g.id}>
 										<div
 											class="cell face f{faceFor(store.groupLiveTokens(g))} group-tile group-tile-open"
-											class:sel={selectedId !== null && g.memberIds.includes(selectedId)}
+											class:sel={selectedId === g.id}
 											data-group={g.id}
 											title="{live ? 'group (unfolded — live)' : 'group (peek — preview only)'} · {seg.row.members.length} blocks · double-click to collapse"
 										></div>
@@ -600,20 +679,6 @@
 												{@const mt = { b: mb, face: faceFor(mb.tokens) }}
 												{@render tile(mt, false, !live)}
 											{/each}
-										</div>
-										<div class="band-actions">
-											{#if live}
-												<!-- UNFOLDED row: Re-fold returns to a COLLAPSED tile (clears peek); Delete drops the group. -->
-												<button class="band-btn" onclick={(e) => { e.stopPropagation(); collapseGroup(g.id); }}>Re-fold</button>
-												<button class="band-btn danger" onclick={(e) => { e.stopPropagation(); leavePeek(g.id); store.deleteGroup(g.id); }}>Delete</button>
-											{:else}
-												<!-- PEEK row: the ONLY wire-changing button is "Unfold to context" (store.unfoldGroup);
-												     it also clears the peek entry so re-folding later returns to a clean COLLAPSED tile.
-												     "Collapse" is pure UI (leavePeek). Delete drops the group + its stale peek entry. -->
-												<button class="band-btn primary" onclick={(e) => { e.stopPropagation(); leavePeek(g.id); store.unfoldGroup(g.id); }}>Unfold to context</button>
-												<button class="band-btn" onclick={(e) => { e.stopPropagation(); leavePeek(g.id); }}>Collapse</button>
-												<button class="band-btn danger tertiary" onclick={(e) => { e.stopPropagation(); leavePeek(g.id); store.deleteGroup(g.id); }}>Delete</button>
-											{/if}
 										</div>
 									</div>
 								{/if}
@@ -635,28 +700,49 @@
 				</section>
 			</div>
 		{:else}
-			{#each units as u (u.key)}
-				<div class="row">
-					<div class="gutter">
-						<span class="ul">{u.label}</span>
-						<span class="sizebar"><i style:width="{(u.full / maxFull) * 100}%"></i></span>
-						<span class="uk mono">{k(u.live)}<span class="dim">/{k(u.full)}</span></span>
-					</div>
-					<div class="ribbon">
-						{#each u.blocks as b (b.id)}
-							<div
-								class="rtile k-{b.kind}"
-								class:folded={store.isFolded(b)}
-								class:pinned={b.override === "pinned"}
-								class:sel={b.id === selectedId}
-								style:flex-grow={Math.max(b.tokens, 1)}
-								data-id={b.id}
-								title={tip(b)}
-							></div>
-						{/each}
-					</div>
-				</div>
-			{/each}
+			<!-- TRANSCRIPT: the concretion. Blocks in conversation order, full text when live,
+			     the exact {#code FOLDED} digest the agent sees when folded. Click = inspect,
+			     dbl-click or the row button = fold/unfold. Colour spine = kind grammar. -->
+			<div class="transcript">
+				{#each store.blocks as b (b.id)}
+					{@const folded = store.isFolded(b)}
+					{@const prot = store.isProtected(b)}
+					<article
+						class="tr-msg k-{b.kind}"
+						class:folded
+						class:pinned={b.override === "pinned"}
+						class:prot
+						class:sel={b.id === selectedId}
+						data-id={b.id}
+						title={tip(b, prot)}
+					>
+						<header class="tr-head">
+							<span class="tr-role">{ROLE[b.kind]}</span>
+							{#if b.toolName}<span class="tr-tool mono">{b.toolName}</span>{/if}
+							<span class="tr-tok mono tnum">
+								{k(store.effTokens(b))}{#if folded}<span class="dim">/{k(b.tokens)}</span>{/if} tok
+							</span>
+							{#if prot}
+								<span class="tr-flag" title="protected working tail — never folds"><Icon name="lock" size={10} /></span>
+							{:else if b.override === "pinned"}
+								<span class="tr-flag" title="pinned — held full"><Icon name="pin" size={10} /></span>
+							{/if}
+							<span class="grow"></span>
+							{#if !prot}
+								<button
+									class="tr-btn"
+									onclick={(e) => { e.stopPropagation(); store.toggle(b.id); }}
+									title={folded ? "Unfold to full text" : "Fold to digest"}
+								>
+									<Icon name={folded ? "chevrons-up-down" : "chevrons-down-up"} size={12} />
+									{folded ? "Unfold" : "Fold"}
+								</button>
+							{/if}
+						</header>
+						<div class="tr-text" class:digest={folded}>{folded ? store.digestOf(b) : b.text}</div>
+					</article>
+				{/each}
+			</div>
 		{/if}
 	</div>
 </div>
@@ -675,72 +761,129 @@
 	.toolbar {
 		display: flex;
 		align-items: center;
-		gap: 14px;
-		padding: 9px 16px;
-		border-bottom: 1px solid var(--line);
-		flex: 0 0 auto;
-		font-size: 11px;
-		color: var(--muted);
-	}
-	.seg {
-		display: inline-flex;
+		gap: var(--sp-3);
+		padding: var(--sp-2) var(--sp-4);
 		background: var(--panel);
-		border: 1px solid var(--line);
-		border-radius: 7px;
-		padding: 2px;
-		gap: 2px;
-	}
-	.seg button {
-		background: transparent;
-		border: none;
+		border-bottom: 1px solid var(--line-soft);
+		flex: 0 0 auto;
+		font-size: var(--fs-xs);
 		color: var(--muted);
-		font-size: 12px;
-		font-weight: 600;
-		padding: 4px 13px;
-		border-radius: 5px;
-		transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+		min-height: 40px;
+		/* sit above the grid stage (a later sibling) so the dice tooltip, which drops
+		   below the toolbar over the grid, isn't painted over by the tiles. */
+		position: relative;
+		z-index: 2;
 	}
-	.seg button:hover {
-		color: var(--text);
-	}
-	.seg button.on {
-		background: var(--panel-3);
-		color: var(--text);
-		box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+	/* subtle vertical divider between toolbar clusters */
+	.tb-divider {
+		width: 1px;
+		height: 18px;
+		background: var(--line-soft);
+		flex: 0 0 auto;
 	}
 	.grow {
 		flex: 1;
 	}
 	.count {
-		font-size: 11px;
+		font-size: var(--fs-xs);
 	}
 	.dim {
 		color: var(--faint);
 	}
 
+	/* ---- token-tier legend ---- */
 	.tiers {
+		display: inline-flex;
+		align-items: center;
+		gap: var(--sp-2);
+	}
+	.tlbl {
+		font-size: var(--fs-2xs);
+		font-weight: 600;
+		letter-spacing: 0.07em;
+		color: var(--faint);
+		text-transform: uppercase;
+	}
+	/* bare dice — no surrounding bubble; anchors the hover tooltip. gap(4)+die(16)=20px
+	   step, which the .die-pop left offset mirrors. */
+	.tier-strip {
+		position: relative;
 		display: inline-flex;
 		align-items: center;
 		gap: 4px;
 	}
-	.tlbl {
-		color: var(--faint);
-		margin-right: 4px;
-	}
 	.die {
 		box-sizing: border-box;
-		width: 17px;
-		height: 17px;
+		width: 16px;
+		height: 16px;
 		background: var(--panel-3);
 		border: 1px solid var(--line);
 		border-radius: 3px;
 		display: inline-block;
+		flex: 0 0 auto;
+		transition:
+			transform var(--dur-fast) var(--ease-out),
+			border-color var(--dur-fast) var(--ease-out),
+			box-shadow var(--dur-fast) var(--ease-out);
+	}
+	/* premium hover: a subtle lift + accent ring on the die under the cursor (only 6
+	   dice here — transforms/box-shadow are fine, unlike the 982-tile grid). */
+	.die.hot {
+		transform: translateY(-1px) scale(1.14);
+		border-color: var(--accent);
+		box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 32%, transparent);
+		z-index: 2;
+	}
+	/* gliding tooltip: stays mounted while the cursor moves across the strip, sliding
+	   to the hovered die via the `left` transition so values surface without stopping. */
+	.die-pop {
+		position: absolute;
+		/* drop DOWN over the grid — popping up would slide under the header/bar above. */
+		top: calc(100% + 8px);
+		transform: translateX(-50%);
+		background: var(--panel-4);
+		color: var(--text);
+		border: 1px solid var(--line-strong);
+		border-radius: var(--radius-sm);
+		padding: 3px 9px;
+		font-size: var(--fs-xs);
+		font-weight: 500;
+		font-variant-numeric: tabular-nums;
+		white-space: nowrap;
+		pointer-events: none;
+		box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4);
+		z-index: 10;
+		transition: left var(--dur-fast) var(--ease-out);
+		animation: die-pop-in var(--dur-fast) var(--ease-out);
+	}
+	.die-pop::after {
+		content: "";
+		position: absolute;
+		bottom: 100%;
+		left: 50%;
+		transform: translateX(-50%);
+		border: 5px solid transparent;
+		border-bottom-color: var(--panel-4);
+	}
+	@keyframes die-pop-in {
+		from { opacity: 0; transform: translateX(-50%) translateY(-4px); }
+		to   { opacity: 1; transform: translateX(-50%) translateY(0); }
 	}
 
+	/* ---- live/folded legend ---- */
 	.legend {
 		display: inline-flex;
 		align-items: center;
-		gap: 6px;
+		gap: var(--sp-3);
+	}
+	.sw-pair {
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
+	}
+	.sw-lbl {
+		font-size: var(--fs-xs);
+		color: var(--faint);
 	}
 	.sw {
 		width: 12px;
@@ -748,106 +891,125 @@
 		border-radius: 2px;
 		display: inline-block;
 		background: var(--k-thinking);
-		vertical-align: -1px;
+		flex: 0 0 auto;
 	}
 	.sw.hatch {
 		opacity: 0.55;
 		background-image: repeating-linear-gradient(45deg, rgba(0, 0, 0, 0.55) 0 1.5px, transparent 1.5px 4px);
 	}
 
+	/* ---- density control ---- */
 	.density {
 		display: inline-flex;
 		align-items: center;
-		background: var(--panel);
+		background: var(--panel-2);
 		border: 1px solid var(--line);
-		border-radius: 7px;
+		border-radius: var(--radius-sm);
 		overflow: hidden;
 	}
 	.density button {
+		display: flex;
+		align-items: center;
+		justify-content: center;
 		background: transparent;
 		border: none;
 		color: var(--muted);
-		font-size: 12px;
-		padding: 3px 9px;
-		min-width: 26px;
+		padding: 4px 8px;
+		min-width: 28px;
 		transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
 	}
 	.density button:hover {
-		background: var(--panel-3);
+		background: var(--panel-4);
 		color: var(--text);
 	}
-	.density .reset {
-		font-size: 10px;
-		color: var(--faint);
-		min-width: 40px;
-		border-left: 1px solid var(--line);
-		border-right: 1px solid var(--line);
+	.density-readout {
+		background: transparent;
+		border: none;
+		border-left: 1px solid var(--line-soft);
+		border-right: 1px solid var(--line-soft);
+		font-size: var(--fs-xs);
 		font-variant-numeric: tabular-nums;
+		color: var(--faint);
+		min-width: 36px;
+		text-align: center;
+		padding: 4px 6px;
+		cursor: pointer;
+		user-select: none;
+		transition: color var(--dur-fast) var(--ease-out);
+	}
+	.density-readout:hover {
+		color: var(--muted);
 	}
 
-	/* ---- range selection toolbar affordances — a warm "building" chip ---- */
+	/* ---- range selection toolbar affordances — warm amber "building" chip ---- */
 	.range-bar {
 		display: inline-flex;
 		align-items: center;
-		gap: 6px;
+		gap: var(--sp-2);
 	}
-	/* The counter chip: reads the live selection count and tells the user how to commit.
-	   Warm amber border so it reads as forming a NEW object (not hiding one). */
+	/* Counter chip: pill shape, amber family, signals "forming a new object". */
 	.range-chip {
 		display: inline-flex;
 		align-items: center;
-		gap: 4px;
-		font-size: 11px;
+		gap: 5px;
+		font-size: var(--fs-xs);
 		color: var(--text);
-		background: color-mix(in srgb, var(--group-accent) 12%, var(--panel));
-		border: 1px solid color-mix(in srgb, var(--group-accent) 55%, transparent);
-		border-radius: 6px;
-		padding: 3px 9px;
+		background: color-mix(in srgb, var(--group-accent) 12%, var(--panel-2));
+		border: 1px solid color-mix(in srgb, var(--group-accent) 50%, transparent);
+		border-radius: var(--radius-pill);
+		padding: 3px 10px;
 		white-space: nowrap;
+		font-variant-numeric: tabular-nums;
+		animation: chip-in var(--dur-mid) var(--ease-out);
+	}
+	@keyframes chip-in {
+		from { opacity: 0; transform: scale(0.92); }
+		to   { opacity: 1; transform: scale(1); }
 	}
 	.range-chip b {
 		font-variant-numeric: tabular-nums;
 		color: var(--group-accent);
 		font-weight: 800;
 	}
-	.range-chip .arrow {
-		color: var(--group-accent);
-		font-weight: 700;
-	}
 	.range-bar.err .range-chip {
 		border-color: color-mix(in srgb, var(--danger) 60%, transparent);
 	}
 	.group-btn {
 		background: var(--group-accent);
-		color: #1a0f06;
+		color: var(--group-ink);
 		border: none;
-		border-radius: 6px;
-		font-size: 11px;
+		border-radius: var(--radius-sm);
+		font-size: var(--fs-xs);
 		font-weight: 700;
 		padding: 4px 12px;
 		cursor: pointer;
+		transition: filter var(--dur-fast) var(--ease-out);
 	}
 	.group-btn:hover {
-		filter: brightness(1.08);
+		filter: brightness(1.1);
 	}
 	.range-clear {
+		display: flex;
+		align-items: center;
+		justify-content: center;
 		background: transparent;
 		border: 1px solid var(--line);
 		color: var(--muted);
-		border-radius: 5px;
-		font-size: 10px;
-		padding: 3px 7px;
+		border-radius: var(--radius-sm);
+		padding: 4px 6px;
 		cursor: pointer;
+		transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
 	}
 	.range-clear:hover {
 		color: var(--text);
 		background: var(--panel-3);
+		border-color: var(--line-strong);
 	}
 	.range-hint {
-		font-size: 10px;
+		font-size: var(--fs-xs);
 	}
 	.range-err {
-		font-size: 10px;
+		font-size: var(--fs-xs);
 		color: var(--danger, #f87171);
 		white-space: nowrap;
 	}
@@ -863,6 +1025,10 @@
 		overflow-y: auto;
 		padding: 11px 14px;
 	}
+	.stage.istranscript {
+		overflow-y: auto;
+		padding: var(--sp-4) var(--sp-4) 48px;
+	}
 	.stage:focus {
 		outline: none;
 	}
@@ -875,22 +1041,22 @@
 	.boxes {
 		display: flex;
 		flex-direction: column;
-		gap: 16px;
+		gap: var(--sp-4);
 		width: 100%;
 		/* promote the scroll content to its own GPU layer: once painted, scrolling
 		   is a cheap layer translation rather than a repaint of the tiles. */
 		transform: translateZ(0);
 	}
 	.box {
-		border-radius: 14px;
-		border: 1.5px solid var(--line);
+		border-radius: var(--radius-lg);
+		border: 1px solid var(--line);
 		background: var(--panel-2);
-		padding: 12px;
+		padding: var(--sp-3);
 		display: flex;
 		align-items: stretch;
-		gap: 8px;
+		gap: var(--sp-2);
 	}
-	/* left rail: a small vertical token tally for the group */
+	/* left rail: a small vertical token tally for the box */
 	.rail {
 		flex: 0 0 auto;
 		display: flex;
@@ -899,22 +1065,30 @@
 		writing-mode: vertical-rl;
 		transform: rotate(180deg);
 		font-variant-numeric: tabular-nums;
-		font-size: 11px;
-		letter-spacing: 0.04em;
+		font-size: var(--fs-2xs);
+		font-weight: 600;
+		letter-spacing: 0.06em;
+		text-transform: uppercase;
 		color: var(--faint);
 		user-select: none;
+		gap: 4px;
 	}
 	.rail .tok {
 		font-weight: 700;
+		font-size: var(--fs-xs);
+		letter-spacing: 0.04em;
+		text-transform: none;
 	}
+	/* prot rail uses an accent tint to signal the protected-tail identity */
 	.box.prot .rail {
-		color: color-mix(in srgb, var(--accent) 70%, var(--muted));
+		color: color-mix(in srgb, var(--accent) 65%, var(--muted));
 	}
-	/* the protected box: a meaningfully thicker, accented frame implies protection */
+	/* the protected box: meaningfully thicker, accented frame = protection signal.
+	   Keep this visually distinct — it's a key part of the visual grammar. */
 	.box.prot {
-		border: 4px solid var(--accent-dim, var(--accent));
+		border: 3px solid var(--accent-dim);
 		background: var(--panel);
-		box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 22%, transparent);
+		box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 18%, transparent), var(--shadow-1);
 	}
 
 	/* ---- the older box's content: a vertical stack of tile-grids and open-group bands
@@ -1100,51 +1274,6 @@
 		height: var(--cell);
 		flex: 0 0 auto;
 	}
-	.band-actions {
-		display: flex;
-		gap: 4px;
-		flex: 0 0 auto;
-	}
-	.band-btn {
-		background: var(--panel-3);
-		border: 1px solid var(--line);
-		color: var(--muted);
-		font-size: 10px;
-		border-radius: 5px;
-		padding: 3px 8px;
-		cursor: pointer;
-		white-space: nowrap;
-	}
-	.band-btn:hover {
-		color: var(--text);
-		background: var(--panel);
-	}
-	/* "Unfold to context" — the primary, warm/amber action (the only one that changes the
-	   wire). Filled so it clearly outranks Collapse/Delete. */
-	.band-btn.primary {
-		background: var(--group-accent);
-		border-color: color-mix(in srgb, var(--group-accent) 70%, #000);
-		color: #1a0f06;
-		font-weight: 700;
-	}
-	.band-btn.primary:hover {
-		background: var(--group-accent);
-		filter: brightness(1.08);
-		color: #1a0f06;
-	}
-	/* Delete is tertiary in the peek row — quieter until hovered. */
-	.band-btn.tertiary {
-		opacity: 0.7;
-	}
-	.band-btn.tertiary:hover {
-		opacity: 1;
-	}
-	.band-btn.danger:hover {
-		color: #f87171;
-		border-color: #f87171;
-		background: var(--panel-3);
-	}
-
 	/* ---- ghost tiles: third visual state — "forming" ----
 	   A ghost is a presentation-only pulsing placeholder. It is NOT a block, NOT
 	   selectable, and NOT foldable. It uses the same kind color as a real tile but
@@ -1207,78 +1336,117 @@
 		background-image: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><g fill='%23fff' stroke='%23000' stroke-opacity='.5' stroke-width='3.6'><circle cx='28' cy='26' r='11'/><circle cx='72' cy='26' r='11'/><circle cx='28' cy='50' r='11'/><circle cx='72' cy='50' r='11'/><circle cx='28' cy='74' r='11'/><circle cx='72' cy='74' r='11'/></g></svg>");
 	}
 
-	/* ---- ribbon rows (turns / chains) ---- */
-	.row {
-		display: grid;
-		grid-template-columns: 112px minmax(0, 1fr);
+	/* ---- transcript (the readable, scrollable concretion) ---- */
+	.transcript {
+		max-width: 880px;
+		margin: 0 auto;
+		display: flex;
+		flex-direction: column;
+		gap: var(--sp-2);
+	}
+	.tr-msg {
+		--kc: var(--muted); /* kind colour — set per kind below (visual grammar) */
+		border: 1px solid var(--line-soft);
+		border-left: 3px solid var(--kc);
+		border-radius: var(--radius-sm);
+		background: var(--panel);
+		padding: var(--sp-2) var(--sp-3);
+		cursor: pointer;
+		transition: border-color var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out);
+	}
+	.tr-msg:hover {
+		border-color: var(--line-strong);
+		border-left-color: var(--kc);
+	}
+	.tr-msg.sel {
+		border-color: var(--accent);
+		border-left-color: var(--kc);
+		box-shadow: 0 0 0 1px var(--accent-soft);
+	}
+	.tr-msg.k-user { --kc: var(--k-user); }
+	.tr-msg.k-text { --kc: var(--k-text); }
+	.tr-msg.k-thinking { --kc: var(--k-thinking); }
+	.tr-msg.k-tool_call { --kc: var(--k-tool_call); }
+	.tr-msg.k-tool_result { --kc: var(--k-tool_result); }
+	/* folded: recessed (live = solid / folded = recessed, per the grammar) */
+	.tr-msg.folded {
+		background: var(--panel-2);
+		border-left-style: dashed;
+	}
+	.tr-msg.pinned {
+		border-left-width: 4px;
+	}
+
+	.tr-head {
+		display: flex;
 		align-items: center;
-		gap: 12px;
+		gap: var(--sp-2);
 		margin-bottom: 5px;
 	}
-	.gutter {
-		display: grid;
-		grid-template-columns: 34px 1fr;
-		align-items: center;
-		gap: 6px 8px;
-		grid-template-areas: "label bar" "label tok";
-	}
-	.ul {
-		grid-area: label;
-		font-size: 13px;
+	.tr-role {
+		font-size: var(--fs-xs);
 		font-weight: 700;
+		letter-spacing: 0.02em;
+		color: var(--kc);
+	}
+	.tr-tool {
+		font-size: var(--fs-xs);
+		color: var(--muted);
+		background: var(--panel-2);
+		border: 1px solid var(--line);
+		border-radius: var(--radius-sm);
+		padding: 0 6px;
+	}
+	.tr-tok {
+		font-size: var(--fs-xs);
+		color: var(--faint);
+	}
+	.tr-flag {
+		display: inline-flex;
+		align-items: center;
+		color: var(--faint);
+	}
+	.tr-btn {
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+		font-size: var(--fs-xs);
+		font-weight: 500;
+		color: var(--muted);
+		background: var(--panel-2);
+		border: 1px solid var(--line);
+		border-radius: var(--radius-sm);
+		padding: 3px 8px;
+		cursor: pointer;
+		opacity: 0;
+		transition: opacity var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out),
+			background var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out);
+	}
+	.tr-msg:hover .tr-btn,
+	.tr-msg.sel .tr-btn {
+		opacity: 1;
+	}
+	.tr-btn:hover {
 		color: var(--text);
-	}
-	.sizebar {
-		grid-area: bar;
-		height: 4px;
 		background: var(--panel-3);
-		border-radius: 999px;
-		overflow: hidden;
+		border-color: var(--line-strong);
 	}
-	.sizebar i {
-		display: block;
-		height: 100%;
-		background: var(--faint);
-		border-radius: 999px;
+	.tr-text {
+		font-size: var(--fs-sm);
+		line-height: 1.55;
+		color: var(--text);
+		white-space: pre-wrap;
+		overflow-wrap: anywhere;
 	}
-	.uk {
-		grid-area: tok;
-		font-size: 10px;
+	.tr-text.digest {
+		font-family: var(--mono);
+		font-size: var(--fs-xs);
 		color: var(--muted);
 	}
-	.ribbon {
-		display: flex;
-		height: 26px;
-		min-width: 3px;
-		border-radius: 4px;
-		overflow: hidden;
-		background: var(--panel-2);
-		box-shadow: inset 0 0 0 1px var(--line-soft);
-	}
-	.rtile {
-		height: 100%;
-		min-width: 0;
-		flex-basis: 0;
-		cursor: pointer;
-		transition: filter var(--dur-fast) var(--ease-out);
-	}
-	.rtile:hover {
-		filter: brightness(1.4);
-	}
-	.rtile.k-user { background: var(--k-user); }
-	.rtile.k-text { background: var(--k-text); }
-	.rtile.k-thinking { background: var(--k-thinking); }
-	.rtile.k-tool_call { background: var(--k-tool_call); }
-	.rtile.k-tool_result { background: var(--k-tool_result); }
-	.rtile.folded {
-		opacity: 0.42;
-		background-image: repeating-linear-gradient(45deg, rgba(0, 0, 0, 0.55) 0, rgba(0, 0, 0, 0.55) 1.5px, transparent 1.5px, transparent 4px);
-	}
-	.rtile.pinned {
-		box-shadow: inset 0 0 0 1.5px #fff;
-	}
-	.rtile.sel {
-		box-shadow: inset 0 0 0 2px var(--text);
-		filter: brightness(1.2);
+	/* keyboard focus: keep the button reachable when its row is the focus target */
+	.tr-btn:focus-visible {
+		opacity: 1;
+		outline: none;
+		box-shadow: var(--focus-ring);
 	}
 </style>
