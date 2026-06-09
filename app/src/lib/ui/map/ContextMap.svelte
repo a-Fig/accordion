@@ -282,6 +282,17 @@
 				peeked = new Set();
 			});
 	});
+	// Reconcile: an Inspector "Unfold to context" or "Delete group" action makes a peeked
+	// group go live or vanish. Drop stale peek entries so the band doesn't persist after
+	// the group is no longer folded (unfolded → live) or no longer exists (deleted).
+	$effect(() => {
+		const live = store.groups; // re-run when groups change
+		void live;
+		untrack(() => {
+			const next = new Set([...peeked].filter((gid) => store.groupById(gid)?.folded));
+			if (next.size !== peeked.size) peeked = next;
+		});
+	});
 
 	// ---- hit-testing helpers --------------------------------------------------
 	// A member tile (data-id) nested inside a group band (data-group) must take
@@ -345,15 +356,15 @@
 			// the Inspector / a peek-open first.
 			deferClick(() => {
 				const grp = store.groupById(gid);
-				// Selecting the group gives the Inspector context (its first member) and lights the
-				// parent tile's `.sel` highlight (keyed off member inclusion). This is pure selection,
-				// NOT a wire mutation.
+				// Select the GROUP id so the Inspector shows group mode. Call unconditionally so the
+				// parent's toggle (selectedId === id ? null : id) can DESELECT on a re-click — matching
+				// block behavior; the togglePeek below keeps the peek band in sync per click.
 				// Length guard: createGroup enforces >= 2 members, so an empty group is an invariant
 				// violation — but read defensively so a bad state never sets selection to undefined.
-				if (grp && grp.memberIds.length > 0 && grp.memberIds[0] !== selectedId) onselect(grp.memberIds[0]);
+				if (grp && grp.memberIds.length > 0) onselect(gid);
 				// A FOLDED parent tile toggles PEEK (open-for-viewing, wire UNCHANGED). An UNFOLDED
-				// group's dull parent already has its own row buttons (Re-fold / Delete), so a plain
-				// click there is a no-op — unfolding/refolding is deliberate via those buttons only.
+				// group's dull parent already shows its state in the Inspector, so a plain
+				// click there only selects it — peek on folded groups is preserved.
 				if (grp?.folded) togglePeek(gid);
 			});
 			return;
@@ -441,9 +452,9 @@
 		if (!b) return;
 		const g = collapsedGroupOf(b);
 		if (g) {
-			// Select the group's first member (Inspector context) and scroll its parent tile —
-			// the folded-group tile carries data-group, not data-id.
-			if (g.memberIds[0] !== selectedId) onselect(g.memberIds[0]);
+			// Select the GROUP id so the Inspector shows group mode, and scroll the
+			// folded-group tile (carries data-group, not data-id).
+			if (g.id !== selectedId) onselect(g.id);
 			const esc = g.id.replace(/"/g, '\\"');
 			stage?.querySelector<HTMLElement>(`[data-group="${esc}"]`)?.scrollIntoView({ block: "nearest", inline: "nearest" });
 			return;
@@ -459,13 +470,17 @@
 		const order = navOrder;
 		if (!order.length) return;
 		// Map the current selection to a position in `order`. A selection sitting on a hidden
-		// group member maps to its group's stop (the first member).
+		// group member maps to its group's stop (the first member). A group id maps to its
+		// first member's stop (the collapsed-group stop already represents memberIds[0]).
 		let pos = -1;
 		if (selectedId) {
-			const sel = store.blocks.findIndex((b) => b.id === selectedId);
+			// If selectedId is a group id, use its first member as the representative block.
+			const grpSel = store.groupById(selectedId);
+			const repBlockId = grpSel ? grpSel.memberIds[0] : selectedId;
+			const sel = store.blocks.findIndex((b) => b.id === repBlockId);
 			if (sel !== -1) {
 				const g = collapsedGroupOf(store.blocks[sel]);
-				const repId = g ? g.memberIds[0] : selectedId;
+				const repId = g ? g.memberIds[0] : repBlockId;
 				pos = order.findIndex((i) => store.blocks[i].id === repId);
 			}
 		}
@@ -636,7 +651,7 @@
 												<!-- COLLAPSED: one folder tile standing in for the range. -->
 												<div
 													class="cell face f{gface} group-tile"
-													class:sel={selectedId !== null && g.memberIds.includes(selectedId)}
+													class:sel={selectedId === g.id}
 													data-group={g.id}
 													title={groupTip(g)}
 												></div>
@@ -655,7 +670,7 @@
 									<div class="group-band" class:live data-group={g.id}>
 										<div
 											class="cell face f{faceFor(store.groupLiveTokens(g))} group-tile group-tile-open"
-											class:sel={selectedId !== null && g.memberIds.includes(selectedId)}
+											class:sel={selectedId === g.id}
 											data-group={g.id}
 											title="{live ? 'group (unfolded — live)' : 'group (peek — preview only)'} · {seg.row.members.length} blocks · double-click to collapse"
 										></div>
@@ -664,30 +679,6 @@
 												{@const mt = { b: mb, face: faceFor(mb.tokens) }}
 												{@render tile(mt, false, !live)}
 											{/each}
-										</div>
-										<div class="band-actions">
-											{#if live}
-												<!-- UNFOLDED row: Re-fold returns to a COLLAPSED tile (clears peek); Delete drops the group. -->
-												<button class="band-btn" onclick={(e) => { e.stopPropagation(); collapseGroup(g.id); }} title="Re-fold group">
-													<Icon name="chevrons-down-up" size={12} />Re-fold
-												</button>
-												<button class="band-btn danger" onclick={(e) => { e.stopPropagation(); leavePeek(g.id); store.deleteGroup(g.id); }} title="Delete group">
-													<Icon name="trash-2" size={12} />Delete
-												</button>
-											{:else}
-												<!-- PEEK row: the ONLY wire-changing button is "Unfold to context" (store.unfoldGroup);
-												     it also clears the peek entry so re-folding later returns to a clean COLLAPSED tile.
-												     "Collapse" is pure UI (leavePeek). Delete drops the group + its stale peek entry. -->
-												<button class="band-btn primary" onclick={(e) => { e.stopPropagation(); leavePeek(g.id); store.unfoldGroup(g.id); }} title="Unfold blocks into context">
-													<Icon name="chevrons-up-down" size={12} />Unfold to context
-												</button>
-												<button class="band-btn" onclick={(e) => { e.stopPropagation(); leavePeek(g.id); }} title="Collapse preview">
-													<Icon name="chevrons-down-up" size={12} />Collapse
-												</button>
-												<button class="band-btn danger tertiary" onclick={(e) => { e.stopPropagation(); leavePeek(g.id); store.deleteGroup(g.id); }} title="Delete group">
-													<Icon name="trash-2" size={12} />Delete
-												</button>
-											{/if}
 										</div>
 									</div>
 								{/if}
@@ -1283,57 +1274,6 @@
 		height: var(--cell);
 		flex: 0 0 auto;
 	}
-	.band-actions {
-		display: flex;
-		align-items: center;
-		gap: var(--sp-1);
-		flex: 0 0 auto;
-	}
-	.band-btn {
-		display: inline-flex;
-		align-items: center;
-		gap: 5px;
-		background: var(--panel-3);
-		border: 1px solid var(--line);
-		color: var(--muted);
-		font-size: var(--fs-xs);
-		border-radius: var(--radius-sm);
-		padding: 4px 9px;
-		cursor: pointer;
-		white-space: nowrap;
-		transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out);
-	}
-	.band-btn:hover {
-		color: var(--text);
-		background: var(--panel-4);
-		border-color: var(--line-strong);
-	}
-	/* "Unfold to context" — warm amber primary (the ONLY wire-changing action in peek mode).
-	   Keep the --group-accent family; do NOT recolor to accent-blue. */
-	.band-btn.primary {
-		background: color-mix(in srgb, var(--group-accent) 22%, var(--panel-3));
-		border-color: color-mix(in srgb, var(--group-accent) 55%, transparent);
-		color: var(--group-accent);
-		font-weight: 600;
-	}
-	.band-btn.primary:hover {
-		background: color-mix(in srgb, var(--group-accent) 32%, var(--panel-3));
-		border-color: var(--group-accent);
-		color: var(--group-accent-light);
-	}
-	/* Delete is tertiary in the peek row — quieter until hovered. */
-	.band-btn.tertiary {
-		opacity: 0.65;
-	}
-	.band-btn.tertiary:hover {
-		opacity: 1;
-	}
-	.band-btn.danger:hover {
-		color: var(--danger);
-		border-color: color-mix(in srgb, var(--danger) 55%, transparent);
-		background: color-mix(in srgb, var(--danger) 10%, var(--panel-3));
-	}
-
 	/* ---- ghost tiles: third visual state — "forming" ----
 	   A ghost is a presentation-only pulsing placeholder. It is NOT a block, NOT
 	   selectable, and NOT foldable. It uses the same kind color as a real tile but
