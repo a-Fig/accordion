@@ -2,10 +2,23 @@
 	import { fly } from "svelte/transition";
 	import { cubicOut } from "svelte/easing";
 	import type { AccordionStore } from "../../engine/store.svelte";
-	import type { Block } from "../../engine/types";
+	import type { Block, Group } from "../../engine/types";
+	import { groupDigest } from "$lib/engine/digest";
 	import Icon from "$lib/ui/Icon.svelte";
 
-	let { store, block, onclose }: { store: AccordionStore; block: Block | null; onclose: () => void } = $props();
+	let {
+		store,
+		block,
+		group,
+		onselect,
+		onclose,
+	}: {
+		store: AccordionStore;
+		block: Block | null;
+		group: Group | null;
+		onselect: (id: string) => void;
+		onclose: () => void;
+	} = $props();
 
 	const KIND_LABEL: Record<Block["kind"], string> = {
 		user: "User",
@@ -39,9 +52,121 @@
 	const bd = $derived(block ? body(block) : { text: "", clipped: 0 });
 
 	const isMono = $derived(block?.kind === "tool_call" || block?.kind === "tool_result");
+
+	// Block mode: is this block part of a group? Used to render the "part of group" link.
+	const inGroup = $derived(block ? store.groupOf(block) : null);
+
+	// Group mode derived values
+	const gMembers = $derived(group ? store.groupMembers(group) : []);
+	const gFullTok = $derived(group ? store.groupFullTokens(group) : 0);
+	const gLiveTok = $derived(group ? store.groupLiveTokens(group) : 0);
+	const gSavedTok = $derived(group ? store.groupSavedTokens(group) : 0);
+	const gStrag = $derived(group ? store.groupStragglerCount(group) : 0);
+	const gDigest = $derived(group ? groupDigest(group, store.groupMembers(group)) : "");
+	const gTurnFirst = $derived(gMembers.length > 0 ? gMembers[0].turn : 0);
+	const gTurnLast = $derived(gMembers.length > 0 ? gMembers[gMembers.length - 1].turn : 0);
+
+	function gTurnLabel(): string {
+		if (gMembers.length === 0) return "";
+		if (gTurnFirst === gTurnLast) return gTurnFirst === 0 ? "preamble" : `turn ${gTurnFirst}`;
+		if (gTurnFirst === 0) return `preamble–turn ${gTurnLast}`;
+		return `turns ${gTurnFirst}–${gTurnLast}`;
+	}
 </script>
 
-{#if block}
+{#if group}
+	<!-- ── GROUP MODE ──────────────────────────────────────────── -->
+	<aside class="insp" transition:fly={{ x: 24, duration: 200, easing: cubicOut, opacity: 0 }}>
+		<!-- ── Header ─────────────────────────────────────────────── -->
+		<header class="insp-header">
+			<span class="group-dot"></span>
+			<span class="group-label">group · {gMembers.length} blocks</span>
+			<span class="grow"></span>
+			<span class="turn-badge tnum">{gTurnLabel()}</span>
+			<button class="close-btn" onclick={onclose} aria-label="Close inspector" title="Close">
+				<Icon name="x" size={16} />
+			</button>
+		</header>
+
+		<!-- ── Meta row ───────────────────────────────────────────── -->
+		<div class="meta-row">
+			<div class="meta-pills">
+				{#if group.folded}
+					<span class="pill pill-warn">
+						<span class="pill-dot"></span>folded
+					</span>
+				{:else}
+					<span class="pill pill-ok">
+						<span class="pill-dot"></span>live
+					</span>
+				{/if}
+				<span class="tok-count tnum">
+					full <strong class="tok-eff">{fmt(gFullTok)}</strong>
+					<span class="tok-sep">→</span>
+					live <strong class="tok-eff">{fmt(gLiveTok)}</strong>
+					<span class="tok-unit">tok</span>
+					{#if gSavedTok > 0}
+						<span class="tok-saved"> · saves {fmt(gSavedTok)}</span>
+					{/if}
+				</span>
+				{#if gStrag > 0}
+					<span class="pill pill-accent" title="{gStrag} member(s) kept live (split tool pair)">
+						{gStrag} kept live
+					</span>
+				{/if}
+			</div>
+			<div class="meta-actions">
+				{#if group.folded}
+					<button
+						class="action-btn action-primary-group"
+						onclick={() => store.unfoldGroup(group!.id)}
+						title="Unfold group to context"
+					>
+						<Icon name="chevrons-up-down" size={14} />
+						Unfold to context
+					</button>
+					<button
+						class="action-btn action-danger"
+						onclick={() => { store.deleteGroup(group!.id); onclose(); }}
+						title="Delete group"
+					>
+						<Icon name="trash-2" size={14} />
+						Delete
+					</button>
+				{:else}
+					<button
+						class="action-btn"
+						onclick={() => store.foldGroup(group!.id)}
+						title="Re-fold group"
+					>
+						<Icon name="chevrons-down-up" size={14} />
+						Re-fold
+					</button>
+					<button
+						class="action-btn action-danger"
+						onclick={() => { store.deleteGroup(group!.id); onclose(); }}
+						title="Delete group"
+					>
+						<Icon name="trash-2" size={14} />
+						Delete
+					</button>
+				{/if}
+			</div>
+		</div>
+
+		<!-- ── Body: group digest ─────────────────────────────────── -->
+		<div class="body-wrap">
+			<div class="digest-callout">
+				<div class="digest-label">
+					<Icon name="chevrons-down-up" size={12} stroke={2} />
+					Group digest — shown to agent when folded
+				</div>
+				<pre class="digest-text mono">{gDigest}</pre>
+			</div>
+		</div>
+	</aside>
+{:else if block}
+	<!-- ── BLOCK MODE ──────────────────────────────────────────── -->
 	<aside class="insp" transition:fly={{ x: 24, duration: 200, easing: cubicOut, opacity: 0 }}>
 		<!-- ── Header ─────────────────────────────────────────────── -->
 		<header class="insp-header">
@@ -49,6 +174,12 @@
 			<span class="kind-label k-{block.kind}">{KIND_LABEL[block.kind]}</span>
 			{#if block.toolName}
 				<span class="tool-name mono">{block.toolName}</span>
+			{/if}
+			{#if inGroup}
+				<button class="group-link" onclick={() => onselect(inGroup.id)} title="Go to group">
+					<Icon name="layers" size={11} />
+					part of a group
+				</button>
 			{/if}
 			<span class="grow"></span>
 			<span class="turn-badge tnum">turn {block.turn}</span>
@@ -92,7 +223,7 @@
 					class:action-disabled={protect}
 					disabled={protect}
 					title={protect ? "Protected working tail — never folded" : folded ? "Unfold block" : "Fold block"}
-					onclick={() => store.toggle(block.id)}
+					onclick={() => store.toggle(block!.id)}
 				>
 					<Icon name={folded ? "chevrons-up-down" : "chevrons-down-up"} size={14} />
 					{folded ? "Unfold" : "Fold"}
@@ -100,7 +231,7 @@
 				<button
 					class="action-btn"
 					class:action-active={pinned}
-					onclick={() => (pinned ? store.unpin(block.id) : store.pin(block.id))}
+					onclick={() => (pinned ? store.unpin(block!.id) : store.pin(block!.id))}
 					title={pinned ? "Unpin block" : "Pin block (keeps it live)"}
 				>
 					<Icon name={pinned ? "pin-off" : "pin"} size={14} />
@@ -153,7 +284,7 @@
 					class:action-disabled={partnerProtected}
 					disabled={partnerProtected}
 					title={partnerProtected ? "Protected — never folded" : store.isFolded(partner) ? "Unfold partner" : "Fold partner"}
-					onclick={() => store.toggle(partner.id)}
+					onclick={() => store.toggle(partner!.id)}
 				>
 					<Icon name="corner-down-right" size={14} />
 					{partnerProtected ? "Protected" : store.isFolded(partner) ? "Unfold" : "Fold"} partner
@@ -514,5 +645,70 @@
 		max-height: 180px;
 		overflow-y: auto;
 		line-height: 1.5;
+	}
+
+	/* ── Group mode ─────────────────────────────────────────────── */
+	.group-dot {
+		width: 8px;
+		height: 8px;
+		border-radius: var(--radius-pill);
+		background: var(--group-accent);
+		flex: 0 0 auto;
+	}
+
+	.group-label {
+		font-size: var(--fs-sm);
+		font-weight: 600;
+		color: var(--group-accent);
+		letter-spacing: .01em;
+	}
+
+	.tok-saved {
+		color: var(--ok);
+		font-size: var(--fs-xs);
+	}
+
+	/* Primary group action — warm amber (same family as the group accent) */
+	.action-btn.action-primary-group {
+		background: color-mix(in srgb, var(--group-accent) 22%, var(--panel-3));
+		border-color: color-mix(in srgb, var(--group-accent) 55%, transparent);
+		color: var(--group-accent);
+		font-weight: 600;
+	}
+	.action-btn.action-primary-group:hover {
+		background: color-mix(in srgb, var(--group-accent) 32%, var(--panel-3));
+		border-color: var(--group-accent);
+	}
+
+	/* Danger action button (Delete) */
+	.action-btn.action-danger {
+		opacity: 0.65;
+	}
+	.action-btn.action-danger:hover {
+		opacity: 1;
+		color: var(--danger);
+		border-color: color-mix(in srgb, var(--danger) 55%, transparent);
+		background: color-mix(in srgb, var(--danger) 10%, var(--panel-3));
+	}
+
+	/* "Part of a group" chip in block mode header */
+	.group-link {
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+		background: color-mix(in srgb, var(--group-accent) 12%, var(--panel-2));
+		border: 1px solid color-mix(in srgb, var(--group-accent) 40%, transparent);
+		color: var(--group-accent);
+		font-size: var(--fs-xs);
+		font-weight: 500;
+		border-radius: var(--radius-pill);
+		padding: 2px 8px;
+		cursor: pointer;
+		white-space: nowrap;
+		transition: background var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out);
+	}
+	.group-link:hover {
+		background: color-mix(in srgb, var(--group-accent) 22%, var(--panel-2));
+		border-color: color-mix(in srgb, var(--group-accent) 70%, transparent);
 	}
 </style>

@@ -31,8 +31,11 @@
 		else stopClaudeDiscovery();
 	});
 
-	const selected = $derived(
+	const selectedBlock = $derived(
 		session.store && selectedId ? session.store.blocks.find((b) => b.id === selectedId) ?? null : null,
+	);
+	const selectedGroup = $derived(
+		session.store && selectedId ? session.store.groupById(selectedId) ?? null : null,
 	);
 	const demoSelected = $derived(discovery.selected === DEMO_ID);
 
@@ -171,12 +174,18 @@
 
 				<MapHeader store={s} readOnly={session.readOnly} />
 
-				<div class="main" class:open={!!selected}>
+				<div class="main" class:open={!!selectedBlock || !!selectedGroup}>
 					<div class="canvas">
 						<ContextMap store={s} {selectedId} onselect={(id) => (selectedId = selectedId === id ? null : id)} />
 					</div>
-					{#if selected}
-						<Inspector store={s} block={selected} onclose={() => (selectedId = null)} />
+					{#if selectedBlock || selectedGroup}
+						<Inspector
+							store={s}
+							block={selectedBlock}
+							group={selectedGroup}
+							onselect={(id) => (selectedId = id)}
+							onclose={() => (selectedId = null)}
+						/>
 					{/if}
 				</div>
 			</div>
