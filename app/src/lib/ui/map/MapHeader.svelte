@@ -36,6 +36,74 @@
 		return r >= 1000 ? `${(r / 1000).toFixed(r >= 10000 ? 0 : 1)}k` : `${r}`;
 	};
 	const fmtOverBy = (n: number) => k(Math.round(n));
+
+	// ── Protected tail: an on-bar handle (left = 0, drag right to protect more) ──
+	const PROT_MAX = 60_000;
+	const PROT_STEP = 2_000;
+	// Budget slider bounds + fill fraction (native range tracks don't paint a colored
+	// fill once a custom thumb is defined, so we drive it via background-size).
+	const BUDGET_MIN = 12_000;
+	const budgetMax = $derived(Math.max(store.contextWindow ?? 200_000, store.budget, 200_000));
+	const budgetPct = $derived(((store.budget - BUDGET_MIN) / (budgetMax - BUDGET_MIN)) * 100);
+	let barEl = $state<HTMLDivElement>();
+	// Everything on the bar is scaled to `denom` so the protected handle/tint share
+	// the composition bar's token axis. Clamp the readout to the bar so a tiny session
+	// (protect target > whole context) never paints past the right edge.
+	const protPct = $derived(Math.min(100, (store.protectTokens / denom) * 100));
+	// While dragging, the handle follows the cursor continuously (smooth) and the
+	// expensive fold commit is throttled to one per frame. `dragTokens` is non-null
+	// only mid-drag; otherwise the handle tracks the committed target.
+	let dragTokens = $state<number | null>(null);
+	const handlePct = $derived(
+		dragTokens != null ? Math.min(100, (dragTokens / denom) * 100) : protPct,
+	);
+	// The TARGET protected size the user is dialing in. The underline + its label echo
+	// this (smooth, matches the grip), NOT the actual protected tail — `protectedTokens`
+	// snaps to whole-block boundaries, so it differs slightly and jitters as you drag.
+	const targetTokens = $derived(dragTokens ?? store.protectTokens);
+	// Headroom: the slack between what's used and the budget ceiling. Only present when
+	// the budget exceeds the full (unfolded) size — i.e. denom === budget.
+	const headroomPct = $derived(Math.max(0, ((denom - store.fullTokens) / denom) * 100));
+	// What "Revert to auto" will clear: every block carrying a manual/agent override.
+	const editCount = $derived(store.blocks.filter((b) => b.override !== null).length);
+
+	function protectFromClientX(clientX: number): number {
+		if (!barEl) return store.protectTokens;
+		const r = barEl.getBoundingClientRect();
+		const frac = Math.max(0, Math.min(1, (clientX - r.left) / r.width));
+		return Math.max(0, Math.min(PROT_MAX, frac * denom));
+	}
+	// Snap to the step and commit the real fold. Only ever called on release (or via
+	// keyboard) — NEVER mid-drag, so blocks are re-folded once when you let go, not
+	// continuously while you move the handle.
+	function commitTarget(tokens: number) {
+		const snapped = Math.round(tokens / PROT_STEP) * PROT_STEP;
+		if (snapped !== store.protectTokens) store.setProtect(snapped);
+	}
+	function onProtPointerDown(e: PointerEvent) {
+		e.preventDefault();
+		(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+		dragTokens = protectFromClientX(e.clientX); // visual only — no refold yet
+	}
+	function onProtPointerMove(e: PointerEvent) {
+		if (dragTokens == null) return; // only while held
+		dragTokens = protectFromClientX(e.clientX); // visual only — no refold yet
+	}
+	function onProtPointerUp() {
+		if (dragTokens == null) return;
+		commitTarget(dragTokens); // single refold, on release
+		dragTokens = null;
+	}
+	function onProtKeydown(e: KeyboardEvent) {
+		let v = store.protectTokens;
+		if (e.key === "ArrowLeft" || e.key === "ArrowDown") v -= PROT_STEP;
+		else if (e.key === "ArrowRight" || e.key === "ArrowUp") v += PROT_STEP;
+		else if (e.key === "Home") v = 0;
+		else if (e.key === "End") v = PROT_MAX;
+		else return;
+		e.preventDefault();
+		store.setProtect(Math.max(0, Math.min(PROT_MAX, v)));
+	}
 </script>
 
 <div class="hdr">
@@ -93,28 +161,17 @@
 				</button>
 			{/if}
 
-			<label class="knob">
-				<span
-					class="kl"
-					title="Actual protected tail: {fmt(store.protectedTokens)} tokens; target: {fmt(store.protectTokens)} tokens"
-				>
-					<Icon name="lock" size={11} />
-					<span class="kl-text">protect</span>
-					<b class="mono tnum kl-val">{k(store.protectedTokens)}</b>
-					{#if store.protectedTokens !== store.protectTokens}
-						<span class="kl-target tnum">/{k(store.protectTokens)}</span>
-					{/if}
-				</span>
-				<input
-					type="range"
-					min="0"
-					max="60000"
-					step="2000"
-					value={store.protectTokens}
-					oninput={(e) => store.setProtect(+e.currentTarget.value)}
-					aria-label="Protected tokens"
-				/>
-			</label>
+			<span
+				class="kl protect-read"
+				title="Actual protected tail: {fmt(store.protectedTokens)} tokens; target: {fmt(store.protectTokens)} tokens — drag the amber handle on the bar to change it"
+			>
+				<Icon name="lock" size={11} />
+				<span class="kl-text">protect</span>
+				<b class="mono tnum kl-val">{k(store.protectedTokens)}</b>
+				{#if store.protectedTokens !== store.protectTokens}
+					<span class="kl-target tnum">/{k(store.protectTokens)}</span>
+				{/if}
+			</span>
 
 			<label class="knob">
 				<span class="kl">
@@ -124,36 +181,79 @@
 				</span>
 				<input
 					type="range"
-					min="12000"
-					max={Math.max(store.contextWindow ?? 200_000, store.budget, 200_000)}
+					min={BUDGET_MIN}
+					max={budgetMax}
 					step="2000"
 					value={store.budget}
 					oninput={(e) => store.setBudget(+e.currentTarget.value)}
 					aria-label="Context budget"
+					style:background-size="{budgetPct}% 100%"
 				/>
 			</label>
 
-			<button class="reset-btn" onclick={() => store.resetAll()}>
+			<button
+				class="reset-btn"
+				onclick={() => store.resetAll()}
+				disabled={editCount === 0}
+				title={editCount === 0
+					? "No manual edits — the view is already automatic"
+					: `Clear ${editCount} manual edit${editCount === 1 ? "" : "s"} and return to the automatic fold view`}
+			>
 				<Icon name="rotate-ccw" size={13} />
-				Reset
+				Revert to auto
+				{#if editCount > 0}<span class="reset-cnt tnum">{editCount}</span>{/if}
 			</button>
 		</div>
 	</div>
 
-	<!-- ── Composition bar ── -->
-	<div class="bar" role="img" aria-label="Context composition">
+	<!-- ── Composition bar + on-bar protected control ── -->
+	<div class="bar-area">
+		<div class="bar" bind:this={barEl} role="img" aria-label="Context composition">
+			{#each LADDER as seg (seg.kind)}
+				{@const v = liveByKind[seg.kind]}
+				{#if v > 0}
+					<span class="seg k-{seg.kind}" style:width="{(v / denom) * 100}%" title="{seg.label}: {fmt(v)} live"></span>
+				{/if}
+			{/each}
+			{#if store.savedTokens > 0}
+				<span class="seg saved-seg" style:width="{(store.savedTokens / denom) * 100}%" title="folded away: {fmt(store.savedTokens)}"></span>
+			{/if}
+			{#if headroomPct > 0.5}
+				<span class="headroom" style:left="{100 - headroomPct}%" style:width="{headroomPct}%" title="headroom: {fmt(store.budget - store.fullTokens)} under budget"></span>
+			{/if}
+			<!-- protected extent, clipped to the bar -->
+			<span class="prot-tint" style:width="{handlePct}%" aria-hidden="true"></span>
+		</div>
+
+		<!-- budget ceiling marker — sibling of .bar so its cap escapes overflow:hidden -->
 		<span class="bar-marker" style:left="{(store.budget / denom) * 100}%" title="budget: {fmt(store.budget)}">
 			<span class="bar-marker-cap" aria-hidden="true"></span>
 		</span>
-		{#each LADDER as seg (seg.kind)}
-			{@const v = liveByKind[seg.kind]}
-			{#if v > 0}
-				<span class="seg k-{seg.kind}" style:width="{(v / denom) * 100}%" title="{seg.label}: {fmt(v)} live"></span>
-			{/if}
-		{/each}
-		{#if store.savedTokens > 0}
-			<span class="seg saved-seg" style:width="{(store.savedTokens / denom) * 100}%" title="folded away: {fmt(store.savedTokens)}"></span>
-		{/if}
+
+		<!-- draggable protected handle (floats above the clipped bar) -->
+		<div
+			class="prot-grip"
+			class:dragging={dragTokens != null}
+			style:left="{handlePct}%"
+			role="slider"
+			tabindex="0"
+			aria-label="Protected tail in tokens"
+			aria-valuemin="0"
+			aria-valuemax={PROT_MAX}
+			aria-valuenow={store.protectTokens}
+			aria-valuetext="{fmt(store.protectTokens)} tokens protected"
+			onpointerdown={onProtPointerDown}
+			onpointermove={onProtPointerMove}
+			onpointerup={onProtPointerUp}
+			onpointercancel={onProtPointerUp}
+			onkeydown={onProtKeydown}
+		></div>
+
+		<!-- the slight underline echoing the protected extent -->
+		<div class="prot-underline-track" aria-hidden="true">
+			<span class="prot-underline" style:width="{handlePct}%"></span>
+			<span class="prot-underline-lab" style:left="{handlePct}%">{k(targetTokens)} protected</span>
+		</div>
 	</div>
 </div>
 
@@ -362,7 +462,12 @@
 		/* Custom track via appearance manipulation where supported */
 		appearance: none;
 		-webkit-appearance: none;
-		background: var(--panel-2);
+		/* native range tracks won't paint a colored fill once a custom thumb is set,
+		   so the accent "progress" is a no-repeat background sized via --budgetPct */
+		background-color: var(--panel-2);
+		background-image: linear-gradient(var(--accent), var(--accent));
+		background-repeat: no-repeat;
+		background-size: 0% 100%;
 		border-radius: var(--radius-pill);
 		outline: none;
 	}
@@ -401,9 +506,124 @@
 			background var(--dur-fast) var(--ease-out),
 			border-color var(--dur-fast) var(--ease-out);
 	}
-	.reset-btn:hover {
+	.reset-btn:hover:not(:disabled) {
 		background: var(--panel-4);
 		border-color: var(--line-strong);
+	}
+	.reset-btn:disabled {
+		opacity: 0.45;
+		cursor: not-allowed;
+	}
+	.reset-cnt {
+		font-family: var(--mono);
+		font-size: 10px;
+		line-height: 1;
+		font-weight: 600;
+		color: var(--accent);
+		background: var(--accent-soft);
+		border: 1px solid color-mix(in srgb, var(--accent) 25%, var(--line));
+		border-radius: var(--radius-pill);
+		padding: 1px 6px;
+	}
+
+	/* Protect readout (the slider moved onto the bar) */
+	.protect-read {
+		cursor: default;
+	}
+
+	/* ── Composition bar area: bar + on-bar protected control + underline ── */
+	.bar-area {
+		position: relative;
+		display: flex;
+		flex-direction: column;
+		gap: 5px;
+	}
+
+	/* Budget headroom: slack between usage and the ceiling */
+	.headroom {
+		position: absolute;
+		top: 0;
+		bottom: 0;
+		pointer-events: none;
+		background: repeating-linear-gradient(
+			90deg,
+			transparent,
+			transparent 5px,
+			rgba(255, 255, 255, 0.03) 5px,
+			rgba(255, 255, 255, 0.03) 6px
+		);
+		border-left: 1px dashed var(--line-strong);
+	}
+
+	/* Protected extent tint — clipped to the bar's rounded shape */
+	.prot-tint {
+		position: absolute;
+		top: 0;
+		bottom: 0;
+		left: 0;
+		pointer-events: none;
+		background: var(--accent-soft);
+		border-right: 2px solid var(--accent);
+		border-radius: var(--radius-pill) 0 0 var(--radius-pill);
+	}
+
+	/* Draggable handle — lives in .bar-area so it can extend past the clipped bar */
+	.prot-grip {
+		position: absolute;
+		top: -4px;
+		height: 34px;
+		width: 14px;
+		margin-left: -7px;
+		cursor: ew-resize;
+		z-index: 5;
+		touch-action: none;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		/* the focus-visible ring (global box-shadow) follows this radius — without it the
+		   ring would be a sharp rectangle around the transparent hit area. */
+		border-radius: var(--radius-sm);
+	}
+	.prot-grip::before {
+		content: "";
+		width: 4px;
+		height: 100%;
+		border-radius: 4px;
+		background: var(--accent);
+		box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
+		transition: box-shadow var(--dur-fast) var(--ease-out);
+	}
+	.prot-grip:hover::before,
+	.prot-grip:focus-visible::before,
+	.prot-grip.dragging::before {
+		box-shadow: 0 0 0 5px color-mix(in srgb, var(--accent) 32%, transparent);
+	}
+	.prot-grip:focus-visible {
+		outline: none;
+	}
+
+	/* The slight underline echoing the protected extent */
+	.prot-underline-track {
+		position: relative;
+		height: 13px;
+	}
+	.prot-underline {
+		position: absolute;
+		left: 0;
+		top: 0;
+		height: 3px;
+		border-radius: 3px;
+		background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 40%, transparent), var(--accent));
+	}
+	.prot-underline-lab {
+		position: absolute;
+		top: 5px;
+		transform: translateX(-50%);
+		font-family: var(--mono);
+		font-size: var(--fs-2xs);
+		color: var(--accent);
+		white-space: nowrap;
+		pointer-events: none;
 	}
 
 	/* ── Composition bar ── */
@@ -447,16 +667,18 @@
 		);
 	}
 
-	/* Budget marker line + tiny cap */
+	/* Budget marker line + tiny cap. Sibling of .bar (not a child) so the cap at
+	   top:-3px escapes .bar's overflow:hidden; height matches the bar's 28px box. */
 	.bar-marker {
 		position: absolute;
 		top: 0;
-		bottom: 0;
+		height: 28px;
 		width: 2px;
 		background: var(--text);
 		box-shadow: 0 0 0 1px var(--panel-2);
 		pointer-events: none;
 		transform: translateX(-50%);
+		z-index: 4;
 	}
 	.bar-marker-cap {
 		position: absolute;

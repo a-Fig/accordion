@@ -91,7 +91,11 @@
 		};
 	});
 
-	const isLive = $derived(live.status === "connected" || session.live);
+	// Two distinct states — keep them separate (they contradict otherwise):
+	//  • LIVE     = connected to a pi session over the socket; folds steer the agent.
+	//  • WATCHING = tailing a read-only Claude Code transcript; folds are a local lens.
+	const isLive = $derived(live.status === "connected");
+	const isWatching = $derived(session.live && session.readOnly && live.status !== "connected");
 </script>
 
 <svelte:head><title>Accordion</title></svelte:head>
@@ -130,8 +134,13 @@
 							</span>
 							{#if isLive}
 								<span class="live-chip">
-									<span class="live-dot" title={live.status === "connected" ? "Live — connected to pi" : "Live — polling for changes"}></span>
+									<span class="live-dot" title="Live — connected to pi; folds steer the agent"></span>
 									<span class="live-label">LIVE</span>
+								</span>
+							{:else if isWatching}
+								<span class="live-chip watching">
+									<span class="live-dot" title="Watching — tailing a read-only Claude Code transcript; folds are a local lens"></span>
+									<span class="live-label">WATCHING</span>
 								</span>
 							{/if}
 						</div>
@@ -174,9 +183,7 @@
 		{:else}
 			<div class="fallback">
 				<div class="hero-plate">
-					<span class="hero-icon">
-						<Icon name="accordion" size={40} stroke={1.5} />
-					</span>
+					<Icon name="accordion" size={40} stroke={1.5} />
 				</div>
 				<h1 class="hero-title">Accordion</h1>
 				<p class="sub">
@@ -250,7 +257,6 @@
 	.topbar {
 		display: flex;
 		align-items: center;
-		justify-content: space-between;
 		gap: var(--sp-3);
 		padding: 0 var(--sp-4);
 		height: 44px;
@@ -305,30 +311,44 @@
 		max-width: 38vw;
 	}
 
-	/* Live chip */
+	/* Live / Watching chip — colour driven by --chip so both states share one rule */
 	.live-chip {
+		--chip: var(--ok);
 		display: inline-flex;
 		align-items: center;
 		gap: 4px;
 		flex: 0 0 auto;
 	}
-	@keyframes livehalo {
-		0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 55%, transparent); }
-		50%       { box-shadow: 0 0 0 4px transparent; }
+	.live-chip.watching {
+		--chip: var(--accent);
+	}
+	/* compositor-only pulse (transform + opacity) — no per-frame repaint */
+	@keyframes livepulse {
+		0% { transform: scale(1); opacity: 0.5; }
+		70%, 100% { transform: scale(2.6); opacity: 0; }
 	}
 	.live-dot {
+		position: relative;
 		display: inline-block;
 		width: 7px;
 		height: 7px;
 		border-radius: 50%;
-		background: var(--ok);
+		background: var(--chip);
 		flex: 0 0 auto;
-		animation: livehalo 2s ease-in-out infinite;
+	}
+	.live-dot::after {
+		content: "";
+		position: absolute;
+		inset: 0;
+		border-radius: 50%;
+		background: var(--chip);
+		animation: livepulse 2s ease-in-out infinite;
+		pointer-events: none;
 	}
 	.live-label {
 		font-size: var(--fs-xs);
 		font-weight: 600;
-		color: var(--ok);
+		color: var(--chip);
 		letter-spacing: 0.06em;
 		line-height: 1;
 	}
@@ -417,18 +437,13 @@
 		height: 80px;
 		border-radius: var(--radius-lg);
 		background: var(--accent-soft);
-		border: 1px solid rgba(110, 168, 254, 0.2);
+		border: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
 		display: flex;
 		align-items: center;
 		justify-content: center;
 		color: var(--accent);
 		box-shadow: var(--shadow-2);
 		margin-bottom: var(--sp-1);
-	}
-	.hero-icon {
-		display: flex;
-		align-items: center;
-		justify-content: center;
 	}
 
 	.hero-title {
@@ -482,7 +497,7 @@
 		            color var(--dur-fast) var(--ease-out);
 	}
 	.btn-primary:hover {
-		background: rgba(110, 168, 254, 0.22);
+		background: color-mix(in srgb, var(--accent) 22%, transparent);
 		border-color: color-mix(in srgb, var(--accent) 50%, transparent);
 		color: var(--accent-hover);
 	}

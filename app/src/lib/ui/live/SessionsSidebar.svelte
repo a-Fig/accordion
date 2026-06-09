@@ -3,6 +3,7 @@
 	import type { ClaudeCodeSession } from "$lib/live/claude";
 	import AnimatedNumber from "$lib/ui/AnimatedNumber.svelte";
 	import Icon from "$lib/ui/Icon.svelte";
+	import SegControl from "$lib/ui/SegControl.svelte";
 	import { relTime } from "$lib/utils";
 
 	let {
@@ -140,7 +141,7 @@
 						aria-label={s.title || s.project}
 						onclick={() => onselectclaude(s)}
 					>
-						<span class="cc-mark" class:cc-sel={isSel}></span>
+						<Icon name="file-text" size={16} />
 					</button>
 				{/each}
 			</div>
@@ -154,24 +155,16 @@
 			<span class="wordmark">Accordion</span>
 
 			<!-- Segmented source switcher -->
-			<div class="seg" role="group" aria-label="Session source">
-				<button
-					class="seg-pill"
-					class:seg-active={source === "pi"}
-					onclick={() => onsource("pi")}
-				>
-					<Icon name="terminal" size={11} />
-					<span>pi</span>
-				</button>
-				<button
-					class="seg-pill"
-					class:seg-active={source === "claude"}
-					onclick={() => onsource("claude")}
-				>
-					<Icon name="message-square" size={11} />
-					<span>Claude Code</span>
-				</button>
-			</div>
+			<SegControl
+				options={[
+					{ id: "pi", label: "pi", icon: "terminal" },
+					{ id: "claude", label: "Claude Code", icon: "message-square" },
+				]}
+				value={source}
+				onchange={(v) => onsource(v as "pi" | "claude")}
+				ariaLabel="Session source"
+				iconSize={11}
+			/>
 
 			<span class="count tnum" aria-label="{activeCount} sessions">{activeCount}</span>
 
@@ -400,46 +393,6 @@
 		opacity: 0;
 	}
 
-	/* Segmented source switcher — exact spec from design system */
-	.seg {
-		display: flex;
-		gap: 3px;
-		background: var(--panel-2);
-		border: 1px solid var(--line);
-		border-radius: var(--radius-sm);
-		padding: 3px;
-		flex: 0 0 auto;
-	}
-	.seg-pill {
-		display: flex;
-		align-items: center;
-		gap: var(--sp-1);
-		font-size: var(--fs-xs);
-		font-weight: 500;
-		letter-spacing: 0.01em;
-		color: var(--muted);
-		background: transparent;
-		border: none;
-		border-radius: calc(var(--radius-sm) - 2px);
-		padding: var(--sp-1) var(--sp-2);
-		cursor: pointer;
-		line-height: 1.4;
-		white-space: nowrap;
-		transition:
-			background var(--dur-fast) var(--ease-out),
-			color var(--dur-fast) var(--ease-out),
-			box-shadow var(--dur-fast) var(--ease-out);
-	}
-	.seg-pill:hover {
-		color: var(--text);
-	}
-	.seg-pill.seg-active {
-		background: var(--panel-4);
-		color: var(--text);
-		font-weight: 600;
-		box-shadow: var(--shadow-1);
-	}
-
 	.count {
 		margin-left: auto;
 		font-size: var(--fs-xs);
@@ -509,7 +462,7 @@
 	.empty code {
 		background: var(--panel-2);
 		padding: 1px 5px;
-		border-radius: 4px;
+		border-radius: var(--radius-xs);
 		font-family: var(--mono);
 	}
 
@@ -593,26 +546,6 @@
 	.row.sel :global(.cc-icon) {
 		color: var(--accent);
 		opacity: 1;
-	}
-
-	/* Claude Code selection marker (collapsed rail) */
-	.cc-mark {
-		width: 7px;
-		height: 7px;
-		border-radius: 1px;
-		flex: 0 0 auto;
-		background: transparent;
-		border: 1.5px solid var(--muted);
-		opacity: 0.45;
-		transition:
-			opacity var(--dur-fast) var(--ease-out),
-			border-color var(--dur-fast) var(--ease-out),
-			background var(--dur-fast) var(--ease-out);
-	}
-	.cc-mark.cc-sel {
-		border-color: var(--accent);
-		opacity: 1;
-		background: color-mix(in srgb, var(--accent) 20%, transparent);
 	}
 
 	/* ===== Row body ===== */
@@ -714,7 +647,7 @@
 	}
 	.badge {
 		flex: 0 0 auto;
-		font-size: 9px;
+		font-size: var(--fs-2xs);
 		letter-spacing: 0.06em;
 		text-transform: uppercase;
 		color: var(--faint);

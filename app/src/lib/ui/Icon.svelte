@@ -94,40 +94,24 @@
 	const markup = $derived(icons[name] ?? '');
 </script>
 
-{#if title}
-	<svg
-		class="icon {cls}"
-		viewBox="0 0 24 24"
-		width={size}
-		height={size}
-		fill="none"
-		stroke="currentColor"
-		stroke-width={stroke}
-		stroke-linecap="round"
-		stroke-linejoin="round"
-		role="img"
-		aria-label={title}
-	>
-		<title>{title}</title>
-		{@html markup}
-	</svg>
-{:else}
-	<svg
-		class="icon {cls}"
-		viewBox="0 0 24 24"
-		width={size}
-		height={size}
-		fill="none"
-		stroke="currentColor"
-		stroke-width={stroke}
-		stroke-linecap="round"
-		stroke-linejoin="round"
-		aria-hidden="true"
-		focusable="false"
-	>
-		{@html markup}
-	</svg>
-{/if}
+<svg
+	class="icon {cls}"
+	viewBox="0 0 24 24"
+	width={size}
+	height={size}
+	fill="none"
+	stroke="currentColor"
+	stroke-width={stroke}
+	stroke-linecap="round"
+	stroke-linejoin="round"
+	role={title ? "img" : undefined}
+	aria-label={title || undefined}
+	aria-hidden={title ? undefined : "true"}
+	focusable={title ? undefined : "false"}
+>
+	{#if title}<title>{title}</title>{/if}
+	{@html markup}
+</svg>
 
 <style>
 	.icon {

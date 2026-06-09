@@ -41,6 +41,7 @@
 	--group-accent-light: #ffda9e;  /* hover tint for amber group button */
 
 	/* ===== Radii ===== */
+	--radius-xs: 4px;          /* inline code chips / tiny markers */
 	--radius: 10px;
 	--radius-sm: 6px;
 	--radius-lg: 14px;         /* NEW */
@@ -51,6 +52,9 @@
 	--sp-4: 16px; --sp-5: 24px; --sp-6: 32px;
 
 	/* ===== Type scale (NEW) ===== */
+	/* --fs-2xs (9px) is a deliberate floor for decorative micro-labels only
+	   (badges, the WEIGHT legend, the vertical token rail) — not body/UI text. */
+	--fs-2xs: 9px;
 	--fs-xs: 11px; --fs-sm: 12px; --fs-base: 13px;
 	--fs-md: 14px; --fs-lg: 16px; --fs-xl: 19px; --fs-2xl: 24px;
 
@@ -134,11 +138,12 @@ button {
 	font-variant-numeric: tabular-nums;
 }
 
-/* accessible focus ring — zero specificity so components can override per-element radius */
+/* accessible focus ring — the box-shadow conforms to each element's OWN border-radius,
+   so we must NOT impose a radius here: doing so squared-off every pill-shaped control
+   (--radius-pill) while focused. Elements keep their natural shape; the ring follows. */
 :where(button, a, input, select, textarea, [tabindex]):focus-visible {
 	outline: none;
 	box-shadow: var(--focus-ring);
-	border-radius: var(--radius-sm);
 }
 
 @media (prefers-reduced-motion: reduce) {
