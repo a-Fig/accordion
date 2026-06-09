@@ -80,7 +80,12 @@
 				</button>
 			{/if}
 			<label class="knob">
-				<span class="kl">protected <b class="mono">{k(store.protectTokens)}</b></span>
+				<span
+					class="kl"
+					title="Actual protected tail: {fmt(store.protectedTokens)} tokens; target: {fmt(store.protectTokens)} tokens"
+				>
+					protected <b class="mono">{k(store.protectedTokens)}</b>{#if store.protectedTokens !== store.protectTokens}<span class="target">/{k(store.protectTokens)}</span>{/if}
+				</span>
 				<input
 					type="range"
 					min="0"
@@ -192,6 +197,11 @@
 		color: var(--muted);
 		font-weight: 600;
 	}
+	.kl .target {
+		color: var(--faint);
+		font-weight: 500;
+	}
+
 	.ctl input[type="range"] {
 		width: 140px;
 		accent-color: var(--accent);
