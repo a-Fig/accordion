@@ -19,6 +19,7 @@ import { estTokens, BLOCK_OVERHEAD } from "./tokens";
 import { messageKey } from "./ids";
 import { extractIdentifiers, matchBlocks } from "./lexical";
 import { sortCandidates } from "./score";
+import { findCoalesceRuns, COALESCE_CONFIG } from "./coalesce";
 
 /** Classification of a folded group's members for accounting + the wire (ADR 0006 §4/§5). */
 interface GroupShape {
@@ -114,6 +115,19 @@ export class AccordionStore {
 	 * a conductor-unfold). Best-effort: budget is the hard guarantee.
 	 */
 	private coolUntil = new Map<string, number>();
+	/**
+	 * Group-level hysteresis (ADR 0009 §5): first-member id → turn number until which
+	 * a conductor-built group may NOT re-form. Set when a conductor group is dissolved
+	 * (unfoldGroup or deleteGroup). Group hysteresis is 8 turns (vs block hysteresis 5).
+	 * Applied by findCoalesceRuns via the groupCoolActive adapter.
+	 */
+	private groupCool = new Map<string, number>();
+	/**
+	 * Re-entrancy guard: createGroup() calls refold() internally; when coalesce's
+	 * refold() call reaches createGroup() which calls refold() again, the inner refold
+	 * must be a no-op. Set to true at refold() entry, false in finally.
+	 */
+	private _inRefold = false;
 	/**
 	 * Lexical extraction cache: avoids re-extracting identifiers every refold.
 	 * Key = `${blocks.length}:${protectedFromIndex}:${lastBlockId}`. Invalidated
@@ -381,15 +395,17 @@ export class AccordionStore {
 
 	// ---- conductor internal helpers -----------------------------------------
 
-	/** Record that a block was recalled at `turn`. Deduplicates consecutive same-turn entries. */
+	/** Record that a block was recalled at `turn`. Deduplicates globally per (id, turn). */
 	private recordRecall(id: string, turn?: number): void {
 		const t = turn ?? this.currentTurn;
 		const arr = this.recalls.get(id);
 		if (!arr) {
 			this.recalls.set(id, [t]);
 		} else {
-			// Dedupe: skip if the last recorded turn is the same
-			if (arr[arr.length - 1] !== t) arr.push(t);
+			// Global dedup: skip if ANY entry in the array is already this turn (not just the last),
+			// so repeated refolds on the same turn never inflate the recall count.
+			if (arr.includes(t)) return;
+			arr.push(t);
 		}
 		this.version++;
 	}
@@ -410,8 +426,7 @@ export class AccordionStore {
 	conductorFold(id: string): void {
 		const b = this.get(id);
 		if (!b) return;
-		if (b.override !== null) return; // respect manual state
-		if (b.override === "pinned") return;
+		if (b.override !== null) return; // respect manual state (covers pinned/unfolded/folded)
 		const i = this.index.get(id) ?? -1;
 		if (i < 0 || i >= this.protectedFromIndex) return; // protected
 		if (this.groupWire.has(id)) return; // in folded group
@@ -477,6 +492,19 @@ export class AccordionStore {
 	 * Step 4: RELAXED PASS — enforce budget even if cooldowns blocked some candidates
 	 */
 	refold(): void {
+		// Re-entrancy guard: createGroup() calls refold() as part of group creation.
+		// When the coalesce step at the bottom of this refold() calls createGroup(),
+		// we don't want another full refold pass to run inside that createGroup().
+		if (this._inRefold) return;
+		this._inRefold = true;
+		try {
+			this._refoldImpl();
+		} finally {
+			this._inRefold = false;
+		}
+	}
+
+	private _refoldImpl(): void {
 		// Step 0: a group can never overlap the protected tail; drop any that now does.
 		this.pruneProtectedGroups();
 		const protectedFrom = this.protectedFromIndex;
@@ -564,6 +592,10 @@ export class AccordionStore {
 						if (unfolded >= HYSTERESIS.maxLexicalUnfoldsPerPass) break;
 						const b = this.get(bid);
 						if (!b || !b.autoFolded || b.override !== null) continue;
+						// Skip blocks on cooldown — they are already relevance-protected;
+						// re-emitting a conductor-unfold would inflate logs and re-record recalls
+						// every turn while the identifier persists in the tail.
+						if ((this.coolUntil.get(bid) ?? 0) > T) continue;
 
 						// Check if this block is inside a FOLDED group
 						const grp = this.groupAt.get(bid);
@@ -598,6 +630,10 @@ export class AccordionStore {
 			const foldedAfter = new Set<string>();
 			for (const b of this.blocks) if (this.isFolded(b)) foldedAfter.add(b.id);
 			this.foldFlips += symmetricDiff(foldedBefore, foldedAfter);
+			// Still run coalesce: there may be auto-folded blocks from a prior pass even when
+			// budget is currently satisfied (e.g. a run coalesced last turn still has its individual
+			// autoFolded flags set, or a budget widening made the session fit but old folds remain).
+			this._runCoalesce();
 			return;
 		}
 
@@ -630,6 +666,44 @@ export class AccordionStore {
 		const foldedAfter = new Set<string>();
 		for (const b of this.blocks) if (this.isFolded(b)) foldedAfter.add(b.id);
 		this.foldFlips += symmetricDiff(foldedBefore, foldedAfter);
+
+		// Step 5: AUTO-COALESCE — collapse runs of long-cold auto-folded blocks into
+		// conductor-built flat groups (ADR 0009). Runs after the relaxed clamp so it only
+		// operates on blocks the clamp has already folded (never folds anything new).
+		// createGroup() calls refold() internally, but _inRefold blocks the inner call —
+		// safe. createGroup() already emits "grouped" with the passed actor, so no double-log.
+		this._runCoalesce();
+	}
+
+	/** Run the coalesce step (called at the bottom of _refoldImpl). Separated to keep _refoldImpl readable. */
+	private _runCoalesce(): void {
+		const T = this.currentTurn;
+		const protectedFrom = this.protectedFromIndex;
+		// Build a fast inGroup lookup from the current groupAt derived map.
+		// groupAt is a $derived, but we can read it here (it recomputes on groups change).
+		const inGroup = (id: string): boolean => !!this.groupAt.get(id);
+		const isAutoFolded = (b: Block): boolean => b.override === null && b.autoFolded;
+		const groupCoolActive = (firstId: string): boolean => (this.groupCool.get(firstId) ?? 0) > T;
+
+		const runs = findCoalesceRuns({
+			blocks: this.blocks,
+			protectedFromIndex: protectedFrom,
+			currentTurn: T,
+			inGroup,
+			isAutoFolded,
+			groupCoolActive,
+		});
+
+		for (const run of runs) {
+			// createGroup validates, snaps to whole messages, checks protection/overlap,
+			// folds on creation, and emits "grouped" with the passed actor ("conductor").
+			// The inner refold() call is a no-op due to _inRefold guard.
+			const g = this.createGroup(run.startId, run.endId, "conductor");
+			if (g) {
+				// Mark the group as conductor-built (createGroup sets folded=true already).
+				g.by = "conductor";
+			}
+		}
 	}
 
 	setBudget(n: number): void {
@@ -840,6 +914,14 @@ export class AccordionStore {
 	deleteGroup(id: string, by: Actor = "you"): void {
 		const g = this.groupById(id);
 		if (!g) return;
+		// HYSTERESIS (ADR 0009 §5): if this is a conductor-built group, set group-level cooldown
+		// so the coalesce step won't immediately re-form the same group.
+		// This covers: human delete, lexical restore (opens groups via unfoldGroup),
+		// and agent unfolds (resolveUnfold → unfoldGroup) — all go through here.
+		if (g.by === "conductor" && g.memberIds.length > 0) {
+			const firstId = g.memberIds[0];
+			this.groupCool.set(firstId, this.currentTurn + COALESCE_CONFIG.cooldownTurns);
+		}
 		this.groups = this.groups.filter((x) => x.id !== id);
 		this.emit(by, "ungrouped", `${g.memberIds.length} blocks`);
 		this.refold();
@@ -855,6 +937,13 @@ export class AccordionStore {
 	unfoldGroup(id: string, by: Actor = "you"): void {
 		const g = this.groupById(id);
 		if (!g || !g.folded) return;
+		// HYSTERESIS (ADR 0009 §5): if this is a conductor-built group, set group-level cooldown
+		// on the first member so the coalesce step won't immediately re-form the group.
+		// Applies to ALL unfolds of conductor groups regardless of caller (agent, lexical, human).
+		if (g.by === "conductor" && g.memberIds.length > 0) {
+			const firstId = g.memberIds[0];
+			this.groupCool.set(firstId, this.currentTurn + COALESCE_CONFIG.cooldownTurns);
+		}
 		g.folded = false;
 		this.groups = [...this.groups];
 		this.emit(by, "group unfolded", `${g.memberIds.length} blocks`);
@@ -870,6 +959,11 @@ export class AccordionStore {
 		const g = this.groupById(id);
 		if (!g) return;
 		g.folded ? this.unfoldGroup(id, by) : this.foldGroup(id, by);
+	}
+
+	/** Group hysteresis cooldown for a first-member id (turn until which re-coalesce is blocked). For tests/replay. */
+	groupCoolUntil(firstId: string): number {
+		return this.groupCool.get(firstId) ?? 0;
 	}
 
 	get(id: string): Block | undefined {
