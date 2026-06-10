@@ -300,7 +300,15 @@ export class AccordionStore {
 			if (!g.folded) continue;
 			if (subsumedByParent.has(g.id)) continue; // this child is subsumed by its folded parent
 			const c = this.classifyGroup(g);
-			const summaryTok = c.carrier ? groupDigestTokens(g, c.collapsedMembers) : 0;
+			// For a PARENT group (has children) the wire emits groupSummary(g) = groupEraDigest,
+			// which is multi-line and ~4x larger than a flat groupDigest. Cost the carrier with
+			// the EXACT string the agent receives, not the flat leaf-block digest.
+			// For a LEAF group (no children) the wire emits groupDigest — use groupDigestTokens.
+			const summaryTok = c.carrier
+				? g.children?.length
+					? estTokens(this.groupSummary(g)) + BLOCK_OVERHEAD
+					: groupDigestTokens(g, c.collapsedMembers)
+				: 0;
 			for (const b of c.members) {
 				if (c.collapsed.has(b.id)) m.set(b.id, { tokens: b.id === c.carrier ? summaryTok : 0, collapsed: true });
 				else m.set(b.id, { tokens: b.tokens, collapsed: false }); // straggler: live, full
@@ -961,7 +969,13 @@ export class AccordionStore {
 			return n;
 		}
 		const c = this.classifyGroup(g);
-		let n = c.carrier ? groupDigestTokens(g, c.collapsedMembers) : 0;
+		// For a PARENT group the wire emits groupSummary(g) = groupEraDigest; match that cost.
+		// For a LEAF group the wire emits groupDigest — use groupDigestTokens.
+		let n = c.carrier
+			? g.children?.length
+				? estTokens(this.groupSummary(g)) + BLOCK_OVERHEAD
+				: groupDigestTokens(g, c.collapsedMembers)
+			: 0;
 		for (const id of c.stragglers) n += this.get(id)?.tokens ?? 0;
 		return n;
 	}
@@ -1035,6 +1049,11 @@ export class AccordionStore {
 			const g = this.groupById(cid);
 			if (!g) return null; // unknown group
 			if (!g.folded) return null; // child must be folded
+			// DEPTH CAP (ADR 0011 §6): tree depth is capped at 2 (leaf → episode → era).
+			// A child group that itself has children would create depth 3+, which is not
+			// modelled by the display or wire logic in this cut. Reject it explicitly so
+			// an accidental id collision or future code path can't silently violate the cap.
+			if (g.children?.length) return null; // cannot parent a group that is itself a parent
 			children.push(g);
 		}
 		// Build the combined leaf memberIds (union of all children's memberIds, in block order).

@@ -219,7 +219,13 @@ differs in:
 3. No group at ANY depth may reach into the protected tail.
 4. `memberIds` is always leaf block ids; parent-group membership is tracked via
    `children`.
-5. The non-overlap invariant extends across all levels: a leaf block appears in
-   exactly one group's `memberIds`.
+5. The non-overlap invariant for UNSUBSUMED groups: a leaf block appears in exactly
+   one **unsubsumed** group's `memberIds` at any given display level. At depth 2 a
+   leaf block id deliberately appears in BOTH the leaf group's `memberIds` AND its
+   parent's `memberIds` (the parent stores the union of all descendants). Consumers
+   that iterate `groups` must apply the `subsumedByParent` skip-set (as `groupWire`
+   and `computeGroupOps` do) to avoid double-counting. Future consumers of `memberIds`
+   must be aware of this double-membership — the skip-set is the single gating
+   mechanism.
 6. Era formation is guarded by the same `groupCool` hysteresis and net-savings guard
    as episode formation — conductor groups never increase live cost.

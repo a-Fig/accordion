@@ -12,6 +12,7 @@ import { AccordionStore } from "./store.svelte";
 import type { Block, ParsedSession } from "./types";
 import { computeGroupOps, resolveUnfold } from "../live/plan";
 import { foldCode } from "./digest";
+import { estTokens, BLOCK_OVERHEAD } from "./tokens";
 
 function b(id: string, kind: Block["kind"], turn: number, order: number, tokens: number, callId?: string): Block {
 	return { id, kind, turn, order, text: `${id} ${"x".repeat(40)}`, tokens, callId, override: null, autoFolded: false, by: null };
@@ -412,5 +413,157 @@ describe("resolveUnfold with nested groups", () => {
 		expect(s.groupById(gA.id)!.folded).toBe(false); // gA open
 		expect(s.groupById(gB.id)!.folded).toBe(true);  // others still folded
 		void gD;
+	});
+});
+
+// ── NEW TESTS (adversarial review fixes) ────────────────────────────────────
+
+describe("WIRE-PINNED carrier accounting: parent group liveTokens matches groupSummary (Fix 1)", () => {
+	/**
+	 * For a folded PARENT group, the wire emits groupSummary(g) = groupEraDigest (multi-line,
+	 * ~4x larger than a flat groupDigest). The carrier cost must equal
+	 * estTokens(groupSummary(parent)) + BLOCK_OVERHEAD, not the flat groupDigestTokens.
+	 * This test catches the regression that let the MAJOR slip.
+	 */
+	it("groupLiveTokens for a folded parent equals estTokens(groupSummary(parent)) + BLOCK_OVERHEAD", () => {
+		const s = makeStore();
+		const { gA, gB, gC, gD } = createFourGroups(s);
+		// Create parent directly (bypassing net-savings guard so we can measure it).
+		const parent = s.createParentGroup([gA.id, gB.id, gC.id, gD.id])!;
+		expect(parent).not.toBeNull();
+		// The carrier cost must be pinned to the era summary text, not the flat digest.
+		const expectedCarrier = estTokens(s.groupSummary(parent)) + BLOCK_OVERHEAD;
+		// groupLiveTokens returns: carrier + straggler cost (no stragglers here)
+		expect(s.groupLiveTokens(parent)).toBe(expectedCarrier);
+	});
+
+	it("liveTokens reflects era carrier, not flat groupDigestTokens, when parent is folded", () => {
+		const s = makeStore();
+		const { gA, gB, gC, gD } = createFourGroups(s);
+		const parent = s.createParentGroup([gA.id, gB.id, gC.id, gD.id])!;
+		// Non-grouped blocks that contribute their own effTokens:
+		// u:1(100), u:3(100), u:5(100), u:7(100) are outside all groups; u:9(50) is protected.
+		// liveTokens = era carrier + non-grouped blocks' costs.
+		const expectedCarrier = estTokens(s.groupSummary(parent)) + BLOCK_OVERHEAD;
+		const nonGroupedCost = 100 + 100 + 100 + 100 + 50; // u:1, u:3, u:5, u:7, u:9
+		expect(s.liveTokens).toBe(expectedCarrier + nonGroupedCost);
+	});
+});
+
+describe("net-savings guard: era whose recap costs more than children is dissolved (Fix 1 downstream)", () => {
+	/**
+	 * With the FIXED carrier cost, the net-savings guard in _runCoalesce can actually see
+	 * that the era summary costs more than the sum of child summaries (for a small fixture)
+	 * and dissolve it. Before the fix, the carrier was computed with the cheap flat digest
+	 * (~36 tok vs ~140 tok for 4 children), making it APPEAR to save tokens even when it
+	 * doesn't — so the guard silently passed a budget-busting era through.
+	 *
+	 * This fixture (4 tiny groups) has an era that costs slightly MORE than its 4 children
+	 * combined (the multi-line era header + episode lines exceed 4 compact child summaries).
+	 * The guard must recognise the overpriced era and ensure liveTokens never increases.
+	 */
+	it("groupLiveTokens(parent) > sum of child groupLiveTokens when era summary is larger", () => {
+		// This is the "before guard fires" check: verify the cost relationship that triggers the guard.
+		const s = makeStore();
+		const { gA, gB, gC, gD } = createFourGroups(s);
+		const parent = s.createParentGroup([gA.id, gB.id, gC.id, gD.id])!;
+		expect(parent).not.toBeNull();
+		// With the fix, groupLiveTokens uses groupSummary (era digest) for the parent cost.
+		// For this small fixture the era header + 4 episode lines costs slightly MORE than
+		// 4 compact child summaries combined — so the guard should fire if wired correctly.
+		const eraCost = s.groupLiveTokens(parent);
+		const childTotal = s.groupLiveTokens(gA) + s.groupLiveTokens(gB) + s.groupLiveTokens(gC) + s.groupLiveTokens(gD);
+		// Verify that without the guard the era would increase cost (the guard's trigger condition).
+		// This assertion confirms the fix's parent-cost computation is correct.
+		expect(eraCost).toBeGreaterThan(childTotal);
+		// The era carrier must equal the era summary token count (WIRE-PINNED).
+		expect(eraCost).toBe(estTokens(s.groupSummary(parent)) + BLOCK_OVERHEAD);
+	});
+
+	it("liveTokens invariant holds even when a parent group exists (no double-counting)", () => {
+		const s = makeStore();
+		const { gA, gB, gC, gD } = createFourGroups(s);
+		s.createParentGroup([gA.id, gB.id, gC.id, gD.id]);
+		// Core invariant must always hold.
+		expect(s.liveTokens).toBe(s.fullTokens - s.savedTokens);
+	});
+});
+
+describe("resolveUnfold ancestor chain: child code under folded parent (Fix 2)", () => {
+	/**
+	 * When an agent has a code for a LEAF group that is subsumed by a folded PARENT,
+	 * unfolding only the inner group changes nothing on the wire — the parent's GroupOp
+	 * still removes the whole range. Fix: walk the ancestor chain and unfold EVERY folded
+	 * ancestor from outermost down, then the target group itself.
+	 */
+	it("resolving a child group code under a folded parent unfolds the parent chain first", () => {
+		const s = makeStore();
+		const { gA, gB, gC, gD } = createFourGroups(s);
+		const parent = s.createParentGroup([gA.id, gB.id, gC.id, gD.id])!;
+		// Both parent and gA are folded; agent holds gA's code.
+		expect(s.groupById(parent.id)!.folded).toBe(true);
+		expect(s.groupById(gA.id)!.folded).toBe(true);
+		const { restored, missing } = resolveUnfold(s, [foldCode(gA.id)]);
+		expect(missing).toEqual([]);
+		// Parent must be unfolded (ancestor chain walked outermost → innermost).
+		expect(s.groupById(parent.id)!.folded).toBe(false);
+		// gA itself must also be unfolded.
+		expect(s.groupById(gA.id)!.folded).toBe(false);
+		// Siblings should remain folded.
+		expect(s.groupById(gB.id)!.folded).toBe(true);
+		expect(s.groupById(gC.id)!.folded).toBe(true);
+		expect(s.groupById(gD.id)!.folded).toBe(true);
+		// restored entries must name each actually-opened group.
+		expect(restored.length).toBeGreaterThanOrEqual(2); // at least parent + gA
+	});
+
+	it("restored entries for ancestor-chain unfold name each opened group, not just the target", () => {
+		const s = makeStore();
+		const { gA, gB, gC, gD } = createFourGroups(s);
+		const parent = s.createParentGroup([gA.id, gB.id, gC.id, gD.id])!;
+		const { restored } = resolveUnfold(s, [foldCode(gA.id)]);
+		// Both parent and gA must appear in restored (honesty invariant).
+		const labels = restored.map((r) => r.label);
+		// At minimum, we should see two "group · N blocks" entries (parent and gA).
+		expect(labels.filter((l) => l.startsWith("group ·")).length).toBeGreaterThanOrEqual(2);
+		void gB; void gC; void gD;
+	});
+
+	it("after ancestor-chain unfold, computeGroupOps emits gA's own op (not the parent's)", () => {
+		const s = makeStore();
+		const { gA, gB, gC, gD } = createFourGroups(s);
+		const parent = s.createParentGroup([gA.id, gB.id, gC.id, gD.id])!;
+		// Resolve gA's code (should open parent + gA).
+		resolveUnfold(s, [foldCode(gA.id)]);
+		// Parent is now open; gA is open. gB/gC/gD remain folded.
+		const ops = computeGroupOps(s);
+		// Parent is open → no op for it.
+		expect(ops.map((o) => o.id)).not.toContain(parent.id);
+		// gA is open → no op for it.
+		expect(ops.map((o) => o.id)).not.toContain(gA.id);
+		// Siblings are still folded → their ops are present.
+		expect(ops.map((o) => o.id)).toContain(gB.id);
+		expect(ops.map((o) => o.id)).toContain(gC.id);
+		expect(ops.map((o) => o.id)).toContain(gD.id);
+	});
+});
+
+describe("createParentGroup rejects a parent-of-parent (depth cap, Fix 4)", () => {
+	it("refuses a child group that itself has children (2-level cap enforcement)", () => {
+		const s = makeStore();
+		const { gA, gB, gC, gD } = createFourGroups(s);
+		// Create a parent from gA + gB.
+		const p1 = s.createParentGroup([gA.id, gB.id])!;
+		expect(p1).not.toBeNull();
+		expect(p1.children?.length).toBe(2);
+		// Now attempt to create a grandparent from p1 + gC — must be refused (depth cap).
+		const p2 = s.createParentGroup([p1.id, gC.id]);
+		expect(p2).toBeNull();
+		// Also refuse p1 + gD.
+		const p3 = s.createParentGroup([p1.id, gD.id]);
+		expect(p3).toBeNull();
+		// gC + gD is fine (neither has children).
+		const p4 = s.createParentGroup([gC.id, gD.id]);
+		expect(p4).not.toBeNull();
 	});
 });
