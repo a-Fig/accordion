@@ -2,6 +2,7 @@ import { parse } from "./engine/parse";
 import { AccordionStore } from "./engine/store.svelte";
 import { attachSummaryQueue } from "./llm/summaryQueue.svelte";
 import { attachConductor } from "./conductor/scheduler.svelte";
+import type { ConductorHandle } from "./conductor/scheduler.svelte";
 
 /**
  * Reactive session state, shared across the app.
@@ -52,8 +53,8 @@ function _setStore(store: AccordionStore, filePath?: string | null): void {
 	session.store = store;
 	const detachQueue = attachSummaryQueue(store);
 	const sessionKey = _sessionKeyFrom(store, filePath);
-	const detachConductor = attachConductor(store, { sessionKey, live: false });
-	_detachStore = () => { detachQueue(); detachConductor(); };
+	const conductorHandle: ConductorHandle = attachConductor(store, { sessionKey, live: false });
+	_detachStore = () => { detachQueue(); conductorHandle.detach(); };
 }
 
 export async function loadSample() {
@@ -67,6 +68,10 @@ export async function loadSample() {
 		const text = await res.text();
 		if (token !== _loadToken) return; // a newer selection superseded this sample load — drop it
 		_setStore(new AccordionStore(parse(text)), null);
+		// Demo opens under real budget pressure so the conductor is visibly at work
+		// (the sample's irreducible floor is ~53k; 60k folds plenty without sitting
+		// permanently over budget).
+		session.store!.setBudget(60_000);
 		session.filePath = null;
 		session.readOnly = false;
 		_expose();

@@ -19,7 +19,7 @@ import type { CacheEntry } from "../engine/summaryCache";
 import { llmAvailable, llmGenerate } from "./gateway";
 import { summaryPrompt, PROMPT_VERSION } from "./prompts";
 import { conductor } from "../conductor/state.svelte";
-import { recordTick } from "../conductor/state.svelte";
+import { recordSummaryCall } from "../conductor/state.svelte";
 import { LlmError } from "./types";
 
 // ── Pricing (gemini-2.5-flash-lite list prices, USD per 1M tokens) ────────────
@@ -206,7 +206,7 @@ export function attachSummaryQueue(store: AccordionStore): () => void {
 
 			cache.put(entry);
 			store.setSummary(b.id, summary);
-			recordTick({
+			recordSummaryCall({
 				inTokens: resp.inTokens,
 				outTokens: resp.outTokens,
 				costUSD: resp.inTokens * PRICE_IN_PER_M / 1e6 + resp.outTokens * PRICE_OUT_PER_M / 1e6,

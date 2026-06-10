@@ -1,23 +1,28 @@
 /*
  * scheduler.svelte.ts — debounced tick scheduler for the C3 Attentive Tick.
  *
- * Owns tick triggering. Exported public surface:
- *   attachConductor(store, opts) → detach fn
- *   requestTick(reason)          → called by liveClient after each sync
+ * Owns tick triggering. Public surface:
+ *   attachConductor(store, opts) → { detach, requestTick }
  *
  * Tick lifecycle:
- *   (a) requestTick("sync") — debounce 400 ms; called by liveClient after each sync
+ *   (a) handle.requestTick("sync") — debounce 400 ms; called by liveClient after each sync
  *   (b) conductor.mode entering "attentive" → immediate tick via $effect
  *   (c) store.budget or store.protectTokens change while attentive → debounce 1000 ms
  *
- * Single-in-flight: if a tick is in-flight, a new request sets a dirty flag and
- * re-runs once after completion. Hard cap MAX_TICKS_PER_SESSION = 300.
+ * Single-in-flight per instance: if a tick is in-flight, a new request sets a dirty
+ * flag and re-runs once after completion. Hard cap MAX_TICKS_PER_SESSION = 300.
  *
  * Ticks run ONLY when conductor.mode === "attentive" && llmAvailable().
+ *
+ * INSTANCE ISOLATION: attachConductor creates a CLOSURE holding its OWN
+ * DebounceTimers, InFlightGuard, tick counter, and $effect.root. No module-level
+ * mutable singletons — each call to attachConductor is independent. An in-flight
+ * tick from a detached instance no-ops in its .finally rather than mutating the
+ * new session's guard or conductor.busy.
  */
 
 import type { AccordionStore } from "../engine/store.svelte";
-import { conductor } from "./state.svelte";
+import { conductor, resetConductorSession } from "./state.svelte";
 import { llmAvailable, llmGenerate } from "../llm/gateway";
 import { runTick } from "./tick";
 
@@ -89,76 +94,85 @@ export class InFlightGuard {
 	}
 }
 
-// ── Module-level scheduler state ──────────────────────────────────────────────
-// Only one scheduler is active at a time (one active store).
+// ── ConductorHandle — returned by attachConductor ────────────────────────────
 
-let _store: AccordionStore | null = null;
-let _sessionKey = "unknown";
-let _tickCount = 0;
-let _syncDebounce = new DebounceTimer();
-let _budgetDebounce = new DebounceTimer();
-let _inFlight = new InFlightGuard();
-
-function _fireTick(): void {
-	if (!_store) return;
-	if (conductor.mode !== "attentive") return;
-	if (!llmAvailable()) return;
-	if (conductor.tickCapReached) return;
-	if (_tickCount >= MAX_TICKS_PER_SESSION) {
-		conductor.tickCapReached = true;
-		conductor.lastError = "tick cap reached";
-		return;
-	}
-
-	if (!_inFlight.acquire()) {
-		// In-flight — dirty flag set by acquire(); onDirty will re-run once done
-		return;
-	}
-
-	conductor.busy = true;
-	_tickCount++;
-
-	const store = _store;
-	const sessionKey = _sessionKey;
-
-	runTick(store, llmGenerate, { sessionKey })
-		.catch((err: unknown) => {
-			conductor.lastError = err instanceof Error ? err.message : String(err);
-		})
-		.finally(() => {
-			conductor.busy = false;
-			_inFlight.release();
-		});
+export interface ConductorHandle {
+	/** Detach this scheduler instance: dispose effects, cancel timers, mark dead. */
+	detach: () => void;
+	/**
+	 * Schedule a debounced attentive tick (no-op when mode !== "attentive" or
+	 * LLM unavailable). Called by liveClient after each sync settles.
+	 */
+	requestTick: (reason: string) => void;
 }
 
-/**
- * Called by liveClient after each sync settles. Schedules a debounced tick.
- */
-export function requestTick(_reason: string): void {
-	if (conductor.mode !== "attentive") return;
-	_syncDebounce.schedule(_fireTick, 400);
-}
+// ── attachConductor ───────────────────────────────────────────────────────────
 
 /**
- * Attach the conductor scheduler to a store. Returns a detach function.
+ * Attach the conductor scheduler to a store. Returns a handle with detach() and
+ * requestTick().
  *
- * Uses $effect.root for reactive watchers; the returned function cleans up
- * both the root effect and any pending timers.
+ * Each call creates a fresh INSTANCE: its own DebounceTimers, InFlightGuard,
+ * tick counter, and $effect.root. No module-level shared state — so attaching
+ * a second store (e.g. live after demo) can never pollute the first instance's
+ * state, and an in-flight tick from a detached instance no-ops in its .finally.
+ *
+ * Also resets all per-session conductor counters (ticks, misses, costs, etc.) so
+ * counters don't bleed across session boundaries.
  */
 export function attachConductor(
 	store: AccordionStore,
 	opts: { sessionKey: string; live: boolean },
-): () => void {
-	// Reset session-local counters
-	_store = store;
-	_sessionKey = opts.sessionKey;
-	_tickCount = 0;
-	_syncDebounce = new DebounceTimer();
-	_budgetDebounce = new DebounceTimer();
-	_inFlight = new InFlightGuard();
+): ConductorHandle {
+	// Reset per-session counters on every new attach (session boundary).
+	resetConductorSession();
+
+	const sessionKey = opts.sessionKey;
+	let tickCount = 0;
+	let dead = false;
+
+	const syncDebounce = new DebounceTimer();
+	const budgetDebounce = new DebounceTimer();
+	const inFlight = new InFlightGuard();
+
+	function _fireTick(): void {
+		if (dead) return;
+		if (conductor.mode !== "attentive") return;
+		if (!llmAvailable()) return;
+		if (conductor.tickCapReached) return;
+		if (tickCount >= MAX_TICKS_PER_SESSION) {
+			conductor.tickCapReached = true;
+			conductor.lastError = "tick cap reached";
+			return;
+		}
+
+		if (!inFlight.acquire()) {
+			// In-flight — dirty flag set by acquire(); onDirty will re-run once done
+			return;
+		}
+
+		conductor.busy = true;
+		tickCount++;
+
+		runTick(store, llmGenerate, { sessionKey })
+			.catch((err: unknown) => {
+				if (!dead) {
+					conductor.lastError = err instanceof Error ? err.message : String(err);
+				}
+			})
+			.finally(() => {
+				// Only update shared conductor state if this instance is still the active one.
+				// A detached instance must never mutate conductor.busy or release the guard
+				// in a way that could affect a new session's scheduler.
+				if (!dead) {
+					conductor.busy = false;
+				}
+				inFlight.release();
+			});
+	}
 
 	// When dirty (a new request arrived while in-flight), reschedule via sync debounce
-	_inFlight.setOnDirty(() => _syncDebounce.schedule(_fireTick, 400));
+	inFlight.setOnDirty(() => syncDebounce.schedule(_fireTick, 400));
 
 	// $effect.root: watches mode changes and budget/protect changes
 	const cleanupEffects = $effect.root(() => {
@@ -175,15 +189,23 @@ export function attachConductor(
 			void store.budget;
 			void store.protectTokens;
 			if (conductor.mode === "attentive") {
-				_budgetDebounce.schedule(_fireTick, 1_000);
+				budgetDebounce.schedule(_fireTick, 1_000);
 			}
 		});
 	});
 
-	return function detach() {
-		_store = null;
-		_syncDebounce.cancel();
-		_budgetDebounce.cancel();
+	function detach(): void {
+		dead = true;
+		syncDebounce.cancel();
+		budgetDebounce.cancel();
 		cleanupEffects();
-	};
+	}
+
+	function requestTick(_reason: string): void {
+		if (dead) return;
+		if (conductor.mode !== "attentive") return;
+		syncDebounce.schedule(_fireTick, 400);
+	}
+
+	return { detach, requestTick };
 }

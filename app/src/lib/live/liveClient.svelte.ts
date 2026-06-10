@@ -18,7 +18,8 @@ import { folding } from "./folding.svelte";
 import { DEFAULT_PORT, PROTOCOL_VERSION, isServerMessage, type ServerMessage, type PlanMessage, type FoldOp, type GroupOp, type UnfoldResultMessage } from "./protocol";
 import { ghostStart, ghostEnd, ghostClearAll } from "./ghostState.svelte";
 import { attachSummaryQueue } from "../llm/summaryQueue.svelte";
-import { attachConductor, requestTick } from "../conductor/scheduler.svelte";
+import { attachConductor } from "../conductor/scheduler.svelte";
+import type { ConductorHandle } from "../conductor/scheduler.svelte";
 import { conductor } from "../conductor/state.svelte";
 import { foldCode, FOLDABLE_KINDS } from "../engine/digest";
 import { metricsWrite } from "../conductor/telemetry";
@@ -30,6 +31,8 @@ let manualClose = false;
 let budgetLive = false;
 /** Detach handles for the summary queue and conductor attached to the current live store. */
 let _detachLive: (() => void) | null = null;
+/** The conductor handle for the current live store (owns requestTick). */
+let _conductorHandle: ConductorHandle | null = null;
 /** Session key for the current live store (used for metrics). */
 let _sessionKey: string | null = null;
 
@@ -37,6 +40,7 @@ let _sessionKey: string | null = null;
 function _detachLiveStore(): void {
 	_detachLive?.();
 	_detachLive = null;
+	_conductorHandle = null;
 	_sessionKey = null;
 }
 
@@ -134,8 +138,9 @@ export function connectLive(port: number = DEFAULT_PORT): void {
 				const sessionKey = (msg.meta.title || "live").replace(/[^\w-]/g, "_").slice(0, 40);
 				_sessionKey = sessionKey;
 				const detachQueue = attachSummaryQueue(liveStore);
-				const detachConductor = attachConductor(liveStore, { sessionKey, live: true });
-				_detachLive = () => { detachQueue(); detachConductor(); };
+				const conductorHandle = attachConductor(liveStore, { sessionKey, live: true });
+				_conductorHandle = conductorHandle;
+				_detachLive = () => { detachQueue(); conductorHandle.detach(); };
 			}
 		} else if (msg.type === "sync") {
 			if (!session.store) return;
@@ -181,7 +186,7 @@ export function connectLive(port: number = DEFAULT_PORT): void {
 			}
 			// After the sync settles, schedule a debounced attentive tick (no-op when
 			// conductor.mode !== "attentive" or LLM unavailable).
-			requestTick("sync");
+			_conductorHandle?.requestTick("sync");
 		} else if (msg.type === "unfoldRequest") {
 			// The live agent asked (via the `unfold` tool) to restore folded blocks it saw
 			// tagged `{#<code> FOLDED}`. Resolve each code to its folded block(s) and hold
@@ -192,12 +197,18 @@ export function connectLive(port: number = DEFAULT_PORT): void {
 			// the model MORE of its own original context, so there is no provider-safety risk.
 			const codes = Array.isArray(msg.codes) ? msg.codes : [];
 
+			// Dedupe codes (a single unfold request may repeat codes; count each once).
+			const uniqueCodes = [...new Set(codes)];
+
 			// MISS METRIC — compute wasFolded BEFORE resolveUnfold (synchronous, cheap)
 			// so we capture the true state at the moment the agent asked.
+			// Only meaningful when ARMED: disarmed, the agent's real context is full (no
+			// {#code FOLDED} tags were applied), so wasFolded can never be "true" in the
+			// agent's view — counting them would inflate miss metrics spuriously.
 			const store = session.store;
-			const perCode = codes.map((code) => {
+			const perCode = uniqueCodes.map((code) => {
 				let wasFolded = false;
-				if (store) {
+				if (folding.enabled && store) {
 					// Check groups first (mirrors resolveUnfold's group-first logic)
 					for (const g of store.groups) {
 						if (g.folded && foldCode(g.id) === code) { wasFolded = true; break; }
@@ -219,16 +230,19 @@ export function connectLive(port: number = DEFAULT_PORT): void {
 			// applied), so an unfold request is stale/meaningless — applying a sticky "agent"
 			// override then would silently leak a block from the budget on the next arm.
 			const { restored, missing } =
-				folding.enabled && store ? resolveUnfold(store, codes) : { restored: [], missing: codes };
+				folding.enabled && store ? resolveUnfold(store, uniqueCodes) : { restored: [], missing: uniqueCodes };
 
 			// Fill in restored status for each code
 			const restoredCodes = new Set(restored.map((r) => r.code));
 			for (const pc of perCode) pc.restored = restoredCodes.has(pc.code);
 
-			// Update miss/preempt counters (synchronous — off the reply critical path)
-			for (const pc of perCode) {
-				if (pc.wasFolded) conductor.misses++;
-				else if (pc.restored) conductor.preempts++;
+			// Update miss/preempt counters only when armed (disarmed = no real folds applied,
+			// so "wasFolded" is meaningless and preempts/misses would be noise).
+			if (folding.enabled) {
+				for (const pc of perCode) {
+					if (pc.wasFolded) conductor.misses++;
+					else if (pc.restored) conductor.preempts++;
+				}
 			}
 
 			// Fire-and-forget metrics write
@@ -236,7 +250,7 @@ export function connectLive(port: number = DEFAULT_PORT): void {
 				at: new Date().toISOString(),
 				sessionKey: _sessionKey ?? "unknown",
 				mode: conductor.mode,
-				codes,
+				codes: uniqueCodes,
 				perCode,
 			});
 

@@ -114,7 +114,7 @@
 		/>
 	{/if}
 
-	<!-- Status cluster: busy dot + tick count + cost -->
+	<!-- Status cluster: busy dot + tick count + per-layer costs -->
 	<span class="status-cluster tnum">
 		<span
 			class="busy-dot"
@@ -123,8 +123,11 @@
 			title={conductor.busy ? "Conductor tick in flight…" : "Idle"}
 		></span>
 		<span class="tick-count">{conductor.ticks}</span>
-		{#if conductor.mode === "attentive" && conductor.costUSD > 0}
-			<span class="cost">{fmtCost(conductor.costUSD)}</span>
+		{#if conductor.mode === "attentive" && conductor.tickCostUSD > 0}
+			<span class="cost" title="Tick cost (attentive LLM calls)">tick {fmtCost(conductor.tickCostUSD)}</span>
+		{/if}
+		{#if conductor.summaryCostUSD > 0}
+			<span class="cost" title="Summary cost (C2 summarize-ahead)">sum {fmtCost(conductor.summaryCostUSD)}</span>
 		{/if}
 	</span>
 

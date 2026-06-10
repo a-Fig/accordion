@@ -472,7 +472,16 @@ export class AccordionStore {
 		const pf = this.protectedFromIndex;
 		const kept = this.groups.filter((g) => {
 			const reaches = g.memberIds.some((id) => (this.index.get(id) ?? Infinity) >= pf);
-			if (reaches) this.emit("auto", "ungrouped (protected)", `${g.memberIds.length} blocks`);
+			if (reaches) {
+				this.emit("auto", "ungrouped (protected)", `${g.memberIds.length} blocks`);
+				// HYSTERESIS (n1): when dissolving a conductor-built group, set group-level
+				// cooldown on the first member so the coalesce step won't immediately re-form
+				// the same group (mirrors the unfoldGroup/deleteGroup behaviour).
+				if (g.by === "conductor" && g.memberIds.length > 0) {
+					const firstId = g.memberIds[0];
+					this.groupCool.set(firstId, this.currentTurn + COALESCE_CONFIG.cooldownTurns);
+				}
+			}
 			return !reaches;
 		});
 		if (kept.length !== this.groups.length) this.groups = kept;
@@ -630,9 +639,10 @@ export class AccordionStore {
 			const foldedAfter = new Set<string>();
 			for (const b of this.blocks) if (this.isFolded(b)) foldedAfter.add(b.id);
 			this.foldFlips += symmetricDiff(foldedBefore, foldedAfter);
-			// Still run coalesce: there may be auto-folded blocks from a prior pass even when
-			// budget is currently satisfied (e.g. a run coalesced last turn still has its individual
-			// autoFolded flags set, or a budget widening made the session fit but old folds remain).
+			// Still run coalesce even when under budget: Step 1 reset autoFolded on all
+			// auto-controlled blocks above, so this call is idempotent for any blocks that
+			// were previously in conductor groups — it re-evaluates the coalesce runs after
+			// the reset, but groups that survive the prune step above are unaffected.
 			this._runCoalesce();
 			return;
 		}

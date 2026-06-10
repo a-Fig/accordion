@@ -176,7 +176,7 @@ export function parseTickDecision(jsonText: string): TickDecision {
 // ── TickResult ────────────────────────────────────────────────────────────────
 
 export interface TickResult {
-	skipped?: "empty-index" | "no-actionable";
+	skipped?: "empty-index";
 	folded: { id: string; reason: string }[];
 	unfolded: { id: string; reason: string }[];
 	rejected: number;
@@ -252,9 +252,20 @@ export function applyTickDecision(
 
 		if (!store.isFolded(b)) { rejected++; continue; } // not folded — nothing to do
 
+		// Snapshot before/after to detect whether conductorUnfold actually did something.
+		// conductorUnfold refuses when: override !== null (e.g. manual override), block is
+		// not autoFolded, or block is a member of a folded group. Mirror the fold path:
+		// only record + noteAction on a real transition.
+		const foldedBefore = store.isFolded(b);
 		store.conductorUnfold(entry.id, op.reason);
-		unfolded.push({ id: entry.id, reason: op.reason });
-		noteAction({ kind: "unfold", label: `${entry.kind} · t${entry.turn}`, reason: op.reason });
+		const foldedAfter = store.isFolded(b);
+
+		if (!foldedAfter && foldedBefore) {
+			unfolded.push({ id: entry.id, reason: op.reason });
+			noteAction({ kind: "unfold", label: `${entry.kind} · t${entry.turn}`, reason: op.reason });
+		} else {
+			rejected++;
+		}
 	}
 
 	// Deterministic clamp runs LAST — LLM proposes, engine disposes
@@ -286,15 +297,7 @@ export async function runTick(
 		return { skipped: "empty-index", folded: [], unfolded: [], rejected: 0, costUSD: 0 };
 	}
 
-	// Skip if there are no actionable blocks (no folded or unfoldable blocks)
-	const hasActionable = entries.some((e) => e.folded || !e.folded);
-	// At least one entry exists; but skip if no foldable blocks AND no folded blocks
-	// (i.e. nothing can be folded or unfolded)
-	const hasFoldable = entries.some((e) => !e.folded);
-	const hasFolded = entries.some((e) => e.folded);
-	if (!hasFoldable && !hasFolded) {
-		return { skipped: "no-actionable", folded: [], unfolded: [], rejected: 0, costUSD: 0 };
-	}
+	// entries.length > 0 is verified above; proceed to LLM call.
 
 	const tailText = buildTailText(store);
 	const indexLines = entries.map((e) =>
