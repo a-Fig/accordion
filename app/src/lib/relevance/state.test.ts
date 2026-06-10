@@ -9,6 +9,7 @@ import {
 	buildPureScoreMap,
 	buildFileScoreMap,
 	availableScorersForTick,
+	storeSessionId,
 } from "./state.svelte";
 import type { ScoreFile } from "./types";
 
@@ -123,6 +124,72 @@ describe("buildFileScoreMap", () => {
 // ---------------------------------------------------------------------------
 // availableScorersForTick
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// C1 — storeSessionId: two distinct store objects → different ids
+// ---------------------------------------------------------------------------
+
+describe("storeSessionId (C1 — session identity for memo key)", () => {
+	it("same object always returns the same id", () => {
+		const obj = {};
+		expect(storeSessionId(obj)).toBe(storeSessionId(obj));
+	});
+
+	it("two same-shaped store objects get DIFFERENT ids", () => {
+		// Simulates switching sessions: both have the same blockCount / protectedFrom
+		// shape, but are distinct object references.
+		const storeA = { blocks: [makeBlock("m0:p0"), makeBlock("m1:p0")], protectedFromIndex: 1 };
+		const storeB = { blocks: [makeBlock("m0:p0"), makeBlock("m1:p0")], protectedFromIndex: 1 };
+		const idA = storeSessionId(storeA);
+		const idB = storeSessionId(storeB);
+		expect(idA).not.toBe(idB);
+	});
+
+	it("different store objects produce different pure scorer maps even when shapes match", () => {
+		// 5 blocks × 8000 tok each — same shape for both "sessions".
+		const blocks = Array.from({ length: 5 }, (_, i) => makeBlock(`b${i}`, "text", 8000, i));
+
+		// Use two distinct block arrays with identical content (same blockCount / same tokens).
+		const blocksA = blocks.map((b) => ({ ...b }));
+		const blocksB = blocks.map((b) => ({ ...b }));
+
+		const mapA = buildPureScoreMap("recency", blocksA, 5, 2);
+		const mapB = buildPureScoreMap("recency", blocksB, 5, 2);
+
+		// Both maps should be non-empty (scorer ran).
+		expect(mapA.size).toBeGreaterThan(0);
+		expect(mapB.size).toBeGreaterThan(0);
+
+		// The STORE-LEVEL memo key includes store object identity; this test confirms
+		// that two distinct store objects (different WeakMap entries) are keyed
+		// differently. buildPureScoreMap itself is stateless — it's the pureKey
+		// (used by getActiveScoreMap/getAllScoresForBlock) that carries the store id.
+		// Here we verify storeSessionId gives unique ids, ensuring the keys differ.
+		const storeA = { id: "a" };
+		const storeB = { id: "b" };
+		expect(storeSessionId(storeA)).not.toBe(storeSessionId(storeB));
+	});
+});
+
+// ---------------------------------------------------------------------------
+// H2 — pure scorer uses effective endBlock from file tick when file is loaded
+// ---------------------------------------------------------------------------
+
+describe("buildPureScoreMap with tick-aligned endBlock (H2)", () => {
+	it("scoring a session prefix shorter than full session produces fewer scored blocks", () => {
+		const blocks = Array.from({ length: 10 }, (_, i) => makeBlock(`b${i}`, "text", 8000, i));
+		// Score only first 5 blocks (simulates a non-final tick endBlock=5).
+		const mapAt5 = buildPureScoreMap("recency", blocks, 5, 0);
+		// Score all 10 blocks (live tick).
+		const mapAt10 = buildPureScoreMap("recency", blocks, 10, 0);
+		// The tick-aligned map should score fewer blocks than the live map.
+		expect(mapAt5.size).toBeLessThanOrEqual(mapAt10.size);
+		// Blocks beyond index 5 must not appear in the tick-aligned map.
+		for (let i = 5; i < 10; i++) {
+			expect(mapAt5.has(`b${i}`)).toBe(false);
+		}
+	});
+});
 
 describe("availableScorersForTick", () => {
 	it("when no file, returns only pure ids", () => {

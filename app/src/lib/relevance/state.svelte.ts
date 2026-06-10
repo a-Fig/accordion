@@ -119,9 +119,28 @@ export function availableScorersForTick(file: ScoreFile | null, tickIndex: numbe
 // Memoization key helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Module-level WeakMap that hands each AccordionStore object a stable numeric
+ * identity. Block ids are positional (m0:p0…) and collide across sessions, so
+ * the memo key must include something tied to store object identity, not to
+ * meta fields (which can also collide). A WeakMap doesn't prevent GC.
+ */
+const _storeIds = new WeakMap<object, number>();
+let _storeIdCounter = 0;
+
+/** Return (or assign) a stable numeric id for a store instance. Exported for tests. */
+export function storeSessionId(store: object): number {
+	let id = _storeIds.get(store);
+	if (id === undefined) {
+		id = ++_storeIdCounter;
+		_storeIds.set(store, id);
+	}
+	return id;
+}
+
 type MemoKey = string;
-function pureKey(id: ScorerId, blockCount: number, protectedFrom: number): MemoKey {
-	return `${id}:${blockCount}:${protectedFrom}`;
+function pureKey(id: ScorerId, storeId: number, blockCount: number, protectedFrom: number): MemoKey {
+	return `${id}:${storeId}:${blockCount}:${protectedFrom}`;
 }
 function fileKey(id: ScorerId, sessionId: string, tick: number): MemoKey {
 	return `${id}:${sessionId}:${tick}`;
@@ -156,7 +175,7 @@ const _fileMemo = new Map<MemoKey, Map<string, number>>();
  * Called inside component $derived.by(() => getActiveScoreMap()) so Svelte tracks
  * reactive reads of `relevanceLab.*` and `session.store.*` automatically.
  *
- * Pure scorers: memoized by (id, blockCount, protectedFromIndex).
+ * Pure scorers: memoized by (id, storeObjectId, blockCount, protectedFromIndex).
  * File scorers: memoized by (id, sessionId, tickIndex).
  */
 export function getActiveScoreMap(): Map<string, number> {
@@ -168,21 +187,42 @@ export function getActiveScoreMap(): Map<string, number> {
 	const blocks = st.blocks;
 	const endBlock = blocks.length;
 	const atBlock = st.protectedFromIndex;
+	const storeId = storeSessionId(st);
+
+	// External scorer — needs a loaded file.
+	const file = relevanceLab.file;
+	const tickIndex = relevanceLab.tickIndex;
 
 	if (PURE_IDS.has(scorerId)) {
-		const key = pureKey(scorerId, endBlock, atBlock);
+		// When a file is loaded, align pure scorers to the active tick's prefix so
+		// both pure and external scorers see the SAME evaluation point. H2 fix.
+		let effectiveEndBlock = endBlock;
+		let tickOrdinal = -1; // -1 = live (no file), used in memo key
+		if (file) {
+			const tick = file.ticks[Math.max(0, Math.min(tickIndex, file.ticks.length - 1))];
+			if (tick) {
+				// Guard: tick was built from a different session, or session not yet loaded that far.
+				const firstIdOk = !tick.blockIds.length || tick.blockIds[0] === blocks[0]?.id;
+				if (tick.endBlock > blocks.length || !firstIdOk) {
+					// Fall back to live and surface an error.
+					relevanceLab.error = "Score file tick doesn't match this session — showing live scores.";
+				} else {
+					relevanceLab.error = null;
+					effectiveEndBlock = tick.endBlock;
+					tickOrdinal = tick.tick;
+				}
+			}
+		}
+		const key = pureKey(scorerId, storeId, effectiveEndBlock, tickOrdinal);
 		const cached = _pureMemo.get(key);
 		if (cached) return cached;
-		const result = buildPureScoreMap(scorerId, blocks, endBlock, atBlock);
+		const result = buildPureScoreMap(scorerId, blocks, effectiveEndBlock, atBlock);
 		if (_pureMemo.size > 32) _pureMemo.clear();
 		_pureMemo.set(key, result);
 		return result;
 	}
 
-	// External scorer — needs a loaded file.
-	const file = relevanceLab.file;
 	if (!file) return new Map();
-	const tickIndex = relevanceLab.tickIndex;
 	const key = fileKey(scorerId, file.sessionId, tickIndex);
 	const cached = _fileMemo.get(key);
 	if (cached) return cached;
@@ -210,15 +250,31 @@ export function getAllScoresForBlock(blockId: string): Map<ScorerId, number | nu
 	const blocks = st.blocks;
 	const endBlock = blocks.length;
 	const atBlock = st.protectedFromIndex;
+	const storeId = storeSessionId(st);
 	const file = relevanceLab.file;
 	const tickIndex = relevanceLab.tickIndex;
 
+	// Resolve the effective endBlock for pure scorers — align to the file tick when
+	// loaded so the Inspector table compares scorers at the SAME evaluation point.
+	let effectiveEndBlock = endBlock;
+	let tickOrdinal = -1;
+	if (file) {
+		const tick = file.ticks[Math.max(0, Math.min(tickIndex, file.ticks.length - 1))];
+		if (tick) {
+			const firstIdOk = !tick.blockIds.length || tick.blockIds[0] === blocks[0]?.id;
+			if (tick.endBlock <= blocks.length && firstIdOk) {
+				effectiveEndBlock = tick.endBlock;
+				tickOrdinal = tick.tick;
+			}
+		}
+	}
+
 	// Pure scorers
 	for (const id of PURE_IDS) {
-		const key = pureKey(id, endBlock, atBlock);
+		const key = pureKey(id, storeId, effectiveEndBlock, tickOrdinal);
 		let map = _pureMemo.get(key);
 		if (!map) {
-			map = buildPureScoreMap(id, blocks, endBlock, atBlock);
+			map = buildPureScoreMap(id, blocks, effectiveEndBlock, atBlock);
 			if (_pureMemo.size > 32) _pureMemo.clear();
 			_pureMemo.set(key, map);
 		}

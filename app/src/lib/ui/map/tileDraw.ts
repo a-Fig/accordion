@@ -138,7 +138,7 @@ const HEAT_LUT: readonly string[] = (() => {
 
 /** Map a normalized [0,1] score to one of the 16 LUT entries. */
 function heatColor(score: number): string {
-  const bucket = Math.min(15, Math.floor(score * 16));
+  const bucket = Math.max(0, Math.min(15, Math.floor(score * 16)));
   return HEAT_LUT[bucket];
 }
 

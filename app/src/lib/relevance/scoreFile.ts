@@ -26,6 +26,12 @@ export function validateScoreFile(json: unknown): ScoreFile | null {
 		if (!Array.isArray(t["blockIds"])) return null;
 		if (typeof t["scorers"] !== "object" || t["scorers"] === null) return null;
 		if (typeof t["scores"] !== "object" || t["scores"] === null) return null;
+		// Each scores array must have length === blockIds.length to avoid mis-zipping.
+		const blockIds = t["blockIds"] as unknown[];
+		const scores = t["scores"] as Record<string, unknown>;
+		for (const arr of Object.values(scores)) {
+			if (Array.isArray(arr) && arr.length !== blockIds.length) return null;
+		}
 	}
 	return json as ScoreFile;
 }

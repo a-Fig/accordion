@@ -88,6 +88,45 @@ describe("validateScoreFile", () => {
 		expect(validateScoreFile(bad)).toBeNull();
 	});
 
+	it("rejects tick where scores array length !== blockIds length", () => {
+		const bad = {
+			version: 1,
+			sessionId: "x",
+			generatedAt: "2026-01-01T00:00:00Z",
+			ticks: [
+				{
+					tick: 0,
+					endBlock: 3,
+					atBlock: 2,
+					blockIds: ["b0", "b1"],
+					scorers: {},
+					// embed has 3 entries but blockIds has 2 — should be rejected
+					scores: { embed: [0.1, 0.5, 0.9] },
+				},
+			],
+		};
+		expect(validateScoreFile(bad)).toBeNull();
+	});
+
+	it("accepts tick where scores array lengths all match blockIds", () => {
+		const good = {
+			version: 1,
+			sessionId: "x",
+			generatedAt: "2026-01-01T00:00:00Z",
+			ticks: [
+				{
+					tick: 0,
+					endBlock: 3,
+					atBlock: 2,
+					blockIds: ["b0", "b1"],
+					scorers: {},
+					scores: { embed: [0.1, 0.9] },
+				},
+			],
+		};
+		expect(validateScoreFile(good)).not.toBeNull();
+	});
+
 	it("roundtrip: parse → validate → same structure", () => {
 		const original: ScoreFile = {
 			version: 1,

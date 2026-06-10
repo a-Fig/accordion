@@ -12,7 +12,7 @@
  * - Ties share the mean of their would-be ranks (fractional rank averaging).
  * - Single non-null element → 1.
  * - All-null input → all null.
- * - All-equal non-null input → all 1 (single effective rank).
+ * - All-equal non-null input → all 0.5 (shared mean rank of all items).
  */
 export function rankNormalize(raw: (number | null)[]): (number | null)[] {
 	if (!raw.length) return [];
