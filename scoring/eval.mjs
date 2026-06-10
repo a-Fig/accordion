@@ -62,6 +62,9 @@ const { buildTickContext } = contextMod;
 const scoreFileMod = await jiti.import(path.join(APP_LIB, "relevance", "scoreFile.ts"));
 const { validateScoreFile } = scoreFileMod;
 
+const mappingMod = await jiti.import(path.join(APP_LIB, "live", "mapping.ts"));
+const { linearize } = mappingMod;
+
 // ---------------------------------------------------------------------------
 // Collect pairs from args or manifest
 // ---------------------------------------------------------------------------
@@ -332,23 +335,194 @@ function findUnfoldEvents(rawJsonl) {
 }
 
 /**
+ * Build a wire-block-id → engine-block-id mapping from the raw JSONL.
+ *
+ * Strategy: walk JSONL entries in order. For each "message" entry, linearize
+ * emits a run of wire blocks and parse emits a run of engine blocks. We iterate
+ * both runs in sync per message and match positionally when counts are equal.
+ * When counts differ (the known ±1 off-by-one) we match by kind sequence and
+ * use callId cross-check for tool_result blocks as a verification assert.
+ *
+ * Returns Map<wireId, engineId>.
+ */
+function buildWireToEngineMap(rawJsonl, engineBlocks) {
+  const lines = rawJsonl.split("\n").filter(Boolean);
+  const entries = [];
+  for (const line of lines) {
+    try { entries.push(JSON.parse(line)); } catch {}
+  }
+
+  // Extract messages for linearize (same extraction as gold-debug.mjs)
+  const msgs = entries.map((e) => e.message).filter(Boolean);
+
+  // linearize gives us all wire blocks
+  const wireBlocks = linearize(msgs);
+
+  // Build a callId → engineBlockId map for tool_result verification
+  const callIdToEngineId = new Map();
+  for (const b of engineBlocks) {
+    if (b.kind === "tool_result" && b.callId) callIdToEngineId.set(b.callId, b.id);
+  }
+
+  const wireToEngine = new Map(); // wireId → engineId
+
+  // Walk JSONL entries, processing "message" entries one at a time.
+  // For each such entry we need to know which wire blocks and which engine blocks it emits.
+  // We replay both traversals in parallel using a shared cursor approach.
+
+  let wireCursor = 0;
+  let engCursor = 0;
+  let ei = 0;
+
+  for (const e of entries) {
+    const eid = e.id || `__e${ei}`;
+    ei++;
+
+    if (e.type !== "message") {
+      // compaction emits 1 engine block (tool_result), no wire block
+      if (e.type === "compaction") {
+        engCursor += 1;
+      }
+      continue;
+    }
+
+    const m = e.message || {};
+
+    // Predict how many wire blocks linearize emits for this message
+    let wireCount = 0;
+    if (m.role === "user") {
+      // linearize: push user block only if text is non-empty (same guard as Sink.push)
+      const txt = typeof m.content === "string"
+        ? m.content
+        : Array.isArray(m.content)
+          ? m.content.filter((b) => b && b.type === "text" && typeof b.text === "string").map((b) => b.text).join("\n")
+          : "";
+      if (txt) wireCount = 1;
+    } else if (m.role === "assistant") {
+      const parts = Array.isArray(m.content) ? m.content : [];
+      for (const b of parts) {
+        if (b?.type === "thinking" && b.thinking) wireCount++;
+        else if (b?.type === "text" && b.text) wireCount++;
+        else if (b?.type === "toolCall") wireCount++;
+      }
+    } else if (m.role === "toolResult") {
+      // wire always pushes tool_result (even empty text — same as parse.ts)
+      wireCount = 1;
+    }
+    // other roles: 0 unless summary present (mapped as text)
+    if (m.role !== "user" && m.role !== "assistant" && m.role !== "toolResult") {
+      if (typeof m.summary === "string" && m.summary) wireCount = 1;
+    }
+
+    // Predict how many engine blocks parse.ts (parsePi) emits for this entry
+    let engCount = 0;
+    if (m.role === "user") {
+      const txt = typeof m.content === "string"
+        ? m.content
+        : Array.isArray(m.content)
+          ? m.content.filter((b) => b && b.type === "text" && typeof b.text === "string").map((b) => b.text).join("\n")
+          : "";
+      if (txt) engCount = 1;
+    } else if (m.role === "assistant") {
+      const parts = Array.isArray(m.content) ? m.content : [];
+      for (const b of parts) {
+        if (b?.type === "thinking" && b.thinking) engCount++;
+        else if (b?.type === "text" && b.text) engCount++;
+        else if (b?.type === "toolCall") engCount++;
+      }
+    } else if (m.role === "toolResult") {
+      engCount = 1;
+    }
+
+    // Collect the wire and engine blocks for this message
+    const wSlice = wireBlocks.slice(wireCursor, wireCursor + wireCount);
+    const eSlice = engineBlocks.slice(engCursor, engCursor + engCount);
+
+    if (wSlice.length === eSlice.length) {
+      // Equal length: zip positionally
+      for (let k = 0; k < wSlice.length; k++) {
+        wireToEngine.set(wSlice[k].id, eSlice[k].id);
+        // Cross-check tool_result via callId
+        if (wSlice[k].kind === "tool_result" && wSlice[k].callId) {
+          const expected = callIdToEngineId.get(wSlice[k].callId);
+          if (expected && expected !== eSlice[k].id) {
+            console.warn(`    [wire→eng] callId mismatch for ${wSlice[k].id}: expected eng ${expected}, got ${eSlice[k].id}`);
+          }
+        }
+      }
+    } else {
+      // Counts differ — match by kind sequence
+      const wByKind = new Map();
+      for (const w of wSlice) {
+        if (!wByKind.has(w.kind)) wByKind.set(w.kind, []);
+        wByKind.get(w.kind).push(w);
+      }
+      const eByKind = new Map();
+      for (const eb of eSlice) {
+        if (!eByKind.has(eb.kind)) eByKind.set(eb.kind, []);
+        eByKind.get(eb.kind).push(eb);
+      }
+      // For tool_result, use callId cross-check (most reliable)
+      for (const w of wSlice) {
+        if (w.kind === "tool_result" && w.callId) {
+          const eId = callIdToEngineId.get(w.callId);
+          if (eId) {
+            wireToEngine.set(w.id, eId);
+            continue;
+          }
+        }
+        // Positional match within same kind
+        const wKindArr = wByKind.get(w.kind) || [];
+        const eKindArr = eByKind.get(w.kind) || [];
+        const wPos = wKindArr.indexOf(w);
+        if (wPos >= 0 && wPos < eKindArr.length) {
+          wireToEngine.set(w.id, eKindArr[wPos].id);
+        } else {
+          console.warn(`    [wire→eng] cannot map wire block ${w.id} (kind=${w.kind}) — skipping`);
+        }
+      }
+    }
+
+    wireCursor += wireCount;
+    engCursor += engCount;
+  }
+
+  return wireToEngine;
+}
+
+/**
  * Given unfold events and blocks, resolve each code/id to block ids.
  * Handles both:
- *   - fold codes (6-char base36) via foldCode() mapping
+ *   - fold codes (6-char base36) via foldCode(wireBlock.id) — PRIMARY path
+ *   - fold codes via foldCode(engineBlock.id) — FALLBACK for static/replayed sessions
  *   - direct block ids (containing ':') via identity lookup
- *   - 4-char "short codes" (older format with `ids` field)
  *
  * Returns array of { code, blockId, eventTurn }
  */
-function resolveUnfoldEvents(unfoldEvents, blocks) {
-  // Build code → blockId[] map for all foldable blocks
-  const codeMap = new Map(); // code → blockId[]
+function resolveUnfoldEvents(unfoldEvents, blocks, rawJsonl) {
+  // Build wire → engine id map (primary resolution path)
+  const wireToEngine = buildWireToEngineMap(rawJsonl, blocks);
+
+  // Build wire-code → engineBlockId[] map (primary)
+  const wireCodeMap = new Map(); // foldCode(wireId) → engineId[]
+  for (const [wireId, engineId] of wireToEngine) {
+    // Only map foldable blocks
+    const engBlock = blocks.find((b) => b.id === engineId);
+    if (!engBlock || !FOLDABLE_KINDS.has(engBlock.kind)) continue;
+    const code = foldCode(wireId);
+    if (!wireCodeMap.has(code)) wireCodeMap.set(code, []);
+    wireCodeMap.get(code).push(engineId);
+  }
+
+  // Fallback: engine-id-based code map (for static/replayed sessions)
+  const engCodeMap = new Map(); // foldCode(engineId) → blockId[]
   for (const b of blocks) {
     if (!FOLDABLE_KINDS.has(b.kind)) continue;
     const code = foldCode(b.id);
-    if (!codeMap.has(code)) codeMap.set(code, []);
-    codeMap.get(code).push(b.id);
+    if (!engCodeMap.has(code)) engCodeMap.set(code, []);
+    engCodeMap.get(code).push(b.id);
   }
+
   // Also build id → block for direct id lookups
   const blockIdSet = new Set(blocks.map((b) => b.id));
 
@@ -361,12 +535,21 @@ function resolveUnfoldEvents(unfoldEvents, blocks) {
           resolved.push({ code, blockId: code, eventTurn: ev.eventTurn });
         }
       } else {
-        // fold code — look up via codeMap
-        const blockIds = codeMap.get(code);
-        if (!blockIds || !blockIds.length) continue;
-        for (const blockId of blockIds) {
-          resolved.push({ code, blockId, eventTurn: ev.eventTurn });
+        // fold code — try wire-based map first, fall back to engine-based
+        const wireMatches = wireCodeMap.get(code);
+        if (wireMatches && wireMatches.length) {
+          for (const blockId of wireMatches) {
+            resolved.push({ code, blockId, eventTurn: ev.eventTurn });
+          }
+          continue;
         }
+        const engMatches = engCodeMap.get(code);
+        if (engMatches && engMatches.length) {
+          for (const blockId of engMatches) {
+            resolved.push({ code, blockId, eventTurn: ev.eventTurn });
+          }
+        }
+        // If neither matched, code is unresolvable — silently drop (logged via count)
       }
     }
   }
@@ -474,7 +657,7 @@ async function evaluateSession(scoreFilePath, sessionPath) {
 
   // ---- Gold events ----
   const unfoldEventsRaw = findUnfoldEvents(rawJsonl);
-  const unfoldEvents = resolveUnfoldEvents(unfoldEventsRaw, blocks);
+  const unfoldEvents = resolveUnfoldEvents(unfoldEventsRaw, blocks, rawJsonl);
 
   console.log(`    unfold events found: ${unfoldEventsRaw.length}  resolved to ${unfoldEvents.length} block(s)`);
 

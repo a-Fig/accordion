@@ -8,24 +8,25 @@ LLM signal), and (b) gold events (agent unfold calls — a sparse but
 unbiased behavioral signal). Interpret nDCG/P@10 for bm25/actr/graph
 as upper-bound optimism; compare to judge's numbers for calibration.
 
-Generated: 2026-06-10T22:02:19.616Z
-Total Vertex spend: $0.3013
+Generated: 2026-06-10T23:34:57.223Z
+Total Vertex spend: $0.3988
 
 ## Sample session
-Blocks: 982  |  Ticks: 12 (11 valid)
+
+Blocks: 982  |  Ticks: 12 (11 valid, 1 skipped for <3 silver positives)
 
 ### Scorer comparison (silver labels)
 
 | scorer  | nDCG@10 | P@10  | Spearman-vs-judge | wall (total) | cost (total) |
 | ------- | ------- | ----- | ----------------- | ------------ | ------------ |
-| recency | 0.178   | 0.227 | 0.061             | —            | $0.000       |
-| actr    | 1.000   | 1.000 | -0.005            | 351ms        | $0.000       |
-| bm25    | 1.000   | 1.000 | 0.027             | 437ms        | $0.000       |
-| graph   | 1.000   | 1.000 | 0.031             | 257ms        | $0.000       |
-| embed   | 0.970   | 0.964 | 0.069             | 6.8s         | $0.000       |
-| judge   | 0.664   | 0.645 | 1.000             | 113.7s       | $0.1364      |
-| attn    | 0.469   | 0.482 | 0.027             | 290.3s       | $0.000       |
-| rerank  | 0.708   | 0.682 | 0.069             | 394.4s       | $0.000       |
+| recency | 0.178   | 0.227 | 0.06              | —            | $0.0000      |
+| actr    | 1.000   | 1.000 | -0.00             | 351ms        | $0.0000      |
+| bm25    | 1.000   | 1.000 | 0.03              | 437ms        | $0.0000      |
+| graph   | 1.000   | 1.000 | 0.03              | 257ms        | $0.0000      |
+| embed   | 0.970   | 0.964 | 0.07              | 6.8s         | $0.0000      |
+| judge   | 0.664   | 0.645 | 1.00              | 113.7s       | $0.1364      |
+| attn    | 0.469   | 0.482 | 0.03              | 290.3s       | $0.0000      |
+| rerank  | 0.708   | 0.682 | 0.07              | 394.4s       | $0.0000      |
 
 ### Spearman 8×8 matrix (sample session, pooled across ticks)
 
@@ -48,23 +49,81 @@ Blocks: 982  |  Ticks: 12 (11 valid)
 | ----------------- | ------ | ----- | --------- | ---------- | ---------- | ----------- |
 | 2026-06-…         | 12     | 0/0   | —         | —          | —          | —           |
 | 2026-06-…         | 47     | 0/6   | —         | —          | —          | —           |
+| 2026-06-…         | 644    | 7/8   | 0.919     | 0.977      | 0.829      | 0.860       |
+| 2026-06-…         | 567    | 3/8   | 0.978     | 1.000      | 0.709      | 0.806       |
+| 2026-06-…         | 223    | 7/8   | 1.000     | 0.991      | 0.761      | 0.848       |
 
 ### Pooled corpus metrics (all corpus sessions, mean of per-session means)
 
 | scorer  | nDCG@10 (corpus) | P@10 (corpus) |
 | ------- | ---------------- | ------------- |
-| recency | —                | —             |
-| actr    | —                | —             |
-| bm25    | —                | —             |
-| graph   | —                | —             |
-| embed   | —                | —             |
-| judge   | —                | —             |
-| attn    | —                | —             |
-| rerank  | —                | —             |
+| recency | 0.331            | 0.393         |
+| actr    | 0.988            | 0.989         |
+| bm25    | 0.974            | 0.974         |
+| graph   | 0.982            | 0.979         |
+| embed   | 0.985            | 0.980         |
+| judge   | 0.741            | 0.748         |
+| attn    | 0.438            | 0.459         |
+| rerank  | 0.805            | 0.803         |
 
-## Gold events
+## Gold events (agent unfold — 17 rows from 1 corpus session)
 
-No gold events resolved with preceding ticks.
+Rank percentile: 1.0 = ranked most relevant by that scorer.
+All rows are from the same corpus session (8-char prefix `2026-06-…`).
+
+| session   | blockId    | evTurn | tick | recency | actr | bm25 | graph | embed | judge | attn | rerank |
+| --------- | ---------- | ------ | ---- | ------- | ---- | ---- | ----- | ----- | ----- | ---- | ------ |
+| 2026-06-… | 701b1250:1 | 13     | 1    | 0.99    | 0.97 | 0.90 | 0.92  | 0.99  | 0.78  | 0.37 | 0.99   |
+| 2026-06-… | 7e3cfe2f:r | 13     | 1    | 0.00    | 1.00 | 0.92 | 0.99  | 0.98  | 0.67  | 0.85 | 0.73   |
+| 2026-06-… | 1d12712c:r | 13     | 1    | 0.00    | 0.90 | 0.82 | 0.90  | 0.93  | 0.67  | 0.92 | 0.81   |
+| 2026-06-… | f68987e8:r | 13     | 1    | 0.00    | 0.26 | 0.72 | 0.30  | 0.90  | 0.67  | 0.62 | 0.90   |
+| 2026-06-… | bc6d7b49:r | 13     | 1    | 0.00    | 0.97 | 0.94 | 0.94  | 0.94  | 0.67  | 0.21 | 0.83   |
+| 2026-06-… | 4883d29a:r | 13     | 1    | 0.00    | 0.98 | 0.86 | 0.96  | 0.95  | 0.91  | 0.21 | 0.94   |
+| 2026-06-… | 61269e39:r | 13     | 1    | 0.00    | 0.92 | 0.92 | 0.95  | 0.85  | 0.52  | 0.32 | 0.94   |
+| 2026-06-… | 65ced675:r | 13     | 1    | 0.00    | 0.93 | 0.84 | 0.87  | 0.96  | 0.52  | 0.24 | 0.91   |
+| 2026-06-… | 499e0c68:r | 13     | 1    | 0.00    | 0.89 | 0.72 | 0.89  | 0.91  | 0.52  | 0.35 | 0.76   |
+| 2026-06-… | 78874c4b:r | 13     | 1    | 0.00    | 0.95 | 0.88 | 0.93  | 0.91  | 0.52  | 0.40 | 0.85   |
+| 2026-06-… | 57cccd1c:r | 13     | 1    | 0.00    | 0.91 | 0.77 | 0.93  | 0.97  | 0.84  | 0.32 | 0.85   |
+| 2026-06-… | d0737492:r | 13     | 1    | 0.27    | 0.18 | 0.54 | 0.22  | 0.06  | 0.52  | 0.41 | 0.95   |
+| 2026-06-… | 606a3620:r | 37     | 4    | 0.72    | 0.62 | 0.94 | 0.86  | 0.99  | —     | 0.16 | 0.51   |
+| 2026-06-… | 6eb51df8:r | 37     | 4    | 0.00    | 0.94 | 0.81 | 0.98  | 0.89  | 0.00  | 0.22 | 0.59   |
+| 2026-06-… | 44d41400:r | 37     | 4    | 0.00    | 0.95 | 0.95 | 0.97  | 0.91  | 0.00  | 0.07 | 0.95   |
+| 2026-06-… | d495b53d:r | 45     | 5    | 0.57    | 0.15 | 0.00 | 0.21  | 0.30  | 0.00  | 0.15 | 0.26   |
+| 2026-06-… | 606a3620:r | 45     | 5    | 0.57    | 0.81 | 0.97 | 0.81  | 0.81  | 0.27  | 0.17 | 0.58   |
+
+## Reading the numbers
+
+**Silver-label saturation (actr / bm25 / graph):** these three scorers dominate
+nDCG/P@10 across all sessions (0.92–1.00 pooled), but this is expected — they are
+built on the same identifier-re-mention signal the labels come from. The numbers
+are an upper-bound ceiling, not a real signal of contextual utility.
+
+**Gold events tell a different story.** Across the 17 resolved unfold rows, `actr`,
+`bm25`, `graph`, and `embed` rank most agent-requested blocks in the 80th–99th
+percentile — broadly consistent with the silver picture. However, three blocks land
+noticeably lower (`f68987e8:r` actr=0.26, `d0737492:r` actr=0.18, `d495b53d:r`
+bm25=0.00 / actr=0.15), showing that the identifier-based family misses real agent
+needs that are not re-mentioned lexically.
+
+**`judge` is near-orthogonal.** Spearman correlations between judge and the lexical
+family (actr/bm25/graph) are 0.00–0.03 on the sample session and 0.20–0.28 on the
+644-block corpus session. On gold rows, judge gives moderate-to-good signal (0.52–
+0.91) for the majority of blocks — broadly in the right direction but less saturated
+than the lexical family, and absent entirely for tick-4 rows where judge was not scored.
+
+**`attn` is the outlier.** Spearman vs. every other scorer is negative or near-zero
+across all sessions, confirming it operates on a structurally different signal (attention
+weights rather than content similarity). On gold events, attn ranks some tool_result
+blocks highly (0.85, 0.92) but consistently low on text blocks and misses several
+others. Its wall time dominates (290–487 s total) at zero API cost.
+
+**`rerank` sits between judge and the lexical family:** strong on silver (0.71–0.86
+nDCG pooled), moderate on gold (0.26–0.95 percentile range), with the second-highest
+wall time after attn and zero Vertex cost (runs locally).
+
+**Cost / wall summary:** only `judge` incurs API spend ($0.14 for the sample session,
+$0.0003–$0.009 per corpus session). `attn` and `rerank` are compute-only but slow.
+The lexical family (actr/bm25/graph) runs in under 1.5 s total across all ticks.
 
 ## Silver label spot-check (sample session, first valid tick)
 
