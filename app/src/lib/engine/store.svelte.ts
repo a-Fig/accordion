@@ -709,9 +709,23 @@ export class AccordionStore {
 			// folds on creation, and emits "grouped" with the passed actor ("conductor").
 			// The inner refold() call is a no-op due to _inRefold guard.
 			const g = this.createGroup(run.startId, run.endId, "conductor");
-			if (g) {
-				// Mark the group as conductor-built (createGroup sets folded=true already).
-				g.by = "conductor";
+			if (!g) continue;
+			// Mark the group as conductor-built (createGroup sets folded=true already).
+			g.by = "conductor";
+			// NET-SAVINGS GUARD (defense in depth — the corpus eval caught budget
+			// violations from this path): message snapping can pull in blocks whose
+			// cost RISES inside a folded group (a folded tool_result split from its
+			// call becomes a FULL-cost straggler). A conductor group must never
+			// increase live cost; if it would, dissolve it immediately — deleteGroup
+			// sets groupCool so the same range isn't retried every refold.
+			const members = this.groupMembers(g);
+			let ungroupedCost = 0;
+			for (const b of members) {
+				const foldedAlone = b.override === "folded" || (b.override === null && b.autoFolded);
+				ungroupedCost += foldedAlone ? this.foldedCostOf(b) : b.tokens;
+			}
+			if (this.groupLiveTokens(g) > ungroupedCost) {
+				this.deleteGroup(g.id, "auto");
 			}
 		}
 	}

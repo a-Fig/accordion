@@ -74,6 +74,15 @@ export function findCoalesceRuns(input: FindCoalesceInput): CoalesceRun[] {
 	const ageCutoff = currentTurn - COALESCE_CONFIG.minAgeTurns;
 	const limit = Math.min(protectedFromIndex, blocks.length);
 
+	// All tool_call callIds in the SESSION — distinguishes a tool_result whose call
+	// exists elsewhere (must never be separated from it: inside a folded group it
+	// would become a FULL-cost straggler, turning a ~20-token stub into a token
+	// spike) from a result with no call at all (compaction etc. — safe alone).
+	const sessionCallIds = new Set<string>();
+	for (const b of blocks) {
+		if (b.kind === "tool_call" && b.callId) sessionCallIds.add(b.callId);
+	}
+
 	// ── Pass 1: collect maximal contiguous eligible spans ──────────────────────
 	// We first collect candidate blocks (not yet checking tool-pair integrity across
 	// the span) and split at user-kind, non-auto-folded, or already-grouped boundaries.
@@ -144,9 +153,13 @@ export function findCoalesceRuns(input: FindCoalesceInput): CoalesceRun[] {
 			}
 		}
 
-		// An orphaned tool_call (callId not in resultIds) would leave a straggler result
-		// outside the group — a tool_call must NEVER appear in a group without its result.
-		// Scan the run and split at any orphaned tool_call.
+		// Pair integrity cuts BOTH ways:
+		//  - an orphaned tool_call (result outside the run) would drag a live result
+		//    into straggler territory — split at it;
+		//  - an orphaned tool_result whose CALL exists elsewhere in the session would
+		//    itself become a full-cost straggler after message snapping (this was a
+		//    real budget-violation bug caught by the corpus eval) — split at it too.
+		//    A result with no matching call anywhere stays (nothing to be split from).
 		let seg: Block[] = [];
 		const flushSeg = () => {
 			if (seg.length > 0) {
@@ -157,6 +170,11 @@ export function findCoalesceRuns(input: FindCoalesceInput): CoalesceRun[] {
 		for (const b of run) {
 			if (b.kind === "tool_call" && b.callId && !resultIds.has(b.callId)) {
 				// Orphaned call — break the run here (don't include this call)
+				flushSeg();
+				continue;
+			}
+			if (b.kind === "tool_result" && b.callId && !callIds.has(b.callId) && sessionCallIds.has(b.callId)) {
+				// Result whose call lives outside the run — never separate the pair
 				flushSeg();
 				continue;
 			}
@@ -212,6 +230,29 @@ export function findCoalesceRuns(input: FindCoalesceInput): CoalesceRun[] {
 					else if (b.kind === "tool_result") chunkCallIds.add("result:" + b.callId);
 				}
 				i++;
+			}
+
+			// Balance trim: a chunk boundary must never separate a call from its result
+			// in EITHER direction (e.g. call1,call2,result1 | result2 — the simple
+			// back-out above only handles a trailing call). Drop trailing blocks until
+			// the chunk is pair-balanced; `i` retreats with each drop so the next chunk
+			// resumes at the first dropped block.
+			const isBalanced = (arr: Block[]): boolean => {
+				const c = new Set<string>();
+				const r = new Set<string>();
+				for (const b of arr) {
+					if (!b.callId) continue;
+					if (b.kind === "tool_call") c.add(b.callId);
+					else if (b.kind === "tool_result") r.add(b.callId);
+				}
+				for (const id of c) if (!r.has(id)) return false;
+				for (const id of r) if (!c.has(id) && sessionCallIds.has(id)) return false;
+				return true;
+			};
+			while (chunk.length > 0 && !isBalanced(chunk)) {
+				const dropped = chunk.pop()!;
+				tokenSum -= dropped.tokens;
+				i--;
 			}
 
 			if (chunk.length >= COALESCE_CONFIG.minRun) {
