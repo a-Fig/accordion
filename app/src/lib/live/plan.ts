@@ -52,18 +52,35 @@ export function computeFoldOps(store: AccordionStore): FoldOp[] {
 }
 
 /**
- * Compute the group-collapse ops for the current store state (ADR 0006): one `GroupOp` per
- * FOLDED group. `memberIds` is the group's durable member ids — the GUI's *intent*; the
- * extension's `applyPlan` independently re-derives which whole, balanced, non-backstop
- * messages it may actually remove (a non-durable member is dropped here too, since a
- * positional id is not stable across array shifts). `summaryText` is the engine's
- * single-source-of-truth recap, carrying the one `{#code FOLDED}` tag for the whole range.
- * Pure read; the store is never mutated.
+ * Compute the group-collapse ops for the current store state (ADR 0006, extended for
+ * C4 nesting in ADR 0011). One `GroupOp` per FOLDED, TOP-LEVEL group (a group not
+ * subsumed by a folded parent). For nested groups, a folded parent already covers all
+ * its children's leaf `memberIds` — emitting separate ops for both parent and children
+ * would produce redundant (and conflicting) removal sets for `applyPlan`. The rule:
+ *
+ *   - A folded parent group → emit ONE GroupOp with `memberIds` = the parent's leaf
+ *     block ids (union of all descendants). Children are skipped.
+ *   - A folded child group whose parent is also folded → SKIP (subsumed).
+ *   - A folded child group whose parent is UNFOLDED → emit its own GroupOp (it is now
+ *     the top-level group in the display hierarchy at this point).
+ *   - A flat (leaf, no children) group → emit as before.
+ *
+ * `memberIds` is always leaf durable block ids (non-durable filtered out). `summaryText`
+ * is the engine's single-source-of-truth recap. Pure read; the store is never mutated.
+ * `applyPlan` needs NO changes — its input is still flat `GroupOp[]` with leaf block ids.
  */
 export function computeGroupOps(store: AccordionStore): GroupOp[] {
+	// Build a set of child group ids that are subsumed by a FOLDED parent.
+	const subsumedByFoldedParent = new Set<string>();
+	for (const g of store.groups) {
+		if (!g.folded || !g.children?.length) continue;
+		for (const cid of g.children) subsumedByFoldedParent.add(cid);
+	}
+
 	const out: GroupOp[] = [];
 	for (const g of store.groups) {
 		if (!g.folded) continue;
+		if (subsumedByFoldedParent.has(g.id)) continue; // covered by a folded parent's op
 		const memberIds = g.memberIds.filter(isDurableId);
 		if (!memberIds.length) continue; // nothing durably removable
 		const summaryText = store.groupSummary(g);
@@ -77,6 +94,29 @@ export function computeGroupOps(store: AccordionStore): GroupOp[] {
 export function blockLabel(b: Block): string {
 	const where = b.turn > 0 ? `turn ${b.turn}` : "preamble";
 	return b.toolName ? `${b.kind} ${b.toolName} · ${where}` : `${b.kind} · ${where}`;
+}
+
+/**
+ * Walk up the group ancestry from `groupId` and return the chain of ancestor group ids
+ * from outermost (root) down to `groupId` itself. Used by `resolveUnfold` to ensure
+ * every folded ancestor is opened before the target so the content actually reaches the
+ * wire on the next plan.
+ */
+function ancestorChain(store: AccordionStore, groupId: string): string[] {
+	// Build a map: child group id → parent group id (only one parent allowed per ADR 0011).
+	const parentOf = new Map<string, string>();
+	for (const g of store.groups) {
+		if (!g.children?.length) continue;
+		for (const cid of g.children) parentOf.set(cid, g.id);
+	}
+	// Walk up from groupId, collecting the chain.
+	const chain: string[] = [];
+	let cur: string | undefined = groupId;
+	while (cur !== undefined) {
+		chain.unshift(cur); // prepend so the array is outermost → innermost
+		cur = parentOf.get(cur);
+	}
+	return chain; // [root, ..., groupId]
 }
 
 /**
@@ -98,19 +138,34 @@ export function blockLabel(b: Block): string {
  * agent-unfold. It can request, never force. This MUTATES the store; the restored
  * content reaches the model at the next `context` hook (the block drops out of
  * `computeFoldOps`). Pure of the wire — the caller sends the result.
+ *
+ * ANCESTOR HONESTY (ADR 0011 §3): when a matched block's group is itself subsumed by a
+ * FOLDED ancestor, unfolding only the inner group changes nothing on the wire — the
+ * ancestor's GroupOp still removes the whole range. Fix: walk up the full ancestor chain
+ * and unfold EVERY folded ancestor from outermost down to the matched group; push a
+ * restored entry for EACH group actually opened so "restore is never a lie" holds.
  */
 export function resolveUnfold(store: AccordionStore, codes: string[]): { restored: UnfoldRestored[]; missing: string[] } {
 	const restored: UnfoldRestored[] = [];
 	const missing: string[] = [];
 	for (const code of codes) {
 		let hit = false;
-		// A GROUP code (= foldCode(group.id)) restores the WHOLE range: unfold the group, so
-		// its members reflow on the agent's next context (ADR 0006 §6). Checked first; a code
-		// can in principle match both a group and a block (rare collision) → restore both.
+		// A GROUP code (= foldCode(group.id)) restores the WHOLE range: unfold the group (and
+		// any folded ancestors that subsume it), so its members reflow on the agent's next
+		// context (ADR 0006 §6). Checked first; a code can in principle match both a group and
+		// a block (rare collision) → restore both.
 		for (const g of store.groups) {
-			if (g.folded && foldCode(g.id) === code) {
-				store.unfoldGroup(g.id, "agent");
-				restored.push({ code, kind: "text", label: `group · ${g.memberIds.length} blocks` });
+			if (foldCode(g.id) === code) {
+				// Walk the ancestor chain from outermost down; unfold every folded ancestor first,
+				// then the group itself, so the content is actually delivered on the next plan.
+				const chain = ancestorChain(store, g.id);
+				for (const gid of chain) {
+					const ancestor = store.groupById(gid);
+					if (ancestor?.folded) {
+						store.unfoldGroup(gid, "agent");
+						restored.push({ code, kind: "text", label: `group · ${ancestor.memberIds.length} blocks` });
+					}
+				}
 				hit = true;
 			}
 		}
@@ -121,14 +176,24 @@ export function resolveUnfold(store: AccordionStore, codes: string[]): { restore
 		const matches = store.blocks.filter((b) => store.isFolded(b) && FOLDABLE_KINDS.has(b.kind) && isDurableId(b.id) && foldCode(b.id) === code);
 		for (const b of matches) {
 			// A member of a FOLDED group is controlled by the group, not per-block overrides —
-			// `store.unfold` would no-op there (ADR 0006 §2). Route it through `unfoldGroup` so
-			// the reported restore is never a lie. (In practice a collapsed member is removed
-			// from the wire, so the agent only ever holds the group code — but keep the honesty
-			// guarantee LOCAL to this resolver rather than relying on that.)
+			// `store.unfold` would no-op there (ADR 0006 §2). Route it through `unfoldGroup` (with
+			// ancestor chain) so the reported restore is never a lie.
 			const grp = store.groupOf(b);
-			if (grp?.folded) store.unfoldGroup(grp.id, "agent");
-			else store.unfold(b.id, "agent");
-			restored.push({ code, kind: b.kind, label: blockLabel(b) });
+			if (grp) {
+				// Unfold the full ancestor chain (outermost → innermost) so subsumed content
+				// is actually delivered, not silently blocked by a folded parent.
+				const chain = ancestorChain(store, grp.id);
+				for (const gid of chain) {
+					const ancestor = store.groupById(gid);
+					if (ancestor?.folded) {
+						store.unfoldGroup(gid, "agent");
+						restored.push({ code, kind: "text", label: `group · ${ancestor.memberIds.length} blocks` });
+					}
+				}
+			} else {
+				store.unfold(b.id, "agent");
+				restored.push({ code, kind: b.kind, label: blockLabel(b) });
+			}
 			hit = true;
 		}
 		if (!hit) missing.push(code);

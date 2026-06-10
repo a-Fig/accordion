@@ -14,12 +14,12 @@
  *   Step 4: relaxed pass — enforce budget even if hysteresis blocked some candidates
  */
 import type { Block, BlockKind, Actor, SessionMeta, ParsedSession, Group } from "./types";
-import { digest, digestTokens, foldTag, groupDigest, groupDigestTokens, FOLDABLE_KINDS } from "./digest";
+import { digest, digestTokens, foldTag, groupDigest, groupDigestTokens, groupEraDigest, FOLDABLE_KINDS } from "./digest";
 import { estTokens, BLOCK_OVERHEAD } from "./tokens";
 import { messageKey } from "./ids";
 import { extractIdentifiers, matchBlocks } from "./lexical";
 import { sortCandidates } from "./score";
-import { findCoalesceRuns, COALESCE_CONFIG } from "./coalesce";
+import { findCoalesceRuns, findEraRuns, COALESCE_CONFIG } from "./coalesce";
 
 /** Classification of a folded group's members for accounting + the wire (ADR 0006 §4/§5). */
 interface GroupShape {
@@ -281,13 +281,34 @@ export class AccordionStore {
 	 * the carrier holds the one summary's tokens, other collapsed members hold 0, and a
 	 * straggler (split tool-pair half) stays live at full. Reactive on `groups`/`blocks`.
 	 * Blocks NOT in a folded group are absent → callers fall back to per-block logic.
+	 *
+	 * C4 nesting (ADR 0011): when a PARENT group is folded, its children are also folded
+	 * but their leaf members are subsumed by the parent's `memberIds`. We must not
+	 * double-count: if a leaf block is already handled by a folded parent, skip any folded
+	 * child group that covers the same leaves. Process parents first (outermost wins).
 	 */
 	private groupWire = $derived.by(() => {
 		const m = new Map<string, { tokens: number; collapsed: boolean }>();
+		// Build a set of child group ids that are subsumed by a folded parent. These child
+		// groups must be skipped so their memberIds don't get double-entered in the map.
+		const subsumedByParent = new Set<string>();
+		for (const g of this.groups) {
+			if (!g.folded || !g.children?.length) continue;
+			for (const cid of g.children) subsumedByParent.add(cid);
+		}
 		for (const g of this.groups) {
 			if (!g.folded) continue;
+			if (subsumedByParent.has(g.id)) continue; // this child is subsumed by its folded parent
 			const c = this.classifyGroup(g);
-			const summaryTok = c.carrier ? groupDigestTokens(g, c.collapsedMembers) : 0;
+			// For a PARENT group (has children) the wire emits groupSummary(g) = groupEraDigest,
+			// which is multi-line and ~4x larger than a flat groupDigest. Cost the carrier with
+			// the EXACT string the agent receives, not the flat leaf-block digest.
+			// For a LEAF group (no children) the wire emits groupDigest — use groupDigestTokens.
+			const summaryTok = c.carrier
+				? g.children?.length
+					? estTokens(this.groupSummary(g)) + BLOCK_OVERHEAD
+					: groupDigestTokens(g, c.collapsedMembers)
+				: 0;
 			for (const b of c.members) {
 				if (c.collapsed.has(b.id)) m.set(b.id, { tokens: b.id === c.carrier ? summaryTok : 0, collapsed: true });
 				else m.set(b.id, { tokens: b.tokens, collapsed: false }); // straggler: live, full
@@ -462,29 +483,49 @@ export class AccordionStore {
 	// ---- the automatic folder (conductor pipeline) --------------------------
 	/**
 	 * Dissolve any group that has come to reach into the protected tail (ADR 0006 watch
-	 * item). Groups are created entirely older than the tail, but widening `protectTokens`
-	 * can later grow the tail over an existing group. Protection is absolute, so rather than
-	 * collapse protected content we drop the whole group — keeping the grid (older box uses
-	 * the display list, protected box renders raw tiles) and the accounting consistent.
+	 * item, generalized for C4 nesting in ADR 0011 §5). Groups are created entirely older
+	 * than the tail, but widening `protectTokens` can later grow the tail over an existing
+	 * group. Protection is absolute at ANY depth — if a group at any level has a leaf
+	 * member in the protected tail, dissolve that group. For a parent group: dissolving it
+	 * orphans its children; they are retained as top-level groups if they themselves are
+	 * unprotected. Children of the dissolved parent are cleaned up by removing the parent
+	 * (the parent is removed entirely; surviving children keep their own `children` field
+	 * if they themselves are parents, but their reference from the dissolved grandparent
+	 * is gone naturally since the grandparent is removed).
 	 */
 	private pruneProtectedGroups(): void {
 		if (!this.groups.length) return;
 		const pf = this.protectedFromIndex;
-		const kept = this.groups.filter((g) => {
-			const reaches = g.memberIds.some((id) => (this.index.get(id) ?? Infinity) >= pf);
-			if (reaches) {
+		// A group "reaches" the tail if any of its leaf memberIds maps to a protected index.
+		const reaches = (g: Group): boolean => g.memberIds.some((id) => (this.index.get(id) ?? Infinity) >= pf);
+		// Gather the ids of groups being dissolved so we can clean up parent references.
+		const dissolvedIds = new Set<string>();
+		for (const g of this.groups) {
+			if (reaches(g)) {
 				this.emit("auto", "ungrouped (protected)", `${g.memberIds.length} blocks`);
-				// HYSTERESIS (n1): when dissolving a conductor-built group, set group-level
+				// HYSTERESIS: when dissolving a conductor-built group, set group-level
 				// cooldown on the first member so the coalesce step won't immediately re-form
 				// the same group (mirrors the unfoldGroup/deleteGroup behaviour).
 				if (g.by === "conductor" && g.memberIds.length > 0) {
 					const firstId = g.memberIds[0];
 					this.groupCool.set(firstId, this.currentTurn + COALESCE_CONFIG.cooldownTurns);
 				}
+				dissolvedIds.add(g.id);
 			}
-			return !reaches;
-		});
-		if (kept.length !== this.groups.length) this.groups = kept;
+		}
+		if (!dissolvedIds.size) return;
+		// Keep groups that are not dissolved. For surviving parent groups, remove dissolved
+		// children from their `children` list; if all children are gone, clear the field.
+		const kept = this.groups
+			.filter((g) => !dissolvedIds.has(g.id))
+			.map((g) => {
+				if (!g.children?.length) return g;
+				const newChildren = g.children.filter((cid) => !dissolvedIds.has(cid));
+				if (newChildren.length === g.children.length) return g;
+				// Return a shallow clone with updated children (or cleared if empty).
+				return { ...g, children: newChildren.length ? newChildren : undefined };
+			});
+		this.groups = kept;
 	}
 
 	/**
@@ -728,6 +769,34 @@ export class AccordionStore {
 				this.deleteGroup(g.id, "auto");
 			}
 		}
+
+		// ERA FORMATION (C4 nesting, ADR 0011 §7): after episode coalescing, look for
+		// runs of ≥ MIN_ERA_GROUPS adjacent folded conductor-built groups that are all
+		// old enough for era-level coalescing. Guarded by the same hysteresis + net-savings
+		// pattern as episode formation. The inner refold() calls are no-ops due to _inRefold.
+		const eraRuns = findEraRuns(this.groups, this.blocks, T, this.index);
+		for (const childIds of eraRuns) {
+			// Hysteresis guard: if the first child group's first member is on cooldown, skip.
+			const firstChild = this.groupById(childIds[0]);
+			if (!firstChild) continue;
+			const firstMemberId = firstChild.memberIds[0];
+			if (firstMemberId && groupCoolActive(firstMemberId)) continue;
+
+			const parent = this.createParentGroup(childIds);
+			if (!parent) continue;
+
+			// NET-SAVINGS GUARD for eras: an era summary must be cheaper than the sum of
+			// all its child summaries combined. If the era summary is MORE expensive (very
+			// unlikely with the deterministic digest, but defense in depth), dissolve it.
+			let childSummaryTotal = 0;
+			for (const cid of childIds) {
+				const child = this.groupById(cid);
+				if (child) childSummaryTotal += this.groupLiveTokens(child);
+			}
+			if (this.groupLiveTokens(parent) > childSummaryTotal) {
+				this.deleteGroup(parent.id, "auto");
+			}
+		}
 	}
 
 	setBudget(n: number): void {
@@ -866,8 +935,23 @@ export class AccordionStore {
 		}
 		return out;
 	}
-	/** The one summary string the group's folded tile renders / the agent receives. */
+	/**
+	 * The one summary string the group's folded tile renders / the agent receives.
+	 * For leaf groups: uses the deterministic groupDigest over member blocks (unchanged).
+	 * For parent groups (C4, ADR 0011 §8): builds a deterministic era digest over the child
+	 * groups' own summaries — "a summary of summaries." No LLM yet; the LLM upgrade is C2's
+	 * job and will only change the text, not the structure.
+	 */
 	groupSummary(g: Group): string {
+		if (g.children?.length) {
+			// Parent group: digest over child summaries.
+			const childGroups: Group[] = [];
+			for (const cid of g.children) {
+				const child = this.groupById(cid);
+				if (child) childGroups.push(child);
+			}
+			return groupEraDigest(g, childGroups, (child) => this.groupSummary(child));
+		}
 		const c = this.classifyGroup(g);
 		return groupDigest(g, c.collapsedMembers.length ? c.collapsedMembers : c.members);
 	}
@@ -885,7 +969,13 @@ export class AccordionStore {
 			return n;
 		}
 		const c = this.classifyGroup(g);
-		let n = c.carrier ? groupDigestTokens(g, c.collapsedMembers) : 0;
+		// For a PARENT group the wire emits groupSummary(g) = groupEraDigest; match that cost.
+		// For a LEAF group the wire emits groupDigest — use groupDigestTokens.
+		let n = c.carrier
+			? g.children?.length
+				? estTokens(this.groupSummary(g)) + BLOCK_OVERHEAD
+				: groupDigestTokens(g, c.collapsedMembers)
+			: 0;
 		for (const id of c.stragglers) n += this.get(id)?.tokens ?? 0;
 		return n;
 	}
@@ -934,6 +1024,72 @@ export class AccordionStore {
 		this.refold();
 		return g;
 	}
+	/**
+	 * Create a PARENT group from a list of existing child group ids (C4 upward coalescing,
+	 * ADR 0011 §6). Used internally by the conductor's coalescing schedule — NOT the manual
+	 * creation path (`createGroup` stays flat for the human). Returns the new parent group
+	 * (folded by default), or null if any validation fails:
+	 *   - At least 2 child groups.
+	 *   - All child groups must exist in `this.groups`.
+	 *   - All child groups must currently be folded.
+	 *   - No child group may itself already be a member of another group (no overlap/nesting
+	 *     of parents — a child can only have one parent at a time).
+	 *   - The combined `memberIds` (union of all children's leaf block ids) must be entirely
+	 *     older than the protected tail.
+	 *
+	 * The new parent inherits the union of children's `memberIds` (leaf block ids — so the
+	 * wire contract is unchanged: `computeGroupOps` emits the same flat leaf ids). The
+	 * parent's id is `era:<firstLeafMemberId>`.
+	 */
+	createParentGroup(childGroupIds: string[]): Group | null {
+		if (childGroupIds.length < 2) return null;
+		// Resolve child groups and validate they exist.
+		const children: Group[] = [];
+		for (const cid of childGroupIds) {
+			const g = this.groupById(cid);
+			if (!g) return null; // unknown group
+			if (!g.folded) return null; // child must be folded
+			// DEPTH CAP (ADR 0011 §6): tree depth is capped at 2 (leaf → episode → era).
+			// A child group that itself has children would create depth 3+, which is not
+			// modelled by the display or wire logic in this cut. Reject it explicitly so
+			// an accidental id collision or future code path can't silently violate the cap.
+			if (g.children?.length) return null; // cannot parent a group that is itself a parent
+			children.push(g);
+		}
+		// Build the combined leaf memberIds (union of all children's memberIds, in block order).
+		// Validate: no block appears in more than one child (the existing non-overlap invariant).
+		const allMemberIds = new Set<string>();
+		for (const g of children) {
+			for (const id of g.memberIds) {
+				if (allMemberIds.has(id)) return null; // overlap
+				allMemberIds.add(id);
+			}
+		}
+		// Sort the combined memberIds by block order (using the index map).
+		const memberIds = [...allMemberIds].sort((a, b) => (this.index.get(a) ?? 0) - (this.index.get(b) ?? 0));
+		if (!memberIds.length) return null;
+		// Validate: entirely older than the protected tail.
+		const pf = this.protectedFromIndex;
+		if (memberIds.some((id) => (this.index.get(id) ?? Infinity) >= pf)) return null;
+		// Validate: no child is already a member of another existing group (it may not have a
+		// parent already — each group can have at most one parent at a time).
+		for (const existing of this.groups) {
+			if (!existing.children) continue;
+			for (const cid of childGroupIds) {
+				if (existing.children.includes(cid)) return null; // already parented
+			}
+		}
+		// Parent group id uses `era:` prefix to avoid colliding with child group ids.
+		const parentId = `era:${memberIds[0]}`;
+		// Refuse if the id would collide with an existing group.
+		if (this.groupById(parentId)) return null;
+		const parent: Group = { id: parentId, memberIds, children: childGroupIds, folded: true, by: "conductor" };
+		this.groups = [...this.groups, parent];
+		this.emit("auto", "grouped (era)", `${childGroupIds.length} child groups`);
+		this.refold();
+		return parent;
+	}
+
 	/** Delete a group (members return to normal). The UI's "edit membership" is delete + recreate. */
 	deleteGroup(id: string, by: Actor = "you"): void {
 		const g = this.groupById(id);
@@ -958,6 +1114,17 @@ export class AccordionStore {
 		this.emit(by, "group folded", `${g.memberIds.length} blocks`);
 		this.refold();
 	}
+	/**
+	 * Unfold a group. Level-by-level semantics (ADR 0011 §3):
+	 * - LEAF group (no children): sets `folded = false`; members render live with their own
+	 *   per-block fold state. Unchanged from ADR 0006.
+	 * - PARENT group (has children): sets the parent `folded = false` but leaves all child
+	 *   groups as `folded = true`. The display then renders the parent band open, with each
+	 *   child appearing as its own collapsed tile. One unfold → child SUMMARIES visible, not
+	 *   full text. The agent must send another unfold request with the child's code to drill
+	 *   down further.
+	 * Existing groupCool hysteresis applies to both leaf and parent groups.
+	 */
 	unfoldGroup(id: string, by: Actor = "you"): void {
 		const g = this.groupById(id);
 		if (!g || !g.folded) return;
@@ -969,8 +1136,10 @@ export class AccordionStore {
 			this.groupCool.set(firstId, this.currentTurn + COALESCE_CONFIG.cooldownTurns);
 		}
 		g.folded = false;
+		// Children intentionally stay folded (level-by-level: parent open reveals child summaries).
 		this.groups = [...this.groups];
-		this.emit(by, "group unfolded", `${g.memberIds.length} blocks`);
+		const detail = g.children?.length ? `${g.children.length} child groups (level-by-level)` : `${g.memberIds.length} blocks`;
+		this.emit(by, "group unfolded", detail);
 		// Record recalls for agent/conductor group unfolds
 		if (by === "agent" || by === "conductor") {
 			for (const mid of g.memberIds) {
