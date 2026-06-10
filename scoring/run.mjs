@@ -15,7 +15,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import { performance } from "node:perf_hooks";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 // ---------------------------------------------------------------------------
 // Arg parsing
@@ -130,7 +130,7 @@ for (let tickIdx = 0; tickIdx < tickEndBlocks.length; tickIdx++) {
 		const modPath = path.join(REPO_ROOT, "scoring", "external", `${name}.mjs`);
 		if (fs.existsSync(modPath)) {
 			try {
-				const extMod = await import(modPath);
+				const extMod = await import(pathToFileURL(modPath).href);
 				if (typeof extMod.default === "function") {
 					await extMod.default({ session: parsed, ticks: [tickScores], contexts: [ctx], paths: { sessionPath, outPath } });
 				}
