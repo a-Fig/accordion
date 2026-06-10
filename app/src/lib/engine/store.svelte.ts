@@ -14,7 +14,8 @@
  *   Step 4: relaxed pass — enforce budget even if hysteresis blocked some candidates
  */
 import type { Block, BlockKind, Actor, SessionMeta, ParsedSession, Group } from "./types";
-import { digest, digestTokens, groupDigest, groupDigestTokens, FOLDABLE_KINDS } from "./digest";
+import { digest, digestTokens, foldTag, groupDigest, groupDigestTokens, FOLDABLE_KINDS } from "./digest";
+import { estTokens, BLOCK_OVERHEAD } from "./tokens";
 import { messageKey } from "./ids";
 import { extractIdentifiers, matchBlocks } from "./lexical";
 import { sortCandidates } from "./score";
@@ -125,6 +126,18 @@ export class AccordionStore {
 	 */
 	foldFlips = 0;
 
+	/**
+	 * LLM summary layer (C2). Map of block id → applied summary + its token cost.
+	 * NOT deeply reactive — mutations bump summaryVersion ($state) which the token
+	 * aggregates read, forcing a re-derive whenever a summary lands.
+	 */
+	private summaries = new Map<string, { summary: string; tokens: number }>();
+	/**
+	 * Bumped in setSummary so that all $derived.by() aggregates (liveTokens, etc.)
+	 * that read this field re-run the moment a summary is stored.
+	 */
+	private summaryVersion = $state(0);
+
 	constructor(parsed: ParsedSession) {
 		this.meta = parsed.meta;
 		this.blocks = parsed.blocks;
@@ -152,16 +165,57 @@ export class AccordionStore {
 		// (carrier holds the one summary's tokens; other collapsed members hold 0).
 		const w = this.groupWire.get(b.id);
 		if (w) return w.tokens;
-		return this.isFolded(b) ? digestTokens(b) : b.tokens;
+		return this.isFolded(b) ? this.foldedCostOf(b) : b.tokens;
 	}
 	digestOf(b: Block): string {
+		const s = this.summaries.get(b.id);
+		if (s && FOLDABLE_KINDS.has(b.kind)) {
+			return `${foldTag(b.id)} ${s.summary}`;
+		}
 		return digest(b);
+	}
+
+	// ---- summary layer (C2) ------------------------------------------------
+
+	/** Cost of a block when folded: uses the LLM summary if available, else the deterministic digest. */
+	private foldedCostOf(b: Block): number {
+		const s = this.summaries.get(b.id);
+		return s !== undefined ? s.tokens : digestTokens(b);
+	}
+
+	/** True if a summary has been applied to this block. */
+	hasSummary(id: string): boolean {
+		return this.summaries.has(id);
+	}
+
+	/**
+	 * Apply an LLM summary to a block. Bumps version so all $derived sums
+	 * (liveTokens / effTokens) recompute immediately.
+	 *
+	 * Guards:
+	 *  - Unknown block id → ignored.
+	 *  - Summary text >= block's own text length → not a compression win, keep digest.
+	 */
+	setSummary(id: string, summary: string): void {
+		const b = this.get(id);
+		if (!b) return;
+		if (summary.length >= b.text.length) return; // no compression
+		const tokens = estTokens(`${foldTag(id)} ${summary}`) + BLOCK_OVERHEAD;
+		this.summaries.set(id, { summary, tokens });
+		// Bump both reactive signals: summaryVersion forces $derived.by aggregates to
+		// re-derive (they read summaryVersion), and version keeps the canvas/debug signal.
+		this.summaryVersion++;
+		this.version++;
 	}
 
 	// These aggregates are read many times per render (the header alone reads several
 	// repeatedly). As `$derived` they walk the blocks once per real change and dedupe
 	// across every reader, instead of re-summing ~1k blocks on each property access.
+	//
+	// summaryVersion is read here so the aggregate re-derives whenever an LLM summary
+	// lands (summaries is a plain Map, not $state, so we need this explicit read).
 	liveTokens = $derived.by(() => {
+		void this.summaryVersion; // reactive dependency — re-derive when a summary lands
 		let n = 0;
 		for (const b of this.blocks) n += this.effTokens(b);
 		return n;
@@ -362,7 +416,7 @@ export class AccordionStore {
 		if (i < 0 || i >= this.protectedFromIndex) return; // protected
 		if (this.groupWire.has(id)) return; // in folded group
 		if (!FOLDABLE_KINDS.has(b.kind)) return; // not foldable kind
-		if (digestTokens(b) >= b.tokens) return; // no savings
+		if (this.foldedCostOf(b) >= b.tokens) return; // no savings
 		const T = this.currentTurn;
 		const cool = this.coolUntil.get(id) ?? 0;
 		if (cool > T) return; // on cooldown
@@ -463,7 +517,7 @@ export class AccordionStore {
 					i < protectedFrom &&
 					!this.groupWire.has(b.id) &&
 					FOLDABLE_KINDS.has(b.kind) &&
-					digestTokens(b) < b.tokens,
+					this.foldedCostOf(b) < b.tokens,
 			);
 
 		let live = this.liveTokens;
@@ -475,7 +529,7 @@ export class AccordionStore {
 				if (live <= this.budget) break;
 				b.autoFolded = true;
 				b.by = "auto";
-				live += digestTokens(b) - b.tokens;
+				live += this.foldedCostOf(b) - b.tokens;
 			}
 
 			// Step 2b: LEXICAL PRE-UNFOLD — inspect auto-folded blocks for tail references.
@@ -555,7 +609,7 @@ export class AccordionStore {
 			if (live <= this.budget) break;
 			b.autoFolded = true;
 			b.by = "auto";
-			live += digestTokens(b) - b.tokens;
+			live += this.foldedCostOf(b) - b.tokens;
 		}
 
 		// Step 4: RELAXED PASS — if still over budget after respecting cooldowns, fold
@@ -568,7 +622,7 @@ export class AccordionStore {
 				if (live <= this.budget) break;
 				b.autoFolded = true;
 				b.by = "auto";
-				live += digestTokens(b) - b.tokens;
+				live += this.foldedCostOf(b) - b.tokens;
 			}
 		}
 
