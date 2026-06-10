@@ -3,3 +3,8 @@ node_modules/
 .DS_Store
 dist/
 .pi/
+
+# relevance lab — local-only artifacts (corpus-derived data must never be committed)
+scoring/probe/.venv/
+scoring/out/
+__pycache__/
