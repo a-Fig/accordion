@@ -16,7 +16,7 @@ export type BlockKind =
 	| "tool_result"; // WHAT the agent saw (often huge, decays fast)
 
 /** Who last changed a block's fold state. */
-export type Actor = "you" | "agent" | "auto";
+export type Actor = "you" | "agent" | "auto" | "conductor";
 
 /**
  * A manual override that the automatic folder must respect:
