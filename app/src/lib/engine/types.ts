@@ -16,7 +16,7 @@ export type BlockKind =
 	| "tool_result"; // WHAT the agent saw (often huge, decays fast)
 
 /** Who last changed a block's fold state. */
-export type Actor = "you" | "agent" | "auto";
+export type Actor = "you" | "agent" | "auto" | "conductor";
 
 /**
  * A manual override that the automatic folder must respect:
@@ -69,11 +69,17 @@ export interface Block {
  * agent-unfold handle is `foldCode(id)`. Invariants (enforced at creation, store.createGroup):
  * contiguous · non-overlapping · flat (members are blocks, never groups) · ≥2 members ·
  * entirely older than the protected tail. `memberIds` is in conversation (block) order.
+ *
+ * `by` records who created the group: "conductor" for auto-coalesced groups (ADR 0009),
+ * "you" (or absent) for human-created groups. Used for hysteresis: dissolving a conductor
+ * group sets a group-level cooldown that prevents immediate re-coalescing.
  */
 export interface Group {
 	id: string;
 	memberIds: string[];
 	folded: boolean;
+	/** Who created this group. Absent = "you" (legacy / human-created). */
+	by?: Actor;
 }
 
 export interface SessionMeta {

@@ -74,16 +74,32 @@ Drag any session `.jsonl` onto the window, or use the bundled sample. Everything
   streams a running session's context to the app over a local WebSocket; the app
   **auto-discovers** every running pi (the "pull" model) and shows it in a Sessions
   sidebar — click to watch its context update live. Live steering is **opt-in**: by
-  default folds are preview-only, and the header toggle arms applying them to the agent.
+  default folds are preview-only, and the conductor panel arms applying them to the agent.
 - Reversible, provider-safe folding in the app (content substitution for blocks, true
-  range collapse for manually created groups), with deterministic digest summaries and
-  `{#code FOLDED}` handles the live agent can ask to unfold.
+  range collapse for manually created groups), with LLM-generated summaries (cached once,
+  content-addressed) and `{#code FOLDED}` handles the live agent can ask to unfold.
+- **The Conductor** — automatic between-turn fold/unfold running in three modes
+  (OFF / AUTO / SMART) selectable in the MapHeader panel:
+  - **AUTO (deterministic):** a pipeline of heal → lexical relevance pre-unfold
+    (identifier extraction from the protected tail, provenance `"conductor"`) → ACT-R
+    cold-score budget clamp → relaxed second pass. No LLM, no cost.
+  - **SMART (attentive):** AUTO plus a debounced Gemini call after each sync that reads
+    a numbered summary index + the protected tail and proposes {fold, unfold} with
+    reasons; the deterministic clamp always runs last as the budget guarantee.
+  - Automatic coalescing: runs of ≥ 8 long-cold auto-folded blocks collapse into flat
+    conductor-built groups, reducing stub overhead and shrinking the tick's index on
+    long sessions.
+  - Summaries cost cents per session at Gemini flash-lite pricing; one small tick call
+    per turn in SMART mode (~cents per turn). No key + no gcloud → conductor falls back
+    to deterministic mode automatically — zero cost, still useful.
 
-Honest about what's **not** there yet: there is no autonomous Conductor on a live session,
-no agent-driven pinning, no nested/hierarchical groups, no LLM-generated summaries, no
-replay — that's the build ahead. There's also an
-older terminal-only POC (`src/accordion.ts`, `/expand` · `/collapse` · `/accordion`) that
-predates the app.
+Honest about what's **not** there yet: no nested/hierarchical groups (C4), no headless
+daemon or decision journal (C5), group-level summaries still use deterministic digests
+pending a `groupSummary` call, and no live pi end-to-end demo was run during this build
+(no pi session was running). The replay eval on a 24-session corpus is ongoing; results
+at [docs/eval/conductor-replay-eval.md](docs/eval/conductor-replay-eval.md) (living doc).
+There is also an older terminal-only POC (`src/accordion.ts`, `/expand` · `/collapse` ·
+`/accordion`) that predates the app.
 
 ### Try it
 
@@ -114,11 +130,12 @@ setup, and platform gotchas) is in **[CONTRIBUTING.md](CONTRIBUTING.md)**.
 - [x] Live link to a running pi session + auto-discovery
 - [x] Opt-in live steering — apply the fold plan to what the agent is shown
 - [x] Agent-driven unfold from `{#code FOLDED}` tags
-- [ ] LLM-generated summaries, computed once and cached
-- [ ] The Conductor — automatic fold/unfold between turns, based on context
+- [x] LLM-generated summaries, computed once and cached (Gemini flash-lite; cents/session)
+- [x] **The Conductor** — deterministic cold-score + lexical pre-unfold + attentive LLM tick, auto-coalesce, miss metric
 - [ ] Hierarchical folding — fold the folds, for million-turn sessions
-- [ ] Agent-driven unfold and pin
-- [ ] Replay — scrub how the context evolved across a session
+- [ ] Agent-driven pin
+- [ ] Headless conductor daemon — conducts without the window open
+- [ ] Replay — scrub how the context evolved across a session (journal-backed)
 
 ---
 

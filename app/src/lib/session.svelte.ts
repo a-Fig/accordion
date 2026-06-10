@@ -1,5 +1,8 @@
 import { parse } from "./engine/parse";
 import { AccordionStore } from "./engine/store.svelte";
+import { attachSummaryQueue } from "./llm/summaryQueue.svelte";
+import { attachConductor } from "./conductor/scheduler.svelte";
+import type { ConductorHandle } from "./conductor/scheduler.svelte";
 
 /**
  * Reactive session state, shared across the app.
@@ -27,6 +30,8 @@ export const session = $state<{
 let _pollInterval: ReturnType<typeof setInterval> | null = null;
 let _lastLen = -1;
 let _loadToken = 0;
+/** Detach functions for the current store's summary queue + conductor; null when no store is active. */
+let _detachStore: (() => void) | null = null;
 
 /** Bump the generation token, invalidating any in-flight async load. */
 export function cancelPendingLoad(): void {
@@ -35,6 +40,22 @@ export function cancelPendingLoad(): void {
 
 export const isTauriEnv =
 	typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
+/** Derive a session key from the store's title or file path, falling back to "demo". */
+function _sessionKeyFrom(store: AccordionStore, filePath?: string | null): string {
+	const title = store.meta.title || filePath || "demo";
+	return title.replace(/[^\w-]/g, "_").slice(0, 40);
+}
+
+/** Replace the active store, detaching the old queue+conductor and attaching new ones. */
+function _setStore(store: AccordionStore, filePath?: string | null): void {
+	_detachStore?.();
+	session.store = store;
+	const detachQueue = attachSummaryQueue(store);
+	const sessionKey = _sessionKeyFrom(store, filePath);
+	const conductorHandle: ConductorHandle = attachConductor(store, { sessionKey, live: false });
+	_detachStore = () => { detachQueue(); conductorHandle.detach(); };
+}
 
 export async function loadSample() {
 	cancelPendingLoad();
@@ -46,7 +67,11 @@ export async function loadSample() {
 		if (!res.ok) throw new Error(`fetch failed (${res.status})`);
 		const text = await res.text();
 		if (token !== _loadToken) return; // a newer selection superseded this sample load — drop it
-		session.store = new AccordionStore(parse(text));
+		_setStore(new AccordionStore(parse(text)), null);
+		// Demo opens under real budget pressure so the conductor is visibly at work
+		// (the sample's irreducible floor is ~53k; 60k folds plenty without sitting
+		// permanently over budget).
+		session.store!.setBudget(60_000);
 		session.filePath = null;
 		session.readOnly = false;
 		_expose();
@@ -132,9 +157,9 @@ async function _load(path: string, readFn: (p: string) => Promise<string>, token
 	if (token !== _loadToken) return; // a newer selection superseded this load — drop it
 	const prevBudget = session.store?.budget;
 	const prevProtect = session.store?.protectTokens;
-	session.store = new AccordionStore(parse(text));
-	if (prevBudget !== undefined) session.store.setBudget(prevBudget);
-	if (prevProtect !== undefined) session.store.setProtect(prevProtect);
+	_setStore(new AccordionStore(parse(text)), path);
+	if (prevBudget !== undefined) session.store!.setBudget(prevBudget);
+	if (prevProtect !== undefined) session.store!.setProtect(prevProtect);
 	session.filePath = path;
 	session.error = "";
 	_lastLen = text.length;

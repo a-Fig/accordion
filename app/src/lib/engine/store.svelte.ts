@@ -6,14 +6,20 @@
  * is content substitution, never removal: a folded block still exists and still
  * carries its callId, so a tool_call/result pair is never structurally broken.
  *
- * The v0 folder is deliberately dumb: no Conductor, no relevance. It folds purely
- * to keep the live context under budget, oldest-first, lowest-value-first —
- * tool_results before thinking before reply text before tool_calls before user
- * intent. Deterministic and explainable; the smarts come later.
+ * The conductor pipeline (C1 Cold-Score):
+ *   Step 0: pruneProtectedGroups
+ *   Step 1: heal protected manual folds
+ *   Step 2: lexical pre-unfold — blocks referenced in the tail get a second chance
+ *   Step 3: budget clamp — cold-score sorted greedy fold
+ *   Step 4: relaxed pass — enforce budget even if hysteresis blocked some candidates
  */
 import type { Block, BlockKind, Actor, SessionMeta, ParsedSession, Group } from "./types";
-import { digest, digestTokens, groupDigest, groupDigestTokens } from "./digest";
+import { digest, digestTokens, foldTag, groupDigest, groupDigestTokens, FOLDABLE_KINDS } from "./digest";
+import { estTokens, BLOCK_OVERHEAD } from "./tokens";
 import { messageKey } from "./ids";
+import { extractIdentifiers, matchBlocks } from "./lexical";
+import { sortCandidates } from "./score";
+import { findCoalesceRuns, COALESCE_CONFIG } from "./coalesce";
 
 /** Classification of a folded group's members for accounting + the wire (ADR 0006 §4/§5). */
 interface GroupShape {
@@ -45,6 +51,21 @@ export interface LogEntry {
 	detail: string;
 	n: number;
 }
+
+/**
+ * Hysteresis constants for the conductor pipeline.
+ *
+ * unfoldCooldownTurns: after a conductor-unfold, the block may not be auto-refolded
+ *   for this many turns. Hysteresis is best-effort: if every candidate is on cooldown
+ *   and the budget is exceeded, the relaxed pass folds anyway.
+ *
+ * maxLexicalUnfoldsPerPass: maximum blocks the lexical pre-unfold step restores per
+ *   refold() pass. Prevents a noisy tail from unfurling the entire history.
+ */
+export const HYSTERESIS = {
+	unfoldCooldownTurns: 5,
+	maxLexicalUnfoldsPerPass: 4,
+};
 
 export class AccordionStore {
 	meta: SessionMeta;
@@ -82,6 +103,55 @@ export class AccordionStore {
 	 */
 	private index = new Map<string, number>();
 
+	// ---- conductor state (non-reactive, internal) ----------------------------
+	/**
+	 * Recall history: block id → array of turn numbers at which this block was
+	 * unfolded by the agent or user. NOT $state — mutated imperatively. Bumps
+	 * this.version on change so reactive consumers re-derive.
+	 */
+	private recalls = new Map<string, number[]>();
+	/**
+	 * Cooldown: block id → turn number until which auto-refold is forbidden (after
+	 * a conductor-unfold). Best-effort: budget is the hard guarantee.
+	 */
+	private coolUntil = new Map<string, number>();
+	/**
+	 * Group-level hysteresis (ADR 0009 §5): first-member id → turn number until which
+	 * a conductor-built group may NOT re-form. Set when a conductor group is dissolved
+	 * (unfoldGroup or deleteGroup). Group hysteresis is 8 turns (vs block hysteresis 5).
+	 * Applied by findCoalesceRuns via the groupCoolActive adapter.
+	 */
+	private groupCool = new Map<string, number>();
+	/**
+	 * Re-entrancy guard: createGroup() calls refold() internally; when coalesce's
+	 * refold() call reaches createGroup() which calls refold() again, the inner refold
+	 * must be a no-op. Set to true at refold() entry, false in finally.
+	 */
+	private _inRefold = false;
+	/**
+	 * Lexical extraction cache: avoids re-extracting identifiers every refold.
+	 * Key = `${blocks.length}:${protectedFromIndex}:${lastBlockId}`. Invalidated
+	 * automatically because the key changes whenever the session changes.
+	 */
+	private lexCache = new Map<string, Set<string>>();
+	/**
+	 * Churn counter: incremented whenever any block's effective folded state changes
+	 * inside refold(). Exposed readonly for tests and the replay driver.
+	 */
+	foldFlips = 0;
+
+	/**
+	 * LLM summary layer (C2). Map of block id → applied summary + its token cost.
+	 * NOT deeply reactive — mutations bump summaryVersion ($state) which the token
+	 * aggregates read, forcing a re-derive whenever a summary lands.
+	 */
+	private summaries = new Map<string, { summary: string; tokens: number }>();
+	/**
+	 * Bumped in setSummary so that all $derived.by() aggregates (liveTokens, etc.)
+	 * that read this field re-run the moment a summary is stored.
+	 */
+	private summaryVersion = $state(0);
+
 	constructor(parsed: ParsedSession) {
 		this.meta = parsed.meta;
 		this.blocks = parsed.blocks;
@@ -109,16 +179,57 @@ export class AccordionStore {
 		// (carrier holds the one summary's tokens; other collapsed members hold 0).
 		const w = this.groupWire.get(b.id);
 		if (w) return w.tokens;
-		return this.isFolded(b) ? digestTokens(b) : b.tokens;
+		return this.isFolded(b) ? this.foldedCostOf(b) : b.tokens;
 	}
 	digestOf(b: Block): string {
+		const s = this.summaries.get(b.id);
+		if (s && FOLDABLE_KINDS.has(b.kind)) {
+			return `${foldTag(b.id)} ${s.summary}`;
+		}
 		return digest(b);
+	}
+
+	// ---- summary layer (C2) ------------------------------------------------
+
+	/** Cost of a block when folded: uses the LLM summary if available, else the deterministic digest. */
+	private foldedCostOf(b: Block): number {
+		const s = this.summaries.get(b.id);
+		return s !== undefined ? s.tokens : digestTokens(b);
+	}
+
+	/** True if a summary has been applied to this block. */
+	hasSummary(id: string): boolean {
+		return this.summaries.has(id);
+	}
+
+	/**
+	 * Apply an LLM summary to a block. Bumps version so all $derived sums
+	 * (liveTokens / effTokens) recompute immediately.
+	 *
+	 * Guards:
+	 *  - Unknown block id → ignored.
+	 *  - Summary text >= block's own text length → not a compression win, keep digest.
+	 */
+	setSummary(id: string, summary: string): void {
+		const b = this.get(id);
+		if (!b) return;
+		if (summary.length >= b.text.length) return; // no compression
+		const tokens = estTokens(`${foldTag(id)} ${summary}`) + BLOCK_OVERHEAD;
+		this.summaries.set(id, { summary, tokens });
+		// Bump both reactive signals: summaryVersion forces $derived.by aggregates to
+		// re-derive (they read summaryVersion), and version keeps the canvas/debug signal.
+		this.summaryVersion++;
+		this.version++;
 	}
 
 	// These aggregates are read many times per render (the header alone reads several
 	// repeatedly). As `$derived` they walk the blocks once per real change and dedupe
 	// across every reader, instead of re-summing ~1k blocks on each property access.
+	//
+	// summaryVersion is read here so the aggregate re-derives whenever an LLM summary
+	// lands (summaries is a plain Map, not $state, so we need this explicit read).
 	liveTokens = $derived.by(() => {
+		void this.summaryVersion; // reactive dependency — re-derive when a summary lands
 		let n = 0;
 		for (const b of this.blocks) n += this.effTokens(b);
 		return n;
@@ -145,6 +256,17 @@ export class AccordionStore {
 		return n;
 	});
 	overBudget = $derived.by(() => this.liveTokens > this.budget);
+
+	/** The current turn number (highest block turn, or 0 for empty session). */
+	currentTurn = $derived.by(() => {
+		if (!this.blocks.length) return 0;
+		return this.blocks[this.blocks.length - 1].turn;
+	});
+
+	/** Recall history for a given block id (for tests/replay). */
+	recallsOf(id: string): readonly number[] {
+		return this.recalls.get(id) ?? [];
+	}
 
 	// ---- groups (multiblock folds, ADR 0006) -------------------------------
 	/** blockId → the group it belongs to (if any). Reactive on `groups`. */
@@ -271,11 +393,73 @@ export class AccordionStore {
 		return n;
 	});
 
-	// ---- the automatic folder ---------------------------------------------
+	// ---- conductor internal helpers -----------------------------------------
+
+	/** Record that a block was recalled at `turn`. Deduplicates globally per (id, turn). */
+	private recordRecall(id: string, turn?: number): void {
+		const t = turn ?? this.currentTurn;
+		const arr = this.recalls.get(id);
+		if (!arr) {
+			this.recalls.set(id, [t]);
+		} else {
+			// Global dedup: skip if ANY entry in the array is already this turn (not just the last),
+			// so repeated refolds on the same turn never inflate the recall count.
+			if (arr.includes(t)) return;
+			arr.push(t);
+		}
+		this.version++;
+	}
+
 	/**
-	 * Recompute every auto-controlled block from scratch so the live context fits
-	 * the budget. Idempotent: same blocks + budget + overrides → same result.
+	 * Soft-fold a block by the conductor. Guards:
+	 * - block missing
+	 * - pinned (never touch pins)
+	 * - override !== null (manual state — conductor respects human decisions)
+	 * - protected (i >= protectedFromIndex)
+	 * - in a folded group wire (already collapsed)
+	 * - not a FOLDABLE kind (tool_call / user never folded)
+	 * - digestTokens >= tokens (folding would not save tokens)
+	 * - cooldown: coolUntil[id] > currentTurn
+	 *
+	 * Sets autoFolded=true, by="conductor". Does NOT call refold() (caller batches).
 	 */
+	conductorFold(id: string): void {
+		const b = this.get(id);
+		if (!b) return;
+		if (b.override !== null) return; // respect manual state (covers pinned/unfolded/folded)
+		const i = this.index.get(id) ?? -1;
+		if (i < 0 || i >= this.protectedFromIndex) return; // protected
+		if (this.groupWire.has(id)) return; // in folded group
+		if (!FOLDABLE_KINDS.has(b.kind)) return; // not foldable kind
+		if (this.foldedCostOf(b) >= b.tokens) return; // no savings
+		const T = this.currentTurn;
+		const cool = this.coolUntil.get(id) ?? 0;
+		if (cool > T) return; // on cooldown
+		b.autoFolded = true;
+		b.by = "conductor";
+		this.emit("conductor", "folded", label(b));
+		this.version++;
+	}
+
+	/**
+	 * Unfold a block by the conductor (relevance signal). Only acts if currently
+	 * auto-folded (autoFolded && override===null). Sets a cooldown, records recall,
+	 * emits log entry.
+	 */
+	conductorUnfold(id: string, reason: string): void {
+		const b = this.get(id);
+		if (!b) return;
+		if (!b.autoFolded || b.override !== null) return; // only unfold auto-folded blocks
+		b.autoFolded = false;
+		b.by = "conductor";
+		const T = this.currentTurn;
+		this.coolUntil.set(id, T + HYSTERESIS.unfoldCooldownTurns);
+		this.recordRecall(id, T);
+		this.emit("conductor", "unfolded", `${label(b)} — ${reason}`);
+		this.version++;
+	}
+
+	// ---- the automatic folder (conductor pipeline) --------------------------
 	/**
 	 * Dissolve any group that has come to reach into the protected tail (ADR 0006 watch
 	 * item). Groups are created entirely older than the tail, but widening `protectTokens`
@@ -288,58 +472,261 @@ export class AccordionStore {
 		const pf = this.protectedFromIndex;
 		const kept = this.groups.filter((g) => {
 			const reaches = g.memberIds.some((id) => (this.index.get(id) ?? Infinity) >= pf);
-			if (reaches) this.emit("auto", "ungrouped (protected)", `${g.memberIds.length} blocks`);
+			if (reaches) {
+				this.emit("auto", "ungrouped (protected)", `${g.memberIds.length} blocks`);
+				// HYSTERESIS (n1): when dissolving a conductor-built group, set group-level
+				// cooldown on the first member so the coalesce step won't immediately re-form
+				// the same group (mirrors the unfoldGroup/deleteGroup behaviour).
+				if (g.by === "conductor" && g.memberIds.length > 0) {
+					const firstId = g.memberIds[0];
+					this.groupCool.set(firstId, this.currentTurn + COALESCE_CONFIG.cooldownTurns);
+				}
+			}
 			return !reaches;
 		});
 		if (kept.length !== this.groups.length) this.groups = kept;
 	}
 
+	/**
+	 * Recompute every auto-controlled block from scratch so the live context fits
+	 * the budget. This is the full conductor pipeline:
+	 *
+	 * Step 0: pruneProtectedGroups
+	 * Step 1: reset auto state; heal protected manual folds
+	 * Step 2a: preliminary budget clamp to produce initial fold set
+	 * Step 2b: LEXICAL PRE-UNFOLD — conductor-unfold auto-folded blocks referenced
+	 *           in the protected tail (sets cooldown; runs on the preliminary fold set)
+	 * Step 3: BUDGET CLAMP — re-run cold-score sorted greedy fold (respects cooldowns
+	 *          set by the lexical pass)
+	 * Step 4: RELAXED PASS — enforce budget even if cooldowns blocked some candidates
+	 */
 	refold(): void {
-		// A group can never overlap the protected tail; drop any that now does (e.g. the
-		// tail was widened over it) before anything reads group state this pass.
-		this.pruneProtectedGroups();
-		// Compute the protected boundary once; folding never changes a block's full
-		// `tokens`, so this index is stable for the whole pass.
-		const protectedFrom = this.protectedFromIndex;
+		// Re-entrancy guard: createGroup() calls refold() as part of group creation.
+		// When the coalesce step at the bottom of this refold() calls createGroup(),
+		// we don't want another full refold pass to run inside that createGroup().
+		if (this._inRefold) return;
+		this._inRefold = true;
+		try {
+			this._refoldImpl();
+		} finally {
+			this._inRefold = false;
+		}
+	}
 
-		// 1) Reset auto-controlled blocks to full, AND heal any protected block that
-		// is still folded by a manual override. Protection is ABSOLUTE: a block in the
-		// working tail is never folded, by the auto-folder OR the user. This also
-		// self-corrects a block that became protected after being folded (e.g. the
-		// tail grew via setProtect) — it springs back to live.
+	private _refoldImpl(): void {
+		// Step 0: a group can never overlap the protected tail; drop any that now does.
+		this.pruneProtectedGroups();
+		const protectedFrom = this.protectedFromIndex;
+		const T = this.currentTurn;
+
+		// Step 1: reset auto-controlled blocks to full, AND heal any protected block that
+		// is still folded by a manual override. Protection is ABSOLUTE.
 		this.blocks.forEach((b, i) => {
 			if (i >= protectedFrom && b.override === "folded") {
-				// Protection is absolute, but do not silently erase the user intent - log the
-				// forced unfold so the activity feed shows what happened.
 				this.emit(b.by ?? "auto", "unfolded (protected)", label(b));
 				b.override = null;
 				b.by = null;
 			}
 			if (b.override === null) {
 				b.autoFolded = false;
-				if (b.by === "auto") b.by = null;
+				if (b.by === "auto" || b.by === "conductor") b.by = null;
 			}
 		});
 		this.version++;
+
+		// Snapshot isFolded state before any folding for churn accounting
+		const foldedBefore = new Set<string>();
+		for (const b of this.blocks) if (this.isFolded(b)) foldedBefore.add(b.id);
+
+		// Shared context for scoring (used by both clamp passes)
+		const tailCallIds = new Set<string>();
+		for (let i = protectedFrom; i < this.blocks.length; i++) {
+			const b = this.blocks[i];
+			if (b.callId) tailCallIds.add(b.callId);
+		}
+		const ctx = { currentTurn: T, recalls: this.recalls as ReadonlyMap<string, readonly number[]>, tailCallIds };
+
+		// Helper: compute all fold candidates (override===null, old, foldable, saves tokens)
+		const allCandidates = (): Block[] =>
+			this.blocks.filter(
+				(b, i) =>
+					b.override === null &&
+					i < protectedFrom &&
+					!this.groupWire.has(b.id) &&
+					FOLDABLE_KINDS.has(b.kind) &&
+					this.foldedCostOf(b) < b.tokens,
+			);
+
 		let live = this.liveTokens;
-		if (live <= this.budget) return;
+		if (live > this.budget) {
+			// Step 2a: preliminary budget clamp (no cooldown check) to produce initial fold set
+			// that the lexical pass can then inspect.
+			const preliminary = sortCandidates(allCandidates(), ctx);
+			for (const b of preliminary) {
+				if (live <= this.budget) break;
+				b.autoFolded = true;
+				b.by = "auto";
+				live += this.foldedCostOf(b) - b.tokens;
+			}
 
-		// 2) fold lowest-value, oldest candidates until the live context fits.
-		// Protect the recent working tail (the newest ~protectTokens of context, capped
-		// to 25% whole-block overflow except for the indivisible newest block),
-		// and never fold a block whose digest wouldn't actually save tokens — folding
-		// it would only grow the live context and churn the view.
-		// Skip members of a folded group: they are already collapsed into the group's one
-		// entry, so folding them individually would double-count against the group accounting.
-		const cand = this.blocks
-			.filter((b, i) => b.override === null && i < protectedFrom && !this.groupWire.has(b.id) && digestTokens(b) < b.tokens)
-			.sort((a, b) => FOLD_RANK[a.kind] - FOLD_RANK[b.kind] || a.order - b.order);
+			// Step 2b: LEXICAL PRE-UNFOLD — inspect auto-folded blocks for tail references.
+			// Build (or reuse cached) tail text identifier set.
+			if (this.blocks.length > 0) {
+				const lastId = this.blocks[this.blocks.length - 1].id;
+				const cacheKey = `${this.blocks.length}:${protectedFrom}:${lastId}`;
+				let tailIds = this.lexCache.get(cacheKey);
+				if (!tailIds) {
+					// Concat protected tail text, walking back from end, stop after 32k chars
+					let tailText = "";
+					for (let i = this.blocks.length - 1; i >= protectedFrom && tailText.length < 32_000; i--) {
+						tailText = this.blocks[i].text + "\n" + tailText;
+					}
+					tailIds = extractIdentifiers(tailText);
+					this.lexCache.clear();
+					this.lexCache.set(cacheKey, tailIds);
+				}
 
-		for (const b of cand) {
+				// Candidates: blocks that the preliminary clamp just auto-folded
+				const lexCandidates = this.blocks.filter(
+					(b, i) => b.autoFolded && b.override === null && i < protectedFrom && !this.groupWire.has(b.id),
+				);
+
+				if (tailIds.size > 0 && lexCandidates.length > 0) {
+					const matches = matchBlocks(tailIds, lexCandidates);
+					// Sort: longest identifier first (most specific signal)
+					const matchedEntries = [...matches.entries()].sort((a, b) => b[1].length - a[1].length);
+
+					let unfolded = 0;
+					for (const [bid, identifier] of matchedEntries) {
+						if (unfolded >= HYSTERESIS.maxLexicalUnfoldsPerPass) break;
+						const b = this.get(bid);
+						if (!b || !b.autoFolded || b.override !== null) continue;
+						// Skip blocks on cooldown — they are already relevance-protected;
+						// re-emitting a conductor-unfold would inflate logs and re-record recalls
+						// every turn while the identifier persists in the tail.
+						if ((this.coolUntil.get(bid) ?? 0) > T) continue;
+
+						// Check if this block is inside a FOLDED group
+						const grp = this.groupAt.get(bid);
+						if (grp?.folded) {
+							// Unfold the whole group, then conductor-unfold this specific member
+							this.unfoldGroup(grp.id, "conductor");
+							const bNow = this.get(bid);
+							if (bNow && bNow.autoFolded && bNow.override === null) {
+								this.conductorUnfold(bid, `matched "${identifier}"`);
+							}
+						} else {
+							this.conductorUnfold(bid, `matched "${identifier}"`);
+						}
+						unfolded++;
+					}
+				}
+			}
+
+			// After lexical pass, reset the auto-folded state again (but NOT cooldowns/recalls)
+			// so the final clamp can re-evaluate from scratch with the cooldowns in place.
+			for (const b of this.blocks) {
+				if (b.override === null && (b.by === "auto" || b.by === "conductor") && b.autoFolded) {
+					b.autoFolded = false;
+					b.by = null;
+				}
+			}
+			live = this.liveTokens;
+		}
+
+		if (live <= this.budget) {
+			// Compute churn
+			const foldedAfter = new Set<string>();
+			for (const b of this.blocks) if (this.isFolded(b)) foldedAfter.add(b.id);
+			this.foldFlips += symmetricDiff(foldedBefore, foldedAfter);
+			// Still run coalesce even when under budget: Step 1 reset autoFolded on all
+			// auto-controlled blocks above, so this call is idempotent for any blocks that
+			// were previously in conductor groups — it re-evaluates the coalesce runs after
+			// the reset, but groups that survive the prune step above are unaffected.
+			this._runCoalesce();
+			return;
+		}
+
+		// Step 3: BUDGET CLAMP — cold-score sorted greedy fold, excluding cooled blocks
+		const cand = allCandidates().filter((b) => (this.coolUntil.get(b.id) ?? 0) <= T);
+		const sorted = sortCandidates(cand, ctx);
+
+		for (const b of sorted) {
 			if (live <= this.budget) break;
 			b.autoFolded = true;
 			b.by = "auto";
-			live += digestTokens(b) - b.tokens;
+			live += this.foldedCostOf(b) - b.tokens;
+		}
+
+		// Step 4: RELAXED PASS — if still over budget after respecting cooldowns, fold
+		// the remaining candidates INCLUDING cooled-down ones (budget is the hard guarantee;
+		// hysteresis is best-effort).
+		if (live > this.budget) {
+			const candRelaxed = allCandidates().filter((b) => !b.autoFolded);
+			const sortedRelaxed = sortCandidates(candRelaxed, ctx);
+			for (const b of sortedRelaxed) {
+				if (live <= this.budget) break;
+				b.autoFolded = true;
+				b.by = "auto";
+				live += this.foldedCostOf(b) - b.tokens;
+			}
+		}
+
+		// Compute churn (symmetric difference of folded sets)
+		const foldedAfter = new Set<string>();
+		for (const b of this.blocks) if (this.isFolded(b)) foldedAfter.add(b.id);
+		this.foldFlips += symmetricDiff(foldedBefore, foldedAfter);
+
+		// Step 5: AUTO-COALESCE — collapse runs of long-cold auto-folded blocks into
+		// conductor-built flat groups (ADR 0009). Runs after the relaxed clamp so it only
+		// operates on blocks the clamp has already folded (never folds anything new).
+		// createGroup() calls refold() internally, but _inRefold blocks the inner call —
+		// safe. createGroup() already emits "grouped" with the passed actor, so no double-log.
+		this._runCoalesce();
+	}
+
+	/** Run the coalesce step (called at the bottom of _refoldImpl). Separated to keep _refoldImpl readable. */
+	private _runCoalesce(): void {
+		const T = this.currentTurn;
+		const protectedFrom = this.protectedFromIndex;
+		// Build a fast inGroup lookup from the current groupAt derived map.
+		// groupAt is a $derived, but we can read it here (it recomputes on groups change).
+		const inGroup = (id: string): boolean => !!this.groupAt.get(id);
+		const isAutoFolded = (b: Block): boolean => b.override === null && b.autoFolded;
+		const groupCoolActive = (firstId: string): boolean => (this.groupCool.get(firstId) ?? 0) > T;
+
+		const runs = findCoalesceRuns({
+			blocks: this.blocks,
+			protectedFromIndex: protectedFrom,
+			currentTurn: T,
+			inGroup,
+			isAutoFolded,
+			groupCoolActive,
+		});
+
+		for (const run of runs) {
+			// createGroup validates, snaps to whole messages, checks protection/overlap,
+			// folds on creation, and emits "grouped" with the passed actor ("conductor").
+			// The inner refold() call is a no-op due to _inRefold guard.
+			const g = this.createGroup(run.startId, run.endId, "conductor");
+			if (!g) continue;
+			// Mark the group as conductor-built (createGroup sets folded=true already).
+			g.by = "conductor";
+			// NET-SAVINGS GUARD (defense in depth — the corpus eval caught budget
+			// violations from this path): message snapping can pull in blocks whose
+			// cost RISES inside a folded group (a folded tool_result split from its
+			// call becomes a FULL-cost straggler). A conductor group must never
+			// increase live cost; if it would, dissolve it immediately — deleteGroup
+			// sets groupCool so the same range isn't retried every refold.
+			const members = this.groupMembers(g);
+			let ungroupedCost = 0;
+			for (const b of members) {
+				const foldedAlone = b.override === "folded" || (b.override === null && b.autoFolded);
+				ungroupedCost += foldedAlone ? this.foldedCostOf(b) : b.tokens;
+			}
+			if (this.groupLiveTokens(g) > ungroupedCost) {
+				this.deleteGroup(g.id, "auto");
+			}
 		}
 	}
 
@@ -418,6 +805,10 @@ export class AccordionStore {
 		b.override = "unfolded";
 		b.by = by;
 		this.emit(by, "unfolded", label(b));
+		// Record recall for agent and user unfolds
+		if (by === "agent" || by === "you") {
+			this.recordRecall(id);
+		}
 		this.refold();
 	}
 	toggle(id: string, by: Actor = "you"): void {
@@ -547,6 +938,14 @@ export class AccordionStore {
 	deleteGroup(id: string, by: Actor = "you"): void {
 		const g = this.groupById(id);
 		if (!g) return;
+		// HYSTERESIS (ADR 0009 §5): if this is a conductor-built group, set group-level cooldown
+		// so the coalesce step won't immediately re-form the same group.
+		// This covers: human delete, lexical restore (opens groups via unfoldGroup),
+		// and agent unfolds (resolveUnfold → unfoldGroup) — all go through here.
+		if (g.by === "conductor" && g.memberIds.length > 0) {
+			const firstId = g.memberIds[0];
+			this.groupCool.set(firstId, this.currentTurn + COALESCE_CONFIG.cooldownTurns);
+		}
 		this.groups = this.groups.filter((x) => x.id !== id);
 		this.emit(by, "ungrouped", `${g.memberIds.length} blocks`);
 		this.refold();
@@ -562,15 +961,33 @@ export class AccordionStore {
 	unfoldGroup(id: string, by: Actor = "you"): void {
 		const g = this.groupById(id);
 		if (!g || !g.folded) return;
+		// HYSTERESIS (ADR 0009 §5): if this is a conductor-built group, set group-level cooldown
+		// on the first member so the coalesce step won't immediately re-form the group.
+		// Applies to ALL unfolds of conductor groups regardless of caller (agent, lexical, human).
+		if (g.by === "conductor" && g.memberIds.length > 0) {
+			const firstId = g.memberIds[0];
+			this.groupCool.set(firstId, this.currentTurn + COALESCE_CONFIG.cooldownTurns);
+		}
 		g.folded = false;
 		this.groups = [...this.groups];
 		this.emit(by, "group unfolded", `${g.memberIds.length} blocks`);
+		// Record recalls for agent/conductor group unfolds
+		if (by === "agent" || by === "conductor") {
+			for (const mid of g.memberIds) {
+				this.recordRecall(mid);
+			}
+		}
 		this.refold();
 	}
 	toggleGroup(id: string, by: Actor = "you"): void {
 		const g = this.groupById(id);
 		if (!g) return;
 		g.folded ? this.unfoldGroup(id, by) : this.foldGroup(id, by);
+	}
+
+	/** Group hysteresis cooldown for a first-member id (turn until which re-coalesce is blocked). For tests/replay. */
+	groupCoolUntil(firstId: string): number {
+		return this.groupCool.get(firstId) ?? 0;
 	}
 
 	get(id: string): Block | undefined {
@@ -582,4 +999,12 @@ export class AccordionStore {
 function label(b: Block): string {
 	const where = b.turn > 0 ? `turn ${b.turn}` : "preamble";
 	return b.toolName ? `${b.kind} ${b.toolName} · ${where}` : `${b.kind} · ${where}`;
+}
+
+/** Count of elements in the symmetric difference of two sets. */
+function symmetricDiff(a: Set<string>, b: Set<string>): number {
+	let n = 0;
+	for (const x of a) if (!b.has(x)) n++;
+	for (const x of b) if (!a.has(x)) n++;
+	return n;
 }
