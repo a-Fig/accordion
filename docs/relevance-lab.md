@@ -43,7 +43,8 @@ precompute ships at `app/static/sample-relevance.json`. Columnar to stay small:
   "generatedAt": "2026-06-10T…",
   "ticks": [{
     "tick": 0,                  // ordinal
-    "atBlock": 940,             // blocks [0, atBlock) are scored; [atBlock, end) is the tail
+    "endBlock": 982,            // prefix length: scorers see blocks [0, endBlock) ONLY (no future leakage)
+    "atBlock": 940,             // tail boundary within the prefix: blocks [0, atBlock) are scored; [atBlock, endBlock) is the tail
     "blockIds": ["m0:p0", "m1:r", "…"],          // ids of scored blocks, in order
     "scorers": {
       "embed":  { "version": "1", "wallMs": 1234, "costUsd": 0.0021, "params": {} },
