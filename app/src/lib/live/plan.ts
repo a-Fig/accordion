@@ -52,18 +52,35 @@ export function computeFoldOps(store: AccordionStore): FoldOp[] {
 }
 
 /**
- * Compute the group-collapse ops for the current store state (ADR 0006): one `GroupOp` per
- * FOLDED group. `memberIds` is the group's durable member ids — the GUI's *intent*; the
- * extension's `applyPlan` independently re-derives which whole, balanced, non-backstop
- * messages it may actually remove (a non-durable member is dropped here too, since a
- * positional id is not stable across array shifts). `summaryText` is the engine's
- * single-source-of-truth recap, carrying the one `{#code FOLDED}` tag for the whole range.
- * Pure read; the store is never mutated.
+ * Compute the group-collapse ops for the current store state (ADR 0006, extended for
+ * C4 nesting in ADR 0011). One `GroupOp` per FOLDED, TOP-LEVEL group (a group not
+ * subsumed by a folded parent). For nested groups, a folded parent already covers all
+ * its children's leaf `memberIds` — emitting separate ops for both parent and children
+ * would produce redundant (and conflicting) removal sets for `applyPlan`. The rule:
+ *
+ *   - A folded parent group → emit ONE GroupOp with `memberIds` = the parent's leaf
+ *     block ids (union of all descendants). Children are skipped.
+ *   - A folded child group whose parent is also folded → SKIP (subsumed).
+ *   - A folded child group whose parent is UNFOLDED → emit its own GroupOp (it is now
+ *     the top-level group in the display hierarchy at this point).
+ *   - A flat (leaf, no children) group → emit as before.
+ *
+ * `memberIds` is always leaf durable block ids (non-durable filtered out). `summaryText`
+ * is the engine's single-source-of-truth recap. Pure read; the store is never mutated.
+ * `applyPlan` needs NO changes — its input is still flat `GroupOp[]` with leaf block ids.
  */
 export function computeGroupOps(store: AccordionStore): GroupOp[] {
+	// Build a set of child group ids that are subsumed by a FOLDED parent.
+	const subsumedByFoldedParent = new Set<string>();
+	for (const g of store.groups) {
+		if (!g.folded || !g.children?.length) continue;
+		for (const cid of g.children) subsumedByFoldedParent.add(cid);
+	}
+
 	const out: GroupOp[] = [];
 	for (const g of store.groups) {
 		if (!g.folded) continue;
+		if (subsumedByFoldedParent.has(g.id)) continue; // covered by a folded parent's op
 		const memberIds = g.memberIds.filter(isDurableId);
 		if (!memberIds.length) continue; // nothing durably removable
 		const summaryText = store.groupSummary(g);

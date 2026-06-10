@@ -12,7 +12,7 @@
  * that are ALREADY auto-folded. Net savings = stub consolidation only.
  */
 
-import type { Block } from "./types";
+import type { Block, Group } from "./types";
 
 /** Tunable constants — one object keeps all knobs in one place. */
 export const COALESCE_CONFIG = {
@@ -274,4 +274,143 @@ export function findCoalesceRuns(input: FindCoalesceInput): CoalesceRun[] {
 	}
 
 	return results;
+}
+
+// ── Era formation (C4 nesting, ADR 0011 §7) ─────────────────────────────────
+// Groups of adjacent folded conductor-built episodes can be coalesced upward into
+// parent "era" groups. `findEraRuns` identifies runs of ≥ MIN_ERA_GROUPS adjacent
+// folded leaf groups whose members are all old enough for era-level coalescing.
+
+/** Minimum number of adjacent folded groups to form an era. */
+export const MIN_ERA_GROUPS = 4;
+
+/**
+ * A group's member blocks must all be older than this many turns to be eligible for
+ * era-level coalescing. "Older than ~300 turns" is the C4 target.
+ */
+export const ERA_AGE_TURNS = 300;
+
+/**
+ * Maximum number of child groups per era. The blast-radius at era level is bounded by
+ * level-by-level unfold (only summaries are revealed), so this cap is generous compared
+ * to C2.5's leaf-block cap.
+ */
+export const MAX_ERA_GROUPS = 20;
+
+/**
+ * Find runs of adjacent folded conductor-built groups that are candidates for upward
+ * coalescing into era parent groups (ADR 0011 §7).
+ *
+ * @param groups      The store's current groups array (flat — includes both leaf and
+ *                    existing parent groups).
+ * @param blocks      The store's current blocks array (in conversation order).
+ * @param currentTurn The current turn number (from the most recent block's `turn`).
+ * @param blockIndex  A block-id → array-index map (the store's `index` map); if not
+ *                    provided it is built from `blocks`. Pass the store's map for
+ *                    efficiency when calling from a hot path.
+ * @returns An array of child-group-id arrays, each representing one candidate era.
+ *          Callers pass each to `store.createParentGroup`. Returns [] when no
+ *          eligible runs exist.
+ */
+export function findEraRuns(
+	groups: Group[],
+	blocks: Block[],
+	currentTurn: number,
+	blockIndex?: ReadonlyMap<string, number>,
+): string[][] {
+	// Build the block index if not provided.
+	const idx: ReadonlyMap<string, number> =
+		blockIndex ??
+		(() => {
+			const m = new Map<string, number>();
+			for (let i = 0; i < blocks.length; i++) m.set(blocks[i].id, i);
+			return m;
+		})();
+
+	// Only consider TOP-LEVEL folded leaf groups (no children, not already a child of a
+	// parent). Groups that already have children are era groups — skip them.
+	const alreadyParented = new Set<string>();
+	for (const g of groups) {
+		if (g.children?.length) for (const cid of g.children) alreadyParented.add(cid);
+	}
+
+	// Filter to eligible leaf groups: folded, no children, not already parented, and
+	// all leaf members older than ERA_AGE_TURNS.
+	const eligible = groups.filter((g) => {
+		if (!g.folded) return false;
+		if (g.children?.length) return false; // already a parent
+		if (alreadyParented.has(g.id)) return false; // already has a parent
+		// All leaf members must be older than ERA_AGE_TURNS.
+		for (const id of g.memberIds) {
+			const i = idx.get(id);
+			if (i === undefined) return false;
+			const b = blocks[i];
+			if (!b) return false;
+			if (currentTurn - b.turn < ERA_AGE_TURNS) return false; // too recent
+		}
+		return true;
+	});
+
+	if (eligible.length < MIN_ERA_GROUPS) return [];
+
+	// Sort eligible groups by the position of their first leaf member (conversation order).
+	const firstMemberIdx = (g: Group): number => {
+		let min = Infinity;
+		for (const id of g.memberIds) {
+			const i = idx.get(id);
+			if (i !== undefined && i < min) min = i;
+		}
+		return min;
+	};
+	const sorted = [...eligible].sort((a, b) => firstMemberIdx(a) - firstMemberIdx(b));
+
+	// Identify adjacent runs. Two consecutive groups in `sorted` are adjacent if:
+	// there is no unfolded foldable block (kind != "user") between the last member
+	// of the first group and the first member of the second group.
+	// "user" blocks are allowed gaps — they are natural episode separators.
+	const lastMemberIdx = (g: Group): number => {
+		let max = -Infinity;
+		for (const id of g.memberIds) {
+			const i = idx.get(id);
+			if (i !== undefined && i > max) max = i;
+		}
+		return max;
+	};
+
+	const runs: string[][] = [];
+	let currentRun: string[] = [sorted[0].id];
+
+	for (let i = 1; i < sorted.length; i++) {
+		const prev = sorted[i - 1];
+		const curr = sorted[i];
+		const prevLast = lastMemberIdx(prev);
+		const currFirst = firstMemberIdx(curr);
+
+		// Check the gap: any block between prevLast and currFirst that is a foldable
+		// kind (not "user") and not a member of either group breaks adjacency.
+		let adjacent = true;
+		for (let bi = prevLast + 1; bi < currFirst; bi++) {
+			const b = blocks[bi];
+			if (!b) continue;
+			if (b.kind === "user") continue; // allowed separator
+			adjacent = false;
+			break;
+		}
+
+		if (adjacent) {
+			currentRun.push(curr.id);
+			// Cap era size.
+			if (currentRun.length >= MAX_ERA_GROUPS) {
+				runs.push([...currentRun]);
+				currentRun = [];
+			}
+		} else {
+			if (currentRun.length >= MIN_ERA_GROUPS) runs.push([...currentRun]);
+			currentRun = [curr.id];
+		}
+	}
+	// Flush the final run.
+	if (currentRun.length >= MIN_ERA_GROUPS) runs.push([...currentRun]);
+
+	return runs;
 }

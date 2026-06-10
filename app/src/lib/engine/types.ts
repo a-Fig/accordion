@@ -61,14 +61,26 @@ export interface Block {
 }
 
 /**
- * A multiblock fold (ADR 0006). A group is an ENGINE OVERLAY, never a `Block`: it
- * references a CONTIGUOUS, non-overlapping run of member blocks (by id) that the human
- * collapses into a single tile. `folded` is the group's own state, orthogonal to each
- * member's per-block override — folding the group collapses the range; unfolding it
- * returns the members to their own fold state. The id is `g:<firstMemberDurableId>`; its
- * agent-unfold handle is `foldCode(id)`. Invariants (enforced at creation, store.createGroup):
- * contiguous · non-overlapping · flat (members are blocks, never groups) · ≥2 members ·
- * entirely older than the protected tail. `memberIds` is in conversation (block) order.
+ * A multiblock fold (ADR 0006, extended for C4 nesting ADR 0011). A group is an ENGINE
+ * OVERLAY, never a `Block`: it references a CONTIGUOUS, non-overlapping run of member
+ * blocks (by id) that the human or conductor collapses into a single tile. `folded` is
+ * the group's own state, orthogonal to each member's per-block override.
+ *
+ * `memberIds` is ALWAYS LEAF BLOCK IDS (never group ids), even for a parent group — a
+ * parent's `memberIds` is the union of all its descendants' leaf block ids. This keeps
+ * every existing consumer (computeGroupOps, applyPlan, classifyGroup, groupAt) unchanged.
+ *
+ * `children` (optional) carries the immediate child GROUP ids when this is a parent group.
+ * The absence of `children` (or an empty array) means this is a leaf group (ADR 0006
+ * flat group — a flat manual group or a conductor episode). A parent group is created
+ * only by the internal `createParentGroup` path; `createGroup` (manual) always produces
+ * leaf groups.
+ *
+ * The id is `g:<firstMemberDurableId>` for leaf groups; `era:<firstMemberDurableId>` for
+ * parent groups created by the conductor's upward-coalescing schedule. Its agent-unfold
+ * handle is `foldCode(id)`. Invariants (enforced at creation): contiguous · non-overlapping
+ * · flat members (leaf block ids, never group ids) · ≥2 members · entirely older than the
+ * protected tail. `memberIds` is in conversation (block) order.
  *
  * `by` records who created the group: "conductor" for auto-coalesced groups (ADR 0009),
  * "you" (or absent) for human-created groups. Used for hysteresis: dissolving a conductor
@@ -76,10 +88,19 @@ export interface Block {
  */
 export interface Group {
 	id: string;
+	/** Leaf BLOCK ids — always blocks, never group ids, even for parent groups (ADR 0011). */
 	memberIds: string[];
 	folded: boolean;
 	/** Who created this group. Absent = "you" (legacy / human-created). */
 	by?: Actor;
+	/**
+	 * Child GROUP ids (C4 nesting, ADR 0011). Absent/empty for leaf groups (the ADR 0006
+	 * manual flat group and conductor episodes). Present for parent groups created by the
+	 * conductor's upward-coalescing schedule (`createParentGroup`). When a parent is
+	 * unfolded (level-by-level semantics), its children remain folded — one unfold reveals
+	 * child summaries, not full text.
+	 */
+	children?: string[];
 }
 
 export interface SessionMeta {

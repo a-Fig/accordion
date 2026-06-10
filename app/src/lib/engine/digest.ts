@@ -190,3 +190,57 @@ export function groupDigest(group: Group, members: Block[]): string {
 export function groupDigestTokens(group: Group, members: Block[]): number {
 	return estTokens(groupDigest(group, members)) + BLOCK_OVERHEAD;
 }
+
+// ── parent-group (era) recap (ADR 0011 §8) ───────────────────────────────────
+// A PARENT GROUP's recap is a deterministic digest over its child groups' own summaries
+// ("a summary of summaries"). This is the C4 engine-only implementation — deterministic,
+// no LLM, one cheap call over already-small text. The LLM upgrade is C2's job and will
+// only change the text, not the structure.
+//
+// Format:
+//   {#<era-code> FOLDED} era · <N> episodes · <M> blocks · turns X–Y · ~<T> tok
+//     episode 1: <first line of child 1's summary>
+//     episode 2: <first line of child 2's summary>
+//     …
+
+/**
+ * Deterministic recap for a parent group (era). `getSummary` is a callback that returns
+ * the summary string for a given child group (typically `store.groupSummary(child)`).
+ * Pure — the caller provides child summaries, so this is testable without a store.
+ */
+export function groupEraDigest(parent: Group, children: Group[], getSummary: (g: Group) => string): string {
+	const tag = foldTag(parent.id);
+	if (!children.length) return `${tag} era · empty`;
+
+	const memberCount = parent.memberIds.length;
+	const episodes: string[] = [];
+	let totalTokEstimate = 0;
+	let loTurn = Infinity;
+	let hiTurn = -Infinity;
+
+	for (let i = 0; i < children.length; i++) {
+		const childSummary = getSummary(children[i]);
+		// Extract turn range from the child summary text (matches "turn X" or "turns X–Y")
+		const turnMatch = childSummary.match(/turns? (\d+)(?:–(\d+))?/);
+		if (turnMatch) {
+			const t1 = parseInt(turnMatch[1], 10);
+			const t2 = turnMatch[2] ? parseInt(turnMatch[2], 10) : t1;
+			if (t1 < loTurn) loTurn = t1;
+			if (t2 > hiTurn) hiTurn = t2;
+		}
+		// Extract token count from child summary (matches "~NNN tok")
+		const tokMatch = childSummary.match(/~(\d+) tok/);
+		if (tokMatch) totalTokEstimate += parseInt(tokMatch[1], 10);
+
+		// Episode line: strip the {#code FOLDED} prefix tag and take the first meaningful line.
+		const stripped = childSummary.replace(/^\{#[0-9a-z]{6} FOLDED\} /, "");
+		const firstLinePart = stripped.split("\n")[0].trim();
+		episodes.push(`  episode ${i + 1}: ${firstLinePart}`);
+	}
+
+	const spanStr = isFinite(loTurn) && isFinite(hiTurn) ? (loTurn === hiTurn ? `turn ${loTurn}` : `turns ${loTurn}–${hiTurn}`) : "";
+	const tokStr = totalTokEstimate > 0 ? ` · ~${totalTokEstimate} tok` : "";
+	const spanPart = spanStr ? ` · ${spanStr}` : "";
+	const head = `${tag} era · ${children.length} episode${children.length === 1 ? "" : "s"} · ${memberCount} block${memberCount === 1 ? "" : "s"}${spanPart}${tokStr}`;
+	return head + "\n" + episodes.join("\n");
+}
