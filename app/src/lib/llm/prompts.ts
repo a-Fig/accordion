@@ -112,10 +112,102 @@ export function summaryPrompt(
 	};
 }
 
+// ── Tick prompt (C3 Attentive Tick) ──────────────────────────────────────────
+
+export const TICK_PROMPT_VERSION = 1;
+
+export interface TickPromptInput {
+	indexLines: string[];
+	tailText: string;
+	liveTokens: number;
+	budget: number;
+	truncatedCount: number;
+}
+
+export interface TickPromptResult {
+	system: string;
+	user: string;
+	maxOutputTokens: number;
+	jsonSchema: unknown;
+}
+
+const TICK_SYSTEM = `\
+You are a LIBRARIAN curating an AI coding agent's working context window for the Accordion tool.
+Your only job is to SELECT entry numbers from the index you are shown — you never write content.
+
+FOLD = archive entries that are no longer relevant to the agent's current work. Each archived block
+shrinks to a one-line stub the agent can reopen by calling the unfold tool.
+
+UNFOLD = restore entries that are about to become relevant again: they are mentioned (exact or
+conceptual), implied, or clearly needed by the work visible in the RECENT ACTIVITY section.
+
+Strong bias to do NOTHING when unsure. Empty arrays are a good answer. The agent's budget and
+safety are enforced by a deterministic layer that runs after you — your job is relevance, not
+accounting. You may select at most 8 entries per side.
+
+Output JSON only. No prose outside the JSON object.
+Reasons must be ≤12 words, concrete (e.g. "config setup no longer referenced by current task").`;
+
 /**
- * Tick prompt stub — milestone C3 fills this.
- * @throws always
+ * Build a tick prompt for the LLM conductor.
+ *
+ * The index line format is defined HERE (one home for the format):
+ *   #<n> [<code>] <kind> t<turn> <tokens>tok <FOLDED|live> :: <snippet>
+ *
+ * This matches the format produced by tick.ts buildIndex + the indexLines array.
  */
-export function tickPrompt(..._args: unknown[]): never {
-	throw new Error("C3");
+export function tickPrompt(input: TickPromptInput): TickPromptResult {
+	const headroom = input.budget - input.liveTokens;
+	const budgetLine =
+		headroom >= 0
+			? `BUDGET: ${input.liveTokens.toLocaleString()} / ${input.budget.toLocaleString()} tokens live (${headroom.toLocaleString()} headroom)`
+			: `BUDGET: ${input.liveTokens.toLocaleString()} / ${input.budget.toLocaleString()} tokens — OVER by ${(-headroom).toLocaleString()} tokens`;
+
+	const truncNote =
+		input.truncatedCount > 0
+			? `\n(Note: ${input.truncatedCount} older entries omitted — only the newest ${input.indexLines.length} are shown.)`
+			: "";
+
+	const indexSection = `INDEX (oldest first):${truncNote}\n${input.indexLines.join("\n")}`;
+
+	const tailSection = `RECENT ACTIVITY (the agent's current work):\n${input.tailText.trimEnd() || "(no recent activity)"}`;
+
+	const user = `${budgetLine}\n\n${indexSection}\n\n${tailSection}`;
+
+	// Gemini responseSchema (OBJECT format)
+	const jsonSchema = {
+		type: "OBJECT",
+		properties: {
+			fold: {
+				type: "ARRAY",
+				items: {
+					type: "OBJECT",
+					properties: {
+						n: { type: "INTEGER" },
+						reason: { type: "STRING" },
+					},
+					required: ["n", "reason"],
+				},
+			},
+			unfold: {
+				type: "ARRAY",
+				items: {
+					type: "OBJECT",
+					properties: {
+						n: { type: "INTEGER" },
+						reason: { type: "STRING" },
+					},
+					required: ["n", "reason"],
+				},
+			},
+		},
+		required: ["fold", "unfold"],
+	};
+
+	return {
+		system: TICK_SYSTEM,
+		user,
+		maxOutputTokens: 800,
+		jsonSchema,
+	};
 }

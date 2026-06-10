@@ -1,6 +1,7 @@
 import { parse } from "./engine/parse";
 import { AccordionStore } from "./engine/store.svelte";
 import { attachSummaryQueue } from "./llm/summaryQueue.svelte";
+import { attachConductor } from "./conductor/scheduler.svelte";
 
 /**
  * Reactive session state, shared across the app.
@@ -28,10 +29,8 @@ export const session = $state<{
 let _pollInterval: ReturnType<typeof setInterval> | null = null;
 let _lastLen = -1;
 let _loadToken = 0;
-/** Detach function for the current store's summary queue; null when no store is active. */
-let _detachQueue: (() => void) | null = null;
-// TODO(C3): the live pi-session store is created inside live/liveClient.svelte.ts (not here).
-// Wire attachSummaryQueue there too — export a helper from summaryQueue.svelte.ts if needed.
+/** Detach functions for the current store's summary queue + conductor; null when no store is active. */
+let _detachStore: (() => void) | null = null;
 
 /** Bump the generation token, invalidating any in-flight async load. */
 export function cancelPendingLoad(): void {
@@ -41,11 +40,20 @@ export function cancelPendingLoad(): void {
 export const isTauriEnv =
 	typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
-/** Replace the active store, detaching the old queue and attaching a new one. */
-function _setStore(store: AccordionStore): void {
-	_detachQueue?.();
+/** Derive a session key from the store's title or file path, falling back to "demo". */
+function _sessionKeyFrom(store: AccordionStore, filePath?: string | null): string {
+	const title = store.meta.title || filePath || "demo";
+	return title.replace(/[^\w-]/g, "_").slice(0, 40);
+}
+
+/** Replace the active store, detaching the old queue+conductor and attaching new ones. */
+function _setStore(store: AccordionStore, filePath?: string | null): void {
+	_detachStore?.();
 	session.store = store;
-	_detachQueue = attachSummaryQueue(store);
+	const detachQueue = attachSummaryQueue(store);
+	const sessionKey = _sessionKeyFrom(store, filePath);
+	const detachConductor = attachConductor(store, { sessionKey, live: false });
+	_detachStore = () => { detachQueue(); detachConductor(); };
 }
 
 export async function loadSample() {
@@ -58,7 +66,7 @@ export async function loadSample() {
 		if (!res.ok) throw new Error(`fetch failed (${res.status})`);
 		const text = await res.text();
 		if (token !== _loadToken) return; // a newer selection superseded this sample load — drop it
-		_setStore(new AccordionStore(parse(text)));
+		_setStore(new AccordionStore(parse(text)), null);
 		session.filePath = null;
 		session.readOnly = false;
 		_expose();
@@ -144,7 +152,7 @@ async function _load(path: string, readFn: (p: string) => Promise<string>, token
 	if (token !== _loadToken) return; // a newer selection superseded this load — drop it
 	const prevBudget = session.store?.budget;
 	const prevProtect = session.store?.protectTokens;
-	_setStore(new AccordionStore(parse(text)));
+	_setStore(new AccordionStore(parse(text)), path);
 	if (prevBudget !== undefined) session.store!.setBudget(prevBudget);
 	if (prevProtect !== undefined) session.store!.setProtect(prevProtect);
 	session.filePath = path;

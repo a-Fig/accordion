@@ -68,7 +68,7 @@ export function extractIdentifiers(tailText: string): Set<string> {
 	// Strip leading/trailing punctuation like ( ) , ; : " ' ` [ ]
 	const pathRe = /(?:[A-Za-z]:[\\/]|\.\.?[\\/]|[\\/])?[\w@.-]+(?:[\\/][\w.@-]+)+/g;
 	while ((m = pathRe.exec(tailText)) !== null) {
-		const raw = m[0].replace(/^[^\w@./\\C-Z]+|[^)\w/\\]+$/g, "").replace(/[.,;:'"`)]+$/, "");
+		const raw = m[0].replace(/^[^\w@./\\A-Z]+|[^)\w/\\]+$/g, "").replace(/[.,;:'"`)]+$/, "");
 		if (raw.length >= QUOTED_MIN && !STOPWORDS.has(raw.toLowerCase())) {
 			candidates.set(raw, raw.length);
 		}

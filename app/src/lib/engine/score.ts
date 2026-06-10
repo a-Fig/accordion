@@ -79,7 +79,11 @@ export function activation(b: Block, ctx: ScoreCtx): number {
 	const d = SCORE_CONFIG.decay[b.kind] ?? 0.6;
 	const floor = SCORE_CONFIG.recallFloorTurns;
 	const T = ctx.currentTurn;
-	const events: number[] = [b.turn, ...(ctx.recalls.get(b.id) ?? [])];
+	// Filter out recall events with t > currentTurn — out-of-order JSONL turns must not
+	// grant maximal (freshness) weight to a block that hasn't actually been recalled yet.
+	const rawEvents: number[] = [b.turn, ...(ctx.recalls.get(b.id) ?? [])];
+	const events = rawEvents.filter((t) => t <= T);
+	if (!events.length) events.push(b.turn <= T ? b.turn : T); // always at least the creation event
 	let sum = 0;
 	for (const t of events) {
 		const age = Math.max(T - t, floor);

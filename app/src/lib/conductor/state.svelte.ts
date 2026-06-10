@@ -16,6 +16,7 @@ export const conductor = $state({
 	misses: 0,           // agent had to ask for a folded block
 	preempts: 0,         // conductor/lexical had it open before the agent asked
 	lastError: "",
+	tickCapReached: false, // set when MAX_TICKS_PER_SESSION is hit
 	lastActions: [] as {
 		kind: "fold" | "unfold";
 		label: string;

@@ -12,17 +12,33 @@
  */
 import { session, cancelPendingLoad } from "../session.svelte";
 import { AccordionStore } from "../engine/store.svelte";
-import { wireToBlock } from "./mapping";
+import { wireToBlock, isDurableId } from "./mapping";
 import { computeFoldOps, computeGroupOps, resolveUnfold } from "./plan";
 import { folding } from "./folding.svelte";
 import { DEFAULT_PORT, PROTOCOL_VERSION, isServerMessage, type ServerMessage, type PlanMessage, type FoldOp, type GroupOp, type UnfoldResultMessage } from "./protocol";
 import { ghostStart, ghostEnd, ghostClearAll } from "./ghostState.svelte";
+import { attachSummaryQueue } from "../llm/summaryQueue.svelte";
+import { attachConductor, requestTick } from "../conductor/scheduler.svelte";
+import { conductor } from "../conductor/state.svelte";
+import { foldCode, FOLDABLE_KINDS } from "../engine/digest";
+import { metricsWrite } from "../conductor/telemetry";
 
 let socket: WebSocket | null = null;
 let manualClose = false;
 // True once budget has been set from pi's contextWindow for the current connection.
 // Prevents subsequent syncs from overriding a user's manual budget adjustment.
 let budgetLive = false;
+/** Detach handles for the summary queue and conductor attached to the current live store. */
+let _detachLive: (() => void) | null = null;
+/** Session key for the current live store (used for metrics). */
+let _sessionKey: string | null = null;
+
+/** Detach the current live store's summary queue and conductor, if any. */
+function _detachLiveStore(): void {
+	_detachLive?.();
+	_detachLive = null;
+	_sessionKey = null;
+}
 
 /** Live connection status, for the UI. */
 export const live = $state<{ status: "idle" | "connecting" | "connected" | "error"; detail: string }>({
@@ -101,16 +117,25 @@ export function connectLive(port: number = DEFAULT_PORT): void {
 			// Structural reset: clear all ghosts — no ghost survives a session reconnect.
 			ghostClearAll();
 			budgetLive = false;
-			session.store = new AccordionStore({
+			_detachLiveStore();
+			const liveStore = new AccordionStore({
 				meta: { format: "pi", title: msg.meta.title || "live pi session", cwd: msg.meta.cwd || "", model: msg.meta.model || "" },
 				blocks: [],
 				lineCount: 0,
 				skipped: 0,
 			});
+			session.store = liveStore;
 			if (typeof msg.meta.contextWindow === "number" && msg.meta.contextWindow > 0) {
-				session.store.setContextWindow(msg.meta.contextWindow);
-				session.store.setBudget(msg.meta.contextWindow);
+				liveStore.setContextWindow(msg.meta.contextWindow);
+				liveStore.setBudget(msg.meta.contextWindow);
 				budgetLive = true;
+			}
+			{
+				const sessionKey = (msg.meta.title || "live").replace(/[^\w-]/g, "_").slice(0, 40);
+				_sessionKey = sessionKey;
+				const detachQueue = attachSummaryQueue(liveStore);
+				const detachConductor = attachConductor(liveStore, { sessionKey, live: true });
+				_detachLive = () => { detachQueue(); detachConductor(); };
 			}
 		} else if (msg.type === "sync") {
 			if (!session.store) return;
@@ -154,6 +179,9 @@ export function connectLive(port: number = DEFAULT_PORT): void {
 			} catch {
 				/* socket gone — extension will time out and pass through */
 			}
+			// After the sync settles, schedule a debounced attentive tick (no-op when
+			// conductor.mode !== "attentive" or LLM unavailable).
+			requestTick("sync");
 		} else if (msg.type === "unfoldRequest") {
 			// The live agent asked (via the `unfold` tool) to restore folded blocks it saw
 			// tagged `{#<code> FOLDED}`. Resolve each code to its folded block(s) and hold
@@ -163,11 +191,55 @@ export function connectLive(port: number = DEFAULT_PORT): void {
 			// context hook (the block drops out of the fold plan). Unfolding only ever shows
 			// the model MORE of its own original context, so there is no provider-safety risk.
 			const codes = Array.isArray(msg.codes) ? msg.codes : [];
+
+			// MISS METRIC — compute wasFolded BEFORE resolveUnfold (synchronous, cheap)
+			// so we capture the true state at the moment the agent asked.
+			const store = session.store;
+			const perCode = codes.map((code) => {
+				let wasFolded = false;
+				if (store) {
+					// Check groups first (mirrors resolveUnfold's group-first logic)
+					for (const g of store.groups) {
+						if (g.folded && foldCode(g.id) === code) { wasFolded = true; break; }
+					}
+					if (!wasFolded) {
+						wasFolded = store.blocks.some(
+							(b) =>
+								store.isFolded(b) &&
+								FOLDABLE_KINDS.has(b.kind) &&
+								isDurableId(b.id) &&
+								foldCode(b.id) === code,
+						);
+					}
+				}
+				return { code, wasFolded, restored: false }; // restored filled in below
+			});
+
 			// Only act while ARMED. Disarmed, the agent's real context is full (no tags were
 			// applied), so an unfold request is stale/meaningless — applying a sticky "agent"
 			// override then would silently leak a block from the budget on the next arm.
 			const { restored, missing } =
-				folding.enabled && session.store ? resolveUnfold(session.store, codes) : { restored: [], missing: codes };
+				folding.enabled && store ? resolveUnfold(store, codes) : { restored: [], missing: codes };
+
+			// Fill in restored status for each code
+			const restoredCodes = new Set(restored.map((r) => r.code));
+			for (const pc of perCode) pc.restored = restoredCodes.has(pc.code);
+
+			// Update miss/preempt counters (synchronous — off the reply critical path)
+			for (const pc of perCode) {
+				if (pc.wasFolded) conductor.misses++;
+				else if (pc.restored) conductor.preempts++;
+			}
+
+			// Fire-and-forget metrics write
+			metricsWrite({
+				at: new Date().toISOString(),
+				sessionKey: _sessionKey ?? "unknown",
+				mode: conductor.mode,
+				codes,
+				perCode,
+			});
+
 			const reply: UnfoldResultMessage = { type: "unfoldResult", reqId: msg.reqId, restored, missing };
 			try {
 				ws.send(JSON.stringify(reply));
@@ -217,6 +289,7 @@ export function connectLive(port: number = DEFAULT_PORT): void {
 			// new socket's connecting/connected state back to idle.
 			if (socket === ws) {
 				socket = null;
+				_detachLiveStore();
 				if (!manualClose && live.status !== "error") {
 					live.status = "idle";
 					live.detail = "disconnected";
@@ -232,6 +305,7 @@ export function disconnectLive(): void {
 	// Guaranteed teardown (invariant #2): explicit disconnect clears all ghosts
 	// immediately, before the socket close fires.
 	ghostClearAll();
+	_detachLiveStore();
 	if (socket) {
 		try {
 			socket.close();

@@ -10,6 +10,7 @@
 import type { Block, ParsedSession } from "./types";
 import { AccordionStore } from "./store.svelte";
 import { foldCode } from "./digest";
+import { messageKey } from "./ids";
 
 export interface ReplayOptions {
 	/** Token budget (default: store default 70_000). */
@@ -57,14 +58,15 @@ export interface ReplayMetrics {
 }
 
 /**
- * Extract fold codes from a tool_call block's text.
+ * Extract unfold tokens from a tool_call block's text.
  *
  * parse.ts emits pi tool_call text as: `${b.name} ${JSON.stringify(b.arguments ?? {})}`
  * and Claude Code tool_call text as: `${b.name} ${JSON.stringify(b.input ?? {})}`
  *
- * So the text looks like: `unfold {"codes":["abc123","def456"]}`
- *
- * We parse tolerantly: look for {"codes":[...]} anywhere in the text.
+ * The real pi corpus uses `arguments.ids` with full durable block ids
+ * (e.g. "a:what-i-learned:p202"), while the live tool contract uses `codes`
+ * with 6-char fold codes (e.g. "abc123"). We parse BOTH arrays and return
+ * all tokens found in either field.
  */
 function extractUnfoldCodes(text: string): string[] {
 	// Try to parse: skip tool name prefix, then parse JSON
@@ -72,23 +74,57 @@ function extractUnfoldCodes(text: string): string[] {
 	if (jsonStart < 0) return [];
 	try {
 		const obj = JSON.parse(text.slice(jsonStart));
-		if (obj && Array.isArray(obj.codes)) {
-			return obj.codes.filter((c: unknown): c is string => typeof c === "string");
+		if (obj) {
+			const tokens: string[] = [];
+			// Parse `ids` array (real pi corpus: full durable block ids)
+			if (Array.isArray(obj.ids)) {
+				for (const t of obj.ids) if (typeof t === "string") tokens.push(t);
+			}
+			// Parse `codes` array (live tool contract: 6-char fold codes)
+			if (Array.isArray(obj.codes)) {
+				for (const t of obj.codes) if (typeof t === "string") tokens.push(t);
+			}
+			if (tokens.length > 0) return tokens;
 		}
 	} catch {
 		// fallback: regex extraction for robustly handling partial JSON
 	}
-	// Fallback: regex for ["code1","code2"] patterns
-	const codesMatch = text.match(/"codes"\s*:\s*\[([^\]]*)\]/);
-	if (!codesMatch) return [];
-	const inner = codesMatch[1];
-	const codes: string[] = [];
-	const codeRe = /"([^"]+)"/g;
-	let m: RegExpExecArray | null;
-	while ((m = codeRe.exec(inner)) !== null) {
-		codes.push(m[1]);
+	// Fallback: regex for both "ids":[...] and "codes":[...] patterns
+	const tokens: string[] = [];
+	for (const field of ["ids", "codes"]) {
+		const re = new RegExp(`"${field}"\\s*:\\s*\\[([^\\]]*)\\]`);
+		const match = text.match(re);
+		if (match) {
+			const inner = match[1];
+			const itemRe = /"([^"]+)"/g;
+			let m: RegExpExecArray | null;
+			while ((m = itemRe.exec(inner)) !== null) {
+				tokens.push(m[1]);
+			}
+		}
 	}
-	return codes;
+	return tokens;
+}
+
+/**
+ * Resolve an unfold token (which may be a full block id, a message-key prefix, or a
+ * 6-char fold code) to the matching store blocks.
+ *
+ * Resolution order:
+ *   1. token === b.id  (exact full id match — real corpus `arguments.ids`)
+ *   2. messageKey(token) === messageKey(b.id)  (message-key match)
+ *   3. foldCode(b.id) === token  (6-char fold code — live tool contract)
+ */
+function resolveToken(token: string, blocks: readonly Block[]): Block[] {
+	// Pass 1: exact id match
+	const exact = blocks.filter((b) => b.id === token);
+	if (exact.length > 0) return exact;
+	// Pass 2: message-key match (e.g. token = "a:what-i-learned" matches "a:what-i-learned:p202")
+	const tokenKey = messageKey(token);
+	const byKey = blocks.filter((b) => messageKey(b.id) === tokenKey);
+	if (byKey.length > 0) return byKey;
+	// Pass 3: fold code match
+	return blocks.filter((b) => foldCode(b.id) === token);
 }
 
 /**
@@ -161,10 +197,10 @@ export function replay(blocks: Block[], opts: ReplayOptions = {}): ReplayMetrics
 		// Detect agent unfold tool_calls in this turn's blocks
 		const unfoldCalls = turnBlocks.filter((b) => b.kind === "tool_call" && b.toolName === "unfold");
 		for (const call of unfoldCalls) {
-			const codes = extractUnfoldCodes(call.text);
-			for (const code of codes) {
-				// Find blocks whose foldCode matches this code
-				const matching = store.blocks.filter((b) => foldCode(b.id) === code);
+			const tokens = extractUnfoldCodes(call.text);
+			for (const code of tokens) {
+				// Resolve the token (full id, message key, or fold code) to matching blocks
+				const matching = resolveToken(code, store.blocks);
 				const blockId = matching[0]?.id ?? null;
 
 				let wasFolded = false;
