@@ -5,6 +5,7 @@
 	import Icon from "$lib/ui/Icon.svelte";
 	import { folding, setFolding } from "$lib/live/folding.svelte";
 	import { live } from "$lib/live/liveClient.svelte";
+	import ConductorPanel from "$lib/ui/map/ConductorPanel.svelte";
 
 	let { store, readOnly = false }: { store: AccordionStore; readOnly?: boolean } = $props();
 
@@ -160,6 +161,8 @@
 					<span class="fold-arm-label">Folding: {folding.enabled ? "steering" : "preview"}</span>
 				</button>
 			{/if}
+
+			<ConductorPanel log={store.log} {readOnly} />
 
 			<span
 				class="kl protect-read"

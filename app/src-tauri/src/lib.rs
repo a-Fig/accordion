@@ -11,8 +11,9 @@
 
 use std::fs;
 use std::path::PathBuf;
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::Manager;
 
@@ -381,6 +382,311 @@ fn read_claude_session(path: String) -> Result<String, String> {
     fs::read_to_string(&target).map_err(|e| format!("read failed: {e}"))
 }
 
+// ── Accordion home I/O ────────────────────────────────────────────────────────
+
+/// Validate a relative path component: no absolute paths, no drive letters,
+/// no `..` segments, no backslashes (we normalize separators to `/`). Returns
+/// a `PathBuf` rooted in `~/.accordion` on success.
+fn accordion_path(rel_path: &str) -> Result<PathBuf, String> {
+    // Normalize: convert backslashes to forward slashes.
+    let normalized = rel_path.replace('\\', "/");
+
+    // Reject absolute paths or drive letters (e.g. C:/).
+    if normalized.starts_with('/') || normalized.contains(':') {
+        return Err(format!("forbidden path (absolute or drive letter): {rel_path}"));
+    }
+    // Reject any `..` segment (path traversal attempt).
+    for segment in normalized.split('/') {
+        if segment == ".." {
+            return Err(format!("forbidden path (contains ..): {rel_path}"));
+        }
+    }
+
+    let root = registry_root().ok_or_else(|| "no accordion home".to_string())?;
+    Ok(root.join(&normalized))
+}
+
+/// Read a file at `rel_path` under `~/.accordion`. Returns `""` if the file
+/// does not exist. Capped at 8 MB to prevent runaway reads.
+#[tauri::command]
+fn accordion_read_text(rel_path: String) -> Result<String, String> {
+    let path = accordion_path(&rel_path)?;
+    if !path.exists() {
+        return Ok(String::new());
+    }
+    let meta = fs::metadata(&path).map_err(|e| format!("stat failed: {e}"))?;
+    const MAX_BYTES: u64 = 8 * 1024 * 1024;
+    if meta.len() > MAX_BYTES {
+        return Err(format!("file too large ({} bytes > 8 MB limit)", meta.len()));
+    }
+    fs::read_to_string(&path).map_err(|e| format!("read failed: {e}"))
+}
+
+/// Append `line + "\n"` to `rel_path` under `~/.accordion`. Creates parent
+/// directories as needed. Rejects lines containing a newline character.
+#[tauri::command]
+fn accordion_append_line(rel_path: String, line: String) -> Result<(), String> {
+    if line.contains('\n') {
+        return Err("line must not contain newline characters".to_string());
+    }
+    let path = accordion_path(&rel_path)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("create_dir_all failed: {e}"))?;
+    }
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| format!("open failed: {e}"))?;
+    writeln!(file, "{line}").map_err(|e| format!("write failed: {e}"))
+}
+
+// ── LLM generation ────────────────────────────────────────────────────────────
+
+/// Serde types that mirror LlmRequest / LlmResponse in types.ts.
+/// camelCase matches the TypeScript invoke convention.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LlmGenRequest {
+    pub role: String,
+    pub system: Option<String>,
+    pub user: String,
+    pub json_schema: Option<Value>,
+    pub max_output_tokens: Option<u32>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LlmGenResponse {
+    pub text: String,
+    pub in_tokens: u64,
+    pub out_tokens: u64,
+    pub model: String,
+    pub provider: String,
+}
+
+// Per-process Vertex token cache. Protected by a std Mutex (not async) because
+// the token is a small string and the lock is held only for read/write of the
+// cache struct, not during the network call.
+static VERTEX_TOKEN_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<Option<(String, Instant)>>,
+> = std::sync::OnceLock::new();
+
+const VERTEX_TOKEN_TTL: Duration = Duration::from_secs(45 * 60);
+const VERTEX_PROJECT: &str  = "runner-frontier-74255";
+const VERTEX_LOCATION: &str = "us-central1";
+
+fn vertex_token_cache() -> std::sync::MutexGuard<'static, Option<(String, Instant)>> {
+    VERTEX_TOKEN_CACHE
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// Mint or return a cached Vertex OAuth token.
+fn get_vertex_token(force_refresh: bool) -> Result<String, String> {
+    {
+        let cache = vertex_token_cache();
+        if !force_refresh {
+            if let Some((ref tok, ref minted_at)) = *cache {
+                if minted_at.elapsed() < VERTEX_TOKEN_TTL {
+                    return Ok(tok.clone());
+                }
+            }
+        }
+    } // drop lock before spawning
+
+    // gcloud.cmd on Windows — use cmd /C to invoke it.
+    let output = std::process::Command::new("cmd")
+        .args(["/C", "gcloud", "auth", "print-access-token"])
+        .output()
+        .map_err(|e| format!("failed to spawn gcloud: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("gcloud auth failed: {stderr}"));
+    }
+
+    let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if token.is_empty() {
+        return Err("gcloud returned an empty token".to_string());
+    }
+
+    // Store in cache.
+    *vertex_token_cache() = Some((token.clone(), Instant::now()));
+    Ok(token)
+}
+
+/// Read GEMINI_API_KEY: env first, then Windows registry HKCU\Environment.
+fn resolve_gemini_key() -> Option<String> {
+    if let Ok(key) = std::env::var("GEMINI_API_KEY") {
+        if !key.is_empty() {
+            return Some(key);
+        }
+    }
+    // Windows registry fallback.
+    let output = std::process::Command::new("reg")
+        .args(["query", "HKCU\\Environment", "/v", "GEMINI_API_KEY"])
+        .output()
+        .ok()?;
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Line format: "    GEMINI_API_KEY    REG_SZ    <value>"
+        for line in stdout.lines() {
+            if line.trim_start().starts_with("GEMINI_API_KEY") {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 3 {
+                    return Some(parts[parts.len() - 1].to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Build a Gemini-compatible JSON request body.
+fn build_gemini_body(req: &LlmGenRequest) -> Value {
+    let mut body = serde_json::json!({
+        "contents": [{"role": "user", "parts": [{"text": req.user}]}]
+    });
+    if let Some(sys) = &req.system {
+        body["systemInstruction"] = serde_json::json!({"parts": [{"text": sys}]});
+    }
+    let mut gen_config = serde_json::Map::new();
+    if let Some(max_tok) = req.max_output_tokens {
+        gen_config.insert("maxOutputTokens".to_string(), max_tok.into());
+    }
+    if let Some(schema) = &req.json_schema {
+        gen_config.insert("responseMimeType".to_string(), "application/json".into());
+        gen_config.insert("responseSchema".to_string(), schema.clone());
+    }
+    if !gen_config.is_empty() {
+        body["generationConfig"] = Value::Object(gen_config);
+    }
+    body
+}
+
+/// Parse the Gemini response envelope into our response type.
+fn parse_gemini_response(raw: &Value, model: &str, provider: &str) -> Result<LlmGenResponse, String> {
+    let text = raw
+        .pointer("/candidates/0/content/parts/0/text")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("unexpected response shape: {}", &raw.to_string()[..200.min(raw.to_string().len())]))?
+        .to_string();
+
+    let in_tokens  = raw.pointer("/usageMetadata/promptTokenCount")    .and_then(|v| v.as_u64()).unwrap_or(0);
+    let out_tokens = raw.pointer("/usageMetadata/candidatesTokenCount") .and_then(|v| v.as_u64()).unwrap_or(0);
+
+    Ok(LlmGenResponse {
+        text,
+        in_tokens,
+        out_tokens,
+        model: model.to_string(),
+        provider: provider.to_string(),
+    })
+}
+
+fn is_prepay_error(status: u16, body: &str) -> bool {
+    status == 429 && (body.contains("RESOURCE_EXHAUSTED") || body.contains("prepay") || body.contains("prepayment"))
+}
+
+/// Main LLM generation command. Tries AI Studio first; falls back to Vertex on
+/// prepay/quota exhaustion.
+#[tauri::command]
+async fn llm_generate(req: LlmGenRequest) -> Result<LlmGenResponse, String> {
+    let model_for_role = |provider: &str| -> &'static str {
+        match (provider, req.role.as_str()) {
+            ("aistudio", "tick")    => "gemini-flash-latest",
+            ("aistudio", _)        => "gemini-flash-lite-latest",
+            ("vertex",   _)        => "gemini-2.5-flash-lite",
+            _                     => "gemini-2.5-flash-lite",
+        }
+    };
+
+    let body = build_gemini_body(&req);
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build()
+        .map_err(|e| format!("reqwest build failed: {e}"))?;
+
+    // ── Try AI Studio ──────────────────────────────────────────────────────────
+    let gemini_key = resolve_gemini_key();
+    if let Some(key) = &gemini_key {
+        let model = model_for_role("aistudio");
+        let url = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
+        );
+        let resp = client.post(&url).json(&body).send().await
+            .map_err(|e| format!("AI Studio request failed: {e}"))?;
+        let status = resp.status().as_u16();
+        let raw_body = resp.text().await.map_err(|e| format!("read body failed: {e}"))?;
+
+        if status == 200 {
+            let parsed: Value = serde_json::from_str(&raw_body)
+                .map_err(|e| format!("parse AI Studio response: {e}"))?;
+            return parse_gemini_response(&parsed, model, "aistudio");
+        }
+
+        if is_prepay_error(status, &raw_body) {
+            // Prepay credits depleted — fall through to Vertex.
+        } else {
+            // Surface other AI Studio errors directly.
+            let kind = if status == 429 { "quota" } else { "http" };
+            return Err(format!("{kind}: AI Studio HTTP {status}: {}", &raw_body[..300.min(raw_body.len())]));
+        }
+    }
+
+    // ── Try Vertex AI ──────────────────────────────────────────────────────────
+    let vertex_model = model_for_role("vertex");
+    let vertex_url = format!(
+        "https://{VERTEX_LOCATION}-aiplatform.googleapis.com/v1/projects/{VERTEX_PROJECT}\
+         /locations/{VERTEX_LOCATION}/publishers/google/models/{vertex_model}:generateContent"
+    );
+
+    let token = get_vertex_token(false)?;
+    let resp = client.post(&vertex_url)
+        .bearer_auth(&token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Vertex request failed: {e}"))?;
+    let status = resp.status().as_u16();
+    let raw_body = resp.text().await.map_err(|e| format!("read Vertex body: {e}"))?;
+
+    // On 401, refresh token once and retry.
+    if status == 401 {
+        let fresh_token = get_vertex_token(true)?;
+        let resp2 = client.post(&vertex_url)
+            .bearer_auth(&fresh_token)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("Vertex retry failed: {e}"))?;
+        let status2 = resp2.status().as_u16();
+        let raw_body2 = resp2.text().await.map_err(|e| format!("read Vertex retry body: {e}"))?;
+
+        if status2 != 200 {
+            let kind = if status2 == 429 { "quota" } else { "http" };
+            return Err(format!("{kind}: Vertex HTTP {status2}: {}", &raw_body2[..300.min(raw_body2.len())]));
+        }
+        let parsed: Value = serde_json::from_str(&raw_body2)
+            .map_err(|e| format!("parse Vertex response: {e}"))?;
+        return parse_gemini_response(&parsed, vertex_model, "vertex");
+    }
+
+    if status != 200 {
+        let kind = if status == 429 { "quota" } else { "http" };
+        return Err(format!("{kind}: Vertex HTTP {status}: {}", &raw_body[..300.min(raw_body.len())]));
+    }
+
+    let parsed: Value = serde_json::from_str(&raw_body)
+        .map_err(|e| format!("parse Vertex response: {e}"))?;
+    parse_gemini_response(&parsed, vertex_model, "vertex")
+}
+
+// ── Window management ─────────────────────────────────────────────────────────
+
 fn focus_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.unminimize();
@@ -409,7 +715,10 @@ pub fn run() {
             take_focus_request,
             focus_window,
             list_claude_sessions,
-            read_claude_session
+            read_claude_session,
+            accordion_read_text,
+            accordion_append_line,
+            llm_generate
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application")
