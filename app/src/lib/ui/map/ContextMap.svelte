@@ -77,12 +77,51 @@
 		}
 		return { full, live, folded };
 	}
+	interface GridTile {
+		key: string;
+		blocks: Block[];
+		face: number;
+		span: number;
+		isCluster: boolean;
+		groupId?: string;
+	}
+	function buildGridTiles(blocks: Block[]): GridTile[] {
+		const out: GridTile[] = [];
+		let i = 0;
+		while (i < blocks.length) {
+			const b = blocks[i];
+			const g = store.groupOfTurn(b.turn);
+			if (g?.collapsed) {
+				const cluster: Block[] = [];
+				const turns = new Set(g.turns);
+				while (i < blocks.length && turns.has(blocks[i].turn)) {
+					cluster.push(blocks[i]);
+					i++;
+				}
+				const maxFace = Math.max(1, ...cluster.map((x) => faceFor(x.tokens)));
+				out.push({
+					key: "cluster-" + g.id,
+					blocks: cluster,
+					face: maxFace,
+					span: cluster.length,
+					isCluster: true,
+					groupId: g.id,
+				});
+			} else {
+				out.push({ key: b.id, blocks: [b], face: faceFor(b.tokens), span: 1, isCluster: false });
+				i++;
+			}
+		}
+		return out;
+	}
+
+	const viewBlocks = $derived(store.viewBlocks);
 	const units = $derived.by<Unit[]>(() => {
 		if (zoom === "grid") return [];
 		const out: Unit[] = [];
 		if (zoom === "turns") {
 			const m = new Map<number, Block[]>();
-			for (const b of store.blocks) {
+			for (const b of viewBlocks) {
 				if (!m.has(b.turn)) m.set(b.turn, []);
 				m.get(b.turn)!.push(b);
 			}
@@ -92,7 +131,7 @@
 			}
 		} else {
 			const seen = new Map<number, number>();
-			for (const blocks of chainsOf(store.blocks)) {
+			for (const blocks of chainsOf(viewBlocks)) {
 				const turn = blocks[0]?.turn ?? 0;
 				const isUser = blocks.length === 1 && blocks[0].kind === "user";
 				let label: string;
@@ -112,13 +151,11 @@
 
 	// ---- grid tiles: every block is the same square, in conversation order.
 	//      uniform size ⇒ strict order with no reflow holes (linearity for free).
-	const tiles = $derived(store.blocks.map((b) => ({ b, face: faceFor(b.tokens) })));
-	const count = $derived(store.blocks.length);
-	// the protected working tail — newest blocks the auto-folder never touches.
-	// split the grid into two boxes: older/foldable (top) and protected (bottom).
-	const protectedFrom = $derived(store.protectedFromIndex);
-	const olderTiles = $derived(tiles.slice(0, protectedFrom));
-	const protectedTiles = $derived(tiles.slice(protectedFrom));
+	const protectedFrom = $derived(store.viewProtectedFromIndex);
+	const olderTiles = $derived(buildGridTiles(viewBlocks.slice(0, protectedFrom)));
+	const protectedTiles = $derived(buildGridTiles(viewBlocks.slice(protectedFrom)));
+	const allTiles = $derived([...olderTiles, ...protectedTiles]);
+	const count = $derived(viewBlocks.length);
 
 	let stage = $state<HTMLDivElement>();
 	let cell = $state(20);
@@ -170,6 +207,12 @@
 		return el?.dataset.id ?? null;
 	}
 	function onClick(e: MouseEvent) {
+		const el = (e.target as HTMLElement).closest<HTMLElement>("[data-gid]");
+		const gid = el?.dataset.gid;
+		if (gid) {
+			store.toggleGroup(gid);
+			return;
+		}
 		const id = findId(e);
 		if (id) onselect(id);
 	}
@@ -179,33 +222,36 @@
 	}
 
 	// ---- arrow-key traversal between neighboring blocks -------------------
-	function focusBlock(idx: number) {
-		const b = store.blocks[idx];
-		if (!b) return;
+	function focusTile(idx: number) {
+		const t = allTiles[idx];
+		if (!t) return;
+		const b = t.blocks[0];
 		if (b.id !== selectedId) onselect(b.id);
-		const esc = b.id.replace(/"/g, '\\"');
-		stage?.querySelector<HTMLElement>(`[data-id="${esc}"]`)?.scrollIntoView({ block: "nearest", inline: "nearest" });
+		const esc = (t.isCluster ? t.groupId : b.id)!.replace(/"/g, '\\"');
+		const sel = t.isCluster ? `[data-gid="${esc}"]` : `[data-id="${esc}"]`;
+		stage?.querySelector<HTMLElement>(sel)?.scrollIntoView({ block: "nearest", inline: "nearest" });
 	}
 	function onKey(e: KeyboardEvent) {
 		const key = e.key;
 		if (key !== "ArrowLeft" && key !== "ArrowRight" && key !== "ArrowUp" && key !== "ArrowDown") return;
 		e.preventDefault();
-		const n = store.blocks.length;
+		const n = allTiles.length;
 		if (n === 0) return;
-		const idx = selectedId ? store.blocks.findIndex((b) => b.id === selectedId) : -1;
+		const idx = selectedId
+			? allTiles.findIndex((t) => t.blocks.some((b) => b.id === selectedId))
+			: -1;
 		if (idx === -1) {
-			// nothing selected yet — enter from the matching edge
-			focusBlock(key === "ArrowLeft" || key === "ArrowUp" ? n - 1 : 0);
+			focusTile(key === "ArrowLeft" || key === "ArrowUp" ? n - 1 : 0);
 			return;
 		}
-		const step = zoom === "grid" ? cols : 1; // ↑/↓ jump a full row in the grid
+		const step = zoom === "grid" ? cols : 1;
 		let t = idx;
 		if (key === "ArrowRight") t = idx + 1;
 		else if (key === "ArrowLeft") t = idx - 1;
 		else if (key === "ArrowDown") t = idx + step;
 		else t = idx - step;
 		t = Math.max(0, Math.min(n - 1, t));
-		if (t !== idx) focusBlock(t);
+		if (t !== idx) focusTile(t);
 	}
 </script>
 
@@ -233,7 +279,7 @@
 				<button onclick={() => (nudge += 1)} aria-label="Larger tiles" title="Larger">+</button>
 			</span>
 		{:else}
-			<span class="count mono">{units.length} {zoom} · {store.blocks.length} blocks</span>
+			<span class="count mono">{units.length} {zoom} · {viewBlocks.length} blocks</span>
 			<span class="grow"></span>
 			<span class="legend"><i class="sw solid"></i>live <i class="sw hatch"></i>folded
 				<span class="dim">· click = inspect · dbl-click = fold</span></span>
@@ -253,27 +299,36 @@
 		onkeydown={onKey}
 	>
 		{#if zoom === "grid"}
-			{#snippet tile(t: { b: Block; face: number })}
+			{#snippet tile(t: GridTile)}
 				<div
-					class="cell face f{t.face} k-{t.b.kind}"
-					class:folded={store.isFolded(t.b)}
-					class:pinned={t.b.override === "pinned"}
-					class:sel={t.b.id === selectedId}
-					data-id={t.b.id}
-					title={tip(t.b)}
+					class="cell face f{t.face}"
+					class:cluster={t.isCluster}
+					class:k-user={!t.isCluster && t.blocks[0].kind === "user"}
+					class:k-text={!t.isCluster && t.blocks[0].kind === "text"}
+					class:k-thinking={!t.isCluster && t.blocks[0].kind === "thinking"}
+					class:k-tool_call={!t.isCluster && t.blocks[0].kind === "tool_call"}
+					class:k-tool_result={!t.isCluster && t.blocks[0].kind === "tool_result"}
+					class:folded={t.blocks.every((b) => store.isFolded(b))}
+					class:pinned={t.blocks.some((b) => b.override === "pinned")}
+					class:sel={t.blocks.some((b) => b.id === selectedId)}
+					class:just-arrived={t.blocks.some((b) => store.recentlyAddedIds.has(b.id))}
+					style:grid-column={t.span > 1 ? `span ${t.span}` : undefined}
+					data-id={t.isCluster ? undefined : t.blocks[0].id}
+					data-gid={t.groupId}
+					title={t.isCluster ? `${t.blocks.length} blocks · click to expand group` : tip(t.blocks[0])}
 				></div>
 			{/snippet}
 			<div class="boxes" style:--cell="{cell}px" style:--cols={cols}>
 				{#if olderTiles.length}
 					<section class="box older">
 						<div class="grid">
-							{#each olderTiles as t (t.b.id)}{@render tile(t)}{/each}
+							{#each olderTiles as t (t.key)}{@render tile(t)}{/each}
 						</div>
 					</section>
 				{/if}
 				<section class="box prot">
 					<div class="grid">
-						{#each protectedTiles as t (t.b.id)}{@render tile(t)}{/each}
+						{#each protectedTiles as t (t.key)}{@render tile(t)}{/each}
 					</div>
 				</section>
 			</div>
@@ -496,6 +551,10 @@
 	.cell.k-thinking { background: var(--k-thinking); }
 	.cell.k-tool_call { background: var(--k-tool_call); }
 	.cell.k-tool_result { background: var(--k-tool_result); }
+	.cell.cluster {
+		background: var(--panel-3);
+		box-shadow: inset 0 0 0 1px var(--line);
+	}
 	.cell.folded {
 		opacity: 0.36;
 		filter: saturate(0.5);
@@ -513,6 +572,24 @@
 		box-shadow: inset 0 0 0 2px var(--accent), inset 0 0 0 3px rgba(0, 0, 0, 0.55);
 		filter: brightness(1.18);
 		z-index: 3;
+	}
+	/* live: a tile that just arrived flashes a kind-tinted inset ring for ~1.2s.
+	   Inset-only because content-visibility implies paint containment, which
+	   would clip an outset shadow. No filter/gradient animation — those tank
+	   the grid scroll perf per CLAUDE.md. */
+	.cell.k-user.just-arrived { --flash: var(--k-user); }
+	.cell.k-text.just-arrived { --flash: var(--k-text); }
+	.cell.k-thinking.just-arrived { --flash: var(--k-thinking); }
+	.cell.k-tool_call.just-arrived { --flash: var(--k-tool_call); }
+	.cell.k-tool_result.just-arrived { --flash: var(--k-tool_result); }
+	.cell.just-arrived {
+		animation: tile-arrive 1.2s ease-out;
+		z-index: 2;
+	}
+	@keyframes tile-arrive {
+		0% { box-shadow: inset 0 0 0 3px #fff, inset 0 0 0 5px var(--flash); }
+		60% { box-shadow: inset 0 0 0 2px var(--flash), inset 0 0 0 3px rgba(255, 255, 255, 0.6); }
+		100% { box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.22); }
 	}
 
 	/* ---- dice-face pips: token weight read as a die face 1–6 ----

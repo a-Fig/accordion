@@ -6,7 +6,8 @@
  * to their call by id. Turn numbers increment on real user messages so blocks
  * stay grouped by the human exchange they belong to.
  */
-import type { Block, BlockKind, ParsedSession, SessionMeta } from "./types";
+import { conductorSnapshotFromEntry, isConductorStateEntry } from "./conductor-config";
+import type { Block, BlockKind, ConductorSnapshot, ParsedSession, SessionMeta } from "./types";
 import { estTokens, BLOCK_OVERHEAD } from "./tokens";
 
 function parseLines(raw: string): any[] {
@@ -64,6 +65,7 @@ class Sink {
 			tokens: estTokens(text) + BLOCK_OVERHEAD,
 			override: null,
 			autoFolded: false,
+			foldLevel: 0,
 			by: null,
 			...extra,
 		});
@@ -76,9 +78,15 @@ function parsePi(entries: any[]): ParsedSession {
 	const sink = new Sink();
 	let skipped = 0;
 	let ei = 0;
+	let conductor: ConductorSnapshot | undefined;
 
 	for (const e of entries) {
 		const eid = e.id || `__e${ei++}`; // monotonic fallback — never collides
+		if (isConductorStateEntry(e)) {
+			const snap = conductorSnapshotFromEntry(e.data);
+			if (snap) conductor = snap;
+			continue;
+		}
 		switch (e.type) {
 			case "session":
 				meta.cwd = e.cwd || "";
@@ -125,7 +133,7 @@ function parsePi(entries: any[]): ParsedSession {
 		}
 	}
 	if (!meta.title) meta.title = "pi session";
-	return { meta, blocks: sink.blocks, lineCount: entries.length, skipped };
+	return { meta, blocks: sink.blocks, conductor, lineCount: entries.length, skipped };
 }
 
 // ---- Claude Code ----------------------------------------------------------

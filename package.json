@@ -1,0 +1,38 @@
+{
+	"name": "accordion",
+	"main": "src/accordion.ts",
+	"type": "module",
+	"scripts": {
+		"test": "node --test --experimental-strip-types src/*.test.ts",
+		"test:claims": "node --test --experimental-strip-types src/claims.test.ts",
+		"test:ollama": "node --test --experimental-strip-types src/ollama-summary.live.ts",
+		"benchmark": "node --experimental-strip-types src/benchmark-niah.ts",
+		"compare:compact": "node --experimental-strip-types src/compare-compact.ts",
+		"proof:compact": "node --experimental-strip-types src/compare-compact.ts --embeddings --budgets=1500,2500,4000 --out=compact-comparison-proof.json --markdown=compact-comparison-proof.md --min-cells=30 --min-advantage=20 --min-accordion-score=100 --max-compact-wins=0 --max-accordion-budget-violations=0",
+		"proof:semantic": "node --experimental-strip-types src/compare-compact.ts --embeddings --scenario=semantic-preference-late --budgets=1500 --out=compact-comparison-semantic-proof.json --markdown=compact-comparison-semantic-proof.md --answers --min-cells=1 --min-advantage=100 --min-accordion-score=100 --max-compact-wins=0 --max-accordion-budget-violations=0",
+		"proof:semantic:cloud": "node --experimental-strip-types src/compare-compact.ts --embeddings --scenario=semantic-preference-late --budgets=1500 --out=compact-comparison-semantic-cloud-proof.json --markdown=compact-comparison-semantic-cloud-proof.md --answers --model=minimax-m3:cloud --min-cells=1 --min-advantage=100 --min-accordion-score=100 --max-compact-wins=0 --max-accordion-budget-violations=0",
+		"proof:semantic:two-model": "npm run proof:semantic && npm run proof:semantic:cloud",
+		"proof:judge": "node --experimental-strip-types src/compare-compact.ts --embeddings --category=semantic --budgets=1500,2500 --out=compact-comparison-judge-semantic.json --markdown=compact-comparison-judge-semantic.md --answers --min-cells=6 --min-advantage=50 --min-accordion-score=100 --max-compact-wins=0 --max-accordion-budget-violations=0",
+		"proof:judge:llm": "node --experimental-strip-types src/compare-compact.ts --compact=llm --embeddings --category=semantic --budgets=1500,2500 --out=compact-comparison-judge-llm-semantic.json --markdown=compact-comparison-judge-llm-semantic.md --answers --min-cells=6 --min-advantage=50 --min-accordion-score=100 --max-compact-wins=0 --max-accordion-budget-violations=0",
+		"proof:judge:all": "npm run proof:judge && npm run proof:judge:llm",
+		"proof:report": "node --experimental-strip-types src/judge-report.ts",
+		"proof:refresh": "npm run proof:compact && npm run proof:judge && npm run proof:judge:llm && npm run proof:semantic:two-model && npm run proof:report",
+		"compact:external-template": "node --experimental-strip-types src/compare-compact.ts --category=semantic --budgets=1500,2500 --write-external-template=compact-captures.template.json --write-external-guide=compact-captures.guide.md",
+		"proof:judge:external": "node --experimental-strip-types src/compare-compact.ts --compact=external --external-compact=compact-captures.json --embeddings --category=semantic --budgets=1500,2500 --out=compact-comparison-judge-external-semantic.json --markdown=compact-comparison-judge-external-semantic.md --answers --min-cells=6 --min-advantage=50 --min-accordion-score=100 --max-compact-wins=0 --max-accordion-budget-violations=0",
+		"benchmark:quick": "node --experimental-strip-types src/benchmark-niah.ts --lengths 2000,5000 --depths 0.1,0.5,0.9 --budgets 1.0,0.7,0.5",
+		"benchmark:stress": "node --experimental-strip-types src/benchmark-niah.ts --lengths 10000,20000 --budgets 1.0,0.7,0.5 --runs 2",
+		"benchmark:indirect": "node --experimental-strip-types src/benchmark-niah.ts --lengths 10000,20000 --probe indirect --budgets 1.0,0.7,0.5 --runs 2 --out benchmark-indirect.json",
+		"benchmark:multi": "node --experimental-strip-types src/benchmark-niah.ts --mode multi-key --lengths 10000,20000",
+		"benchmark:verbose": "node --experimental-strip-types src/benchmark-niah.ts --lengths 5000,10000 --depths 0.1,0.5,0.9 --budgets 1.0,0.7 --verbose --out benchmark-verbose.json",
+		"benchmark:gemini": "node --experimental-strip-types src/benchmark-niah.ts --base-url https://generativelanguage.googleapis.com/v1beta/openai --model gemini-2.5-flash --api-key $GOOGLE_API_KEY --lengths 5000,10000,20000 --depths 0.1,0.25,0.5,0.75,0.9 --budgets 1.0,0.9,0.7,0.5 --runs 3 --out benchmark-gemini.json",
+		"benchmark:gemini-indirect": "node --experimental-strip-types src/benchmark-niah.ts --base-url https://generativelanguage.googleapis.com/v1beta/openai --model gemini-2.5-flash --api-key $GOOGLE_API_KEY --probe indirect --lengths 5000,10000,20000 --depths 0.1,0.25,0.5,0.75,0.9 --budgets 1.0,0.9,0.7,0.5 --runs 3 --out benchmark-gemini-indirect.json",
+		"benchmark:groq": "node --experimental-strip-types src/benchmark-niah.ts --base-url https://api.groq.com/openai/v1 --model llama-3.3-70b-versatile --api-key $GROQ_API_KEY --lengths 5000,10000,20000 --depths 0.1,0.25,0.5,0.75,0.9 --budgets 1.0,0.9,0.7,0.5 --runs 3 --out benchmark-groq.json",
+		"benchmark:groq-indirect": "node --experimental-strip-types src/benchmark-niah.ts --base-url https://api.groq.com/openai/v1 --model llama-3.3-70b-versatile --api-key $GROQ_API_KEY --probe indirect --lengths 5000,10000,20000 --depths 0.1,0.25,0.5,0.75,0.9 --budgets 1.0,0.9,0.7,0.5 --runs 3 --out benchmark-groq-indirect.json",
+		"test:e2e": "node --test --experimental-strip-types test/e2e-demo.test.ts",
+		"evidence": "node --experimental-strip-types src/generate-evidence.ts",
+		"demo": "node --experimental-strip-types src/generate-demo-transcript.ts"
+	},
+	"optionalDependencies": {
+		"@huggingface/transformers": "^3.8.1"
+	}
+}

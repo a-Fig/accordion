@@ -3,9 +3,9 @@
  *
  * The atomic unit is a BLOCK: a typed slice of a single message. One assistant
  * message explodes into several blocks (its thinking, its reply text, each tool
- * call). A tool call and the tool result that answers it are SEPARATE blocks —
- * they are shown together but fold independently, because their value to the
- * agent decays at very different rates. See VISION.md.
+ * call). A tool call and the tool result that answers it are SEPARATE blocks
+ * sharing a callId. Valid pairs are folded or unfolded together so the assembled
+ * context never exposes a structurally broken provider transcript. See VISION.md.
  */
 
 export type BlockKind =
@@ -17,6 +17,14 @@ export type BlockKind =
 
 /** Who last changed a block's fold state. */
 export type Actor = "you" | "agent" | "auto";
+
+/** A bundle of consecutive leading folded turns (display grouping only). */
+export interface TurnGroup {
+	id: string;
+	turns: number[];
+	collapsed: boolean;
+	by: Actor;
+}
 
 /**
  * A manual override that the automatic folder must respect:
@@ -56,6 +64,8 @@ export interface Block {
 	override: Override;
 	/** Set by the automatic folder; only meaningful when override is null. */
 	autoFolded: boolean;
+	/** Graduated fold depth: 0=full, 1=trim, 2=digest, 3=group member. */
+	foldLevel: 0 | 1 | 2 | 3;
 	/** Who last touched this block's fold state. */
 	by: Actor | null;
 }
@@ -67,9 +77,16 @@ export interface SessionMeta {
 	model: string;
 }
 
+export interface ConductorSnapshot {
+	config: import("./conductor-config").ConductorConfig;
+	foldTargetCalibrated: number;
+}
+
 export interface ParsedSession {
 	meta: SessionMeta;
 	blocks: Block[];
+	/** Latest accordion-conductor-state from the transcript, if any. */
+	conductor?: ConductorSnapshot;
 	/** Diagnostics. */
 	lineCount: number;
 	skipped: number;

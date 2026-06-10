@@ -3,3 +3,23 @@ node_modules/
 .DS_Store
 dist/
 .pi/
+.agents/
+
+# Benchmark output artifacts
+benchmark-*.json
+compact-comparison*.json
+compact-comparison*.md
+compact-captures*.json
+compact-captures*.md
+
+# Local scratch artifacts
+debug*.ts
+debug*.txt
+out*.json
+patch*.cjs
+run_test.js
+test-*.js
+test_*.js
+demo-transcript.jsonl
+benchmark-report.json
+app/static/samples/local/

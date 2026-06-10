@@ -1,26 +1,45 @@
 <script lang="ts">
 	import { onMount } from "svelte";
+	import { conductorSettings } from "$lib/engine/conductor-settings.svelte";
 	import { parse } from "$lib/engine/parse";
 	import { AccordionStore } from "$lib/engine/store.svelte";
+	import { live } from "$lib/live.svelte";
+	import ConductorSettings from "$lib/ui/ConductorSettings.svelte";
 	import ContextSummary from "$lib/ui/ContextSummary.svelte";
 	import ContextTimeline from "$lib/ui/ContextTimeline.svelte";
+	import ReplayBar from "$lib/ui/ReplayBar.svelte";
 	import Timeline from "$lib/ui/Timeline.svelte";
 
-	let store = $state<AccordionStore | null>(null);
+	let sampleStore = $state<AccordionStore | null>(null);
 	let error = $state("");
 	let view = $state<"summary" | "timeline">("summary");
 
-	onMount(async () => {
+	// When live is on we show its (shared, persistent) store; otherwise the sample.
+	const store = $derived(live.enabled && live.store ? live.store : sampleStore);
+
+	$effect(() => {
+		const s = store;
+		if (!s) return;
+		const _cfg = conductorSettings.config;
+		const _budget = s.budget;
+		const _tail = s.protectTokens;
+		conductorSettings.syncWithStore(s);
+	});
+
+	async function loadSample() {
 		try {
 			const res = await fetch("/sample-session.jsonl");
-			if (!res.ok) throw new Error(`failed to load sample (${res.status})`);
+			if (!res.ok) throw new Error(`failed to load session (${res.status})`);
 			const parsed = parse(await res.text());
-			store = new AccordionStore(parsed);
-			if (typeof window !== "undefined") (window as any).__store = store; // debug handle
+			sampleStore = new AccordionStore(parsed);
+			if (typeof window !== "undefined" && !live.enabled) (window as any).__store = sampleStore;
+			error = "";
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		}
-	});
+	}
+
+	onMount(loadSample);
 
 	const fmt = (n: number) => n.toLocaleString();
 
@@ -60,10 +79,26 @@
 					</div>
 				</div>
 			</div>
-			<a class="nav" href="/map" data-sveltekit-reload={false}>Map view →</a>
+			<div class="navrow">
+				{#if live.enabled && live.hint}
+					<span class="live-hint" title={live.hint}>{live.hint}</span>
+				{/if}
+				<button
+					class="live-btn"
+					class:live-on={live.enabled}
+					class:live-connected={live.enabled && live.connected}
+					onclick={() => live.toggle()}
+					aria-pressed={live.enabled}
+				>
+					<span class="dot" aria-hidden="true"></span>
+					{live.enabled ? (live.connected ? "LIVE" : "RECONNECTING") : "Go live"}
+				</button>
+				<a class="nav" href="/map" data-sveltekit-reload={false}>Map view →</a>
+			</div>
 		</header>
 
 		<section class="contextpane">
+			<ReplayBar {store} />
 			<div class="switch">
 				<button class:on={view === "summary"} onclick={() => (view = "summary")}>Summary</button>
 				<button class:on={view === "timeline"} onclick={() => (view = "timeline")}>Timeline</button>
@@ -95,6 +130,7 @@
 						oninput={(e) => store!.setBudget(+e.currentTarget.value)}
 					/>
 					<button class="btn" onclick={() => store!.resetAll()}>Reset all to auto</button>
+					<ConductorSettings foldTargetCalibrated={store.foldTargetCalibrated} />
 				</div>
 
 				<div class="feed">
@@ -165,6 +201,68 @@
 	.t2 {
 		font-size: 11px;
 		color: var(--muted);
+	}
+	.navrow {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+	}
+	.live-btn {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		font-size: 11px;
+		font-weight: 700;
+		letter-spacing: 0.06em;
+		padding: 5px 10px;
+		border: 1px solid var(--line);
+		border-radius: var(--radius-sm);
+		background: transparent;
+		color: var(--muted);
+		white-space: nowrap;
+		transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
+	}
+	.live-btn .dot {
+		width: 7px;
+		height: 7px;
+		border-radius: 50%;
+		background: var(--muted);
+		flex: 0 0 7px;
+	}
+	.live-btn.live-on {
+		color: #f0a35e;
+		border-color: color-mix(in srgb, #f0a35e 55%, var(--line));
+		background: color-mix(in srgb, #f0a35e 8%, transparent);
+	}
+	.live-btn.live-on .dot {
+		background: #f0a35e;
+	}
+	.live-btn.live-connected {
+		color: #2ecc71;
+		border-color: color-mix(in srgb, #2ecc71 55%, var(--line));
+		background: color-mix(in srgb, #2ecc71 10%, transparent);
+	}
+	.live-btn.live-connected .dot {
+		background: #2ecc71;
+		box-shadow: 0 0 0 0 rgba(46, 204, 113, 0.7);
+		animation: live-pulse 1.4s ease-out infinite;
+	}
+	@keyframes live-pulse {
+		0% { box-shadow: 0 0 0 0 rgba(46, 204, 113, 0.7); }
+		70% { box-shadow: 0 0 0 6px rgba(46, 204, 113, 0); }
+		100% { box-shadow: 0 0 0 0 rgba(46, 204, 113, 0); }
+	}
+	.live-hint {
+		font-size: 11px;
+		color: var(--muted);
+		background: var(--panel-2);
+		border: 1px solid var(--line);
+		padding: 3px 8px;
+		border-radius: var(--radius-sm);
+		max-width: 38vw;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 	.nav {
 		font-size: 12px;

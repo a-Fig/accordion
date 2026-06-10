@@ -60,7 +60,7 @@
 		{#if folded}
 			<div class="digestlbl">Digest in context now</div>
 			<pre class="digest mono">{store.digestOf(block)}</pre>
-			<div class="digestlbl">Full content (kept on disk, restored on unfold)</div>
+			<div class="digestlbl">Original content (peek only; unfold to restore to context)</div>
 		{/if}
 		<pre class="content" class:mono={block.kind === "tool_call" || block.kind === "tool_result"}>{bd.text}</pre>
 		{#if bd.clipped}

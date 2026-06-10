@@ -15,7 +15,7 @@
 
 	const turns = $derived.by<Turn[]>(() => {
 		const m = new Map<number, Turn>();
-		for (const b of store.blocks) {
+		for (const b of store.viewBlocks) {
 			let t = m.get(b.turn);
 			if (!t) {
 				t = { turn: b.turn, blocks: [], full: 0, live: 0, folded: 0, firstId: b.id };

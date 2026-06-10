@@ -20,12 +20,14 @@ Every long-running agent hits the same wall: the context window fills up, and so
 
 > Context isn't a buffer. It's an accordion.
 
-Accordion shows the agent's context as a list of **sections** — one per turn — and lets you resize it instead of flushing it. Every section is **Full**, **Folded** (shown as a short summary), or **Pinned** (locked open). Four actions move them:
+Accordion shows the agent's context as a list of **sections** — one per turn — and lets you resize it instead of flushing it. Folds are graduated, not 0-or-1: every section is **Full**, **Trimmed** (a structured excerpt — head, key identifiers, tail), **Folded** (a short digest), **Grouped** (a run of cold digests sharing one group summary), or **Pinned** (locked open). The Conductor uses the *minimum* total depth that fits the budget — and the budget target itself breathes inside a calibrated band (0.60–0.92), opening when you or the agent correct it and tightening when its folds go unchallenged. Four actions move sections:
 
 - **Fold** — replace a section with its summary to free up room.
 - **Unfold** — bring it back to full detail (still auto-managed, unless pinned).
 - **Pin / Unpin** — lock a section open so nothing folds it automatically.
 - **Peek** — read a folded section in the window *without* changing the agent's context.
+
+**And the agent can do all of this too.** Agent memory should be bidirectional — the agent should be able to reach back into its own history, not just receive whatever the system decides to show it. Every fold carries a turn address (`⟦t7⟧ …`), and the pi extension registers `accordion_recall`, `accordion_unfold`, and `accordion_fold` as model-callable tools: the agent reads folded turns in full, restores what it needs (protected by a grace period, counted as a correction that teaches the Conductor), and folds away what it's done with. Humans get the mirror verbs: `/peek`, `/fold`, `/expand`, `/collapse`.
 
 Nothing is ever deleted — folding only changes what the agent is *shown*, never what's *stored* — so every fold is instantly reversible, with no database or search index behind it.
 
@@ -41,15 +43,15 @@ And folds nest: cold turns fold into **groups**, groups into bigger groups, so a
 
 → Full details, capability matrix, and a walkthrough: **[VISION.md](VISION.md)**
 
-## See it: the visualizer
+## See it: the app
 
-There's a working **[visualizer demo](visualizer/)** — a standalone window that renders a real agent context window and lets you fold, unfold, pin, and peek it, with the automatic **Conductor** keeping the live context inside a token budget. It loads real saved sessions from **Claude Code**, **pi**, or **OMP**.
+The **[desktop app](app/)** renders a real agent context window and lets you fold, unfold, pin, and group blocks, with replay to step through turns turn-by-turn. **Go live** connects to a running pi session via a built-in bridge (no separate server).
 
 ```bash
-cd visualizer && node serve.js   # then open http://localhost:8080
+cd app && npm run dev   # then open http://localhost:1420
 ```
 
-Drag any session `.jsonl` onto the window, or use the bundled sample. Everything runs locally — nothing is uploaded. See [visualizer/README.md](visualizer/README.md).
+Classic (`/`) and Map (`/map`) views share the same engine. Sample data lives in `app/static/`. Everything runs locally — nothing is uploaded.
 
 ## Why it's different
 
@@ -64,32 +66,59 @@ Drag any session `.jsonl` onto the window, or use the bundled sample. Everything
 
 ## Status
 
-[VISION.md](VISION.md) is the north star — the finished product we're building toward. What exists **today** is an early proof-of-concept:
+[VISION.md](VISION.md) is the north star — the finished product we're building toward. What exists **today**:
 
-- A [pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) extension (`src/accordion.ts`) that automatically folds older turns as context grows and keeps the recent window at full fidelity.
-- Reversible folding (originals retained), manual `/expand` and `/collapse`, and an `/accordion` status view.
-- Summaries today are deterministic digests, not yet LLM-generated.
+- A Tauri + SvelteKit desktop app (`app/`) with Classic and Map views, replay controls, a protected working tail, fold levels, group cards, and a built-in dev live bridge at `http://localhost:1420`.
+- A [pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) extension (`src/accordion.ts`) backed by the root Conductor (`src/conductor.ts`). It folds under budget pressure, preserves originals, records decisions, and exposes `/accordion`, `/expand`, `/collapse`, plus agent-facing recall/unfold/fold tools.
+- Deterministic digests and benchmark/proof tooling for equal-budget comparisons against recency truncation and compact-style baselines.
 
-Honest about what's **not** there yet: no visual window, no autonomous Conductor, no agent-driven control, no hierarchical folding — that's the build ahead. (The POC is implemented and syntax-checked; it hasn't yet been exercised across a long real session.)
+Honest about what's **not** there yet: no production installer/distribution flow, no LLM-generated summaries on the critical path, and no fully autonomous long-running daemon. The standalone `visualizer/` prototype has been retired; the app is the supported UI surface.
 
-### Try the proof-of-concept
+### Try it
 
 ```bash
-cp src/accordion.ts ~/.pi/agent/extensions/accordion.ts
-pi   # Accordion loads automatically; tune the fold band at the top of the file
+cd app && npm install && npm run dev   # browser dev server at http://localhost:1420
 ```
 
-Commands: `/accordion` (status) · `/expand <n>` · `/collapse <n>`
+For native desktop behavior:
+
+```bash
+cd app && npm run tauri dev
+```
+
+Pi commands: `/accordion` (status) · `/expand <n>` · `/collapse <n>`
+
+## Proving the claims
+
+Accordion's claims are backed by two layers of automated checks:
+
+```bash
+npm run test:claims   # fast invariant tests for reversibility, budget, tail, tool-pair safety, semantic restore
+npm test              # full deterministic root suite
+```
+
+For benchmark evidence against recency truncation and compact-style baselines:
+
+```bash
+npm run proof:compact
+npm run proof:judge
+npm run proof:judge:llm
+npm run proof:report
+```
+
+See [CLAIMS.md](CLAIMS.md) for the claim-to-test map and [CONDUCTOR.md](CONDUCTOR.md) for the broader proof/benchmark commands.
 
 ## Roadmap
 
-- [x] Core fold/unfold engine — reversible, tool-pair safe *(POC)*
-- [x] Rolling automatic folding + manual expansion *(POC)*
+- [x] Core fold/unfold engine — reversible, tool-pair safe
+- [x] Rolling automatic folding + manual expansion
+- [x] The separate window — desktop app, Map/Classic views, replay
+- [x] Agent-driven recall/unfold/fold tools *(POC)*
+- [x] Deterministic Conductor + proof/benchmark harness
 - [ ] LLM-generated summaries, computed once and cached
-- [ ] The separate window — see, steer, replay
-- [ ] The Conductor — automatic fold/unfold between turns, based on context
-- [ ] Hierarchical folding — fold the folds, for million-turn sessions
-- [ ] Agent-driven unfold and pin
+- [ ] Production live/distribution polish
+- [ ] Hierarchical nested folding for million-turn sessions
+- [ ] Agent-driven pin
 
 ---
 

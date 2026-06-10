@@ -1,8 +1,14 @@
-# CLAUDE.md — Accordion
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 Guidance for AI coding sessions in this repo. Read [VISION.md](VISION.md) for the
 product north star and [README.md](README.md) for the short pitch. This file is
 about **how to work in the code**, not what the product is.
+
+Use the precise domain vocabulary from [UBIQUITOUS_LANGUAGE.md](UBIQUITOUS_LANGUAGE.md)
+when discussing or writing about context assembly, folding, blocks, turns, and scoring.
+"Collapse" and "expand" are command names, not domain terms — use **fold**/**unfold**/**pin**.
 
 ## Where the live work is
 
@@ -15,8 +21,11 @@ that visualizes an agent's context window. Two routes:
   `MapHeader` (composition strip + budget) + `ContextMap` + `Inspector` (on-demand
   text panel). This is where most recent design iteration lives.
 
-`src/` (repo root) and `visualizer/` are the older pi-extension POC and the
-standalone HTML visualizer — not the focus; touch only if asked.
+Both routes independently `fetch("/sample-session.jsonl")` and construct a fresh
+`AccordionStore` in `onMount`. There is no shared layout-level store.
+
+`src/` (repo root) holds the **pi extension and Conductor** — actively developed,
+not the UI focus, but the engine that powers real deployments.
 
 ## The engine is the source of truth — use it, don't change it
 
@@ -44,6 +53,28 @@ standalone HTML visualizer — not the focus; touch only if asked.
 - `tokens.ts` (chars/4 estimate) · `digest.ts` (what a kind collapses to when folded).
 
 Folding is **content substitution, never removal** — provider-safe and fully reversible.
+
+## The Conductor (root `src/`)
+
+The root `src/` module is the **pi extension and Conductor** — the real deployment layer.
+See [CONDUCTOR.md](CONDUCTOR.md) for scoring formula, dynamic weights, constants, and
+summary provider details.
+
+Key files:
+- `src/conductor.ts` — `runConductor()`, `parseMessages()`, scoring, summary providers
+  (`createHaikuSummaryProvider()`, `createOllamaSummaryProvider()`). Constants like
+  `DEFAULT_BUDGET_TOKENS = 150_000` live at the top of this file.
+- `src/accordion.ts` — the pi extension entry point; wires Conductor into pi's `context`
+  event and registers `/accordion`, `/expand`, `/collapse` commands.
+- `src/conductor.test.ts` / `src/accordion.test.ts` — deterministic unit tests.
+- `src/ollama-summary.live.ts` — live integration test against a local Ollama instance.
+
+Run the deterministic tests from the repo root:
+
+```bash
+npm test               # node --test with experimental-strip-types
+npm run test:ollama    # live Ollama integration (needs Ollama running locally)
+```
 
 ## Visual grammar (consistent across ALL views)
 
@@ -76,26 +107,21 @@ Folding is **content substitution, never removal** — provider-safe and fully r
   instant (no `transition`) so scrolling past tiles doesn't animate a repaint storm.
   Because `content-visibility` implies paint containment, keep tile decorations
   **inset** (the selection ring is inset-only) — outset box-shadows get clipped.
-  (Scroll smoothness is still under active investigation — see handoff.)
 
 ## Running & verifying
 
 ```bash
-cd app
+# From app/
 npm run dev          # browser dev server → http://localhost:1420
 npm run tauri dev    # native desktop window (needs Rust toolchain)
 npm run check        # svelte-check / typecheck — keep it 0 errors / 0 warnings
+npm run build        # production static build into app/build/
+
+# From repo root
+npm test             # Conductor + accordion extension deterministic tests
 ```
 
-Environment gotchas (Windows, this repo's usual setup):
-
-- **cargo is not on the Bash tool's PATH.** Run `npm run tauri dev` from PowerShell
-  with `$env:PATH = "$env:USERPROFILE\.cargo\bin;$env:USERPROFILE\.rustup\bin;$env:PATH"`.
-- The dev server and `tauri dev` both want **port 1420** — only one at a time. Free it
-  with `Get-NetTCPConnection -LocalPort 1420 | Stop-Process` before swapping.
-- The preview/screenshot MCP has been **flaky** here (captures time out even when the
-  page is healthy); verify via `preview_eval` / `preview_inspect` and `svelte-check`.
-- Always `npx svelte-check --tsconfig ./tsconfig.json` before declaring done.
+Always `npm run check` (from `app/`) before declaring done.
 
 ## Data & security
 

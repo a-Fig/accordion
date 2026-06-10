@@ -25,6 +25,7 @@
 	class="card k-{block.kind}"
 	class:folded
 	class:pinned
+	class:just-arrived={store.recentlyAddedIds.has(block.id)}
 	id="block-{block.id}"
 	data-order={block.order}
 >
@@ -249,5 +250,22 @@
 	}
 	.k-tool_result {
 		--kc: var(--k-tool_result);
+	}
+
+	/* live: a new block just arrived — flash a kind-tinted ring for ~1.2s */
+	.card.just-arrived {
+		animation: card-arrive 1.2s ease-out;
+	}
+	@keyframes card-arrive {
+		0% {
+			box-shadow: 0 0 0 0 var(--kc), 0 1px 2px rgba(0, 0, 0, 0.28);
+			background: color-mix(in srgb, var(--kc) 18%, var(--panel));
+		}
+		60% {
+			box-shadow: 0 0 0 3px color-mix(in srgb, var(--kc) 35%, transparent), 0 1px 2px rgba(0, 0, 0, 0.28);
+		}
+		100% {
+			box-shadow: 0 0 0 0 transparent, 0 1px 2px rgba(0, 0, 0, 0.28);
+		}
 	}
 </style>

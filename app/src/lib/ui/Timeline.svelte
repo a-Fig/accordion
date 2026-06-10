@@ -1,27 +1,47 @@
 <script lang="ts">
 	import type { AccordionStore } from "../engine/store.svelte";
+	import type { Block } from "../engine/types";
 	import BlockCard from "./BlockCard.svelte";
+	import GroupCard from "./GroupCard.svelte";
 
 	let { store }: { store: AccordionStore } = $props();
 
-	// Walk blocks in order, emitting a turn divider whenever the turn number ticks.
-	const rows = $derived.by(() => {
-		const out: ({ divider: true; turn: number } | { divider: false; block: (typeof store.blocks)[number] })[] = [];
+	type Row =
+		| { kind: "group"; groupId: string }
+		| { kind: "divider"; turn: number }
+		| { kind: "block"; block: Block };
+
+	const rows = $derived.by((): Row[] => {
+		const out: Row[] = [];
+		const seenGroups = new Set<string>();
 		let prev = -1;
-		for (const b of store.blocks) {
+		for (const b of store.viewBlocks) {
+			const g = store.groupOfTurn(b.turn);
+			if (g?.collapsed) {
+				if (!seenGroups.has(g.id)) {
+					out.push({ kind: "group", groupId: g.id });
+					seenGroups.add(g.id);
+				}
+				continue;
+			}
 			if (b.turn !== prev) {
-				out.push({ divider: true, turn: b.turn });
+				out.push({ kind: "divider", turn: b.turn });
 				prev = b.turn;
 			}
-			out.push({ divider: false, block: b });
+			out.push({ kind: "block", block: b });
 		}
 		return out;
 	});
 </script>
 
 <div class="timeline">
-	{#each rows as row (row.divider ? "d" + row.turn : row.block.id)}
-		{#if row.divider}
+	{#each rows as row (row.kind === "group" ? "g" + row.groupId : row.kind === "divider" ? "d" + row.turn : row.block.id)}
+		{#if row.kind === "group"}
+			{@const g = store.groups.get(row.groupId)}
+			{#if g}
+				<GroupCard {store} group={g} />
+			{/if}
+		{:else if row.kind === "divider"}
 			<div class="divider">
 				<span class="ln"></span>
 				<span class="lbl">{row.turn === 0 ? "Session start" : `Turn ${row.turn}`}</span>
@@ -48,14 +68,15 @@
 	}
 	.divider .ln {
 		height: 1px;
-		background: var(--line-soft);
 		flex: 1;
+		background: var(--border, #2a3140);
+		opacity: 0.6;
 	}
 	.divider .lbl {
-		font-size: 11px;
-		letter-spacing: 0.08em;
+		font-size: 10px;
 		text-transform: uppercase;
-		color: var(--faint);
-		font-weight: 600;
+		letter-spacing: 0.06em;
+		color: var(--muted, #8b95a8);
+		white-space: nowrap;
 	}
 </style>

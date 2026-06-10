@@ -29,7 +29,7 @@
 		const m = new Map<BlockKind, Row>();
 		for (const k of LADDER) m.set(k.kind, { ...k, live: 0, full: 0, count: 0, folded: 0, bigId: "" });
 		const bigTok = new Map<BlockKind, number>();
-		for (const b of store.blocks) {
+		for (const b of store.viewBlocks) {
 			const r = m.get(b.kind);
 			if (!r) continue;
 			r.live += store.effTokens(b);

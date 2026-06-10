@@ -1,6 +1,8 @@
 <script lang="ts">
 	import type { AccordionStore } from "../../engine/store.svelte";
 	import type { BlockKind } from "../../engine/types";
+	import ConductorSettings from "../ConductorSettings.svelte";
+	import ReplayBar from "../ReplayBar.svelte";
 
 	let { store }: { store: AccordionStore } = $props();
 
@@ -15,7 +17,7 @@
 	const liveByKind = $derived.by(() => {
 		const m: Record<string, number> = {};
 		for (const k of LADDER) m[k.kind] = 0;
-		for (const b of store.blocks) if (b.kind in m) m[b.kind] += store.effTokens(b);
+		for (const b of store.viewBlocks) if (b.kind in m) m[b.kind] += store.effTokens(b);
 		return m;
 	});
 
@@ -63,6 +65,7 @@
 				/>
 			</label>
 			<button class="reset" onclick={() => store.resetAll()}>Reset</button>
+			<ConductorSettings foldTargetCalibrated={store.foldTargetCalibrated} />
 		</div>
 	</div>
 
@@ -78,6 +81,7 @@
 		{/if}
 		<span class="marker" style:left="{(store.budget / denom) * 100}%" title="budget"></span>
 	</div>
+	<ReplayBar {store} />
 </div>
 
 <style>
