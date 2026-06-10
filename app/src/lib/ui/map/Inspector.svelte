@@ -5,6 +5,12 @@
 	import type { Block, Group } from "../../engine/types";
 	import { groupDigest } from "$lib/engine/digest";
 	import Icon from "$lib/ui/Icon.svelte";
+	import {
+		relevanceLab,
+		getAllScoresForBlock,
+		ALL_SCORER_IDS,
+		SCORER_LABELS,
+	} from "$lib/relevance/state.svelte";
 
 	let {
 		store,
@@ -266,6 +272,39 @@
 				</p>
 			{/if}
 		</div>
+
+		<!-- ── Relevance Lab score vector ───────────────────────── -->
+		{#if relevanceLab.enabled}
+			<div class="score-section">
+				<div class="score-header">
+					<span class="score-title">Relevance Lab</span>
+					{#if relevanceLab.file}
+						<span class="score-caption">external scores from tick t{relevanceLab.file.ticks[Math.max(0, Math.min(relevanceLab.tickIndex, relevanceLab.file.ticks.length - 1))]?.tick ?? 0}</span>
+					{/if}
+				</div>
+				{#if protect}
+					<p class="score-tail-note">In tail — not scored (it is the query)</p>
+				{:else}
+					{@const scores = getAllScoresForBlock(block.id)}
+					<div class="score-rows">
+						{#each ALL_SCORER_IDS as sid}
+							{@const val = scores.get(sid)}
+							<div class="score-row">
+								<span class="score-name">{SCORER_LABELS[sid]}</span>
+								{#if val !== null && val !== undefined}
+									<div class="score-bar-wrap">
+										<div class="score-bar-fill" style:width="{(val * 100).toFixed(1)}%"></div>
+									</div>
+									<span class="score-val tnum mono">{val.toFixed(2)}</span>
+								{:else}
+									<span class="score-na">—</span>
+								{/if}
+							</div>
+						{/each}
+					</div>
+				{/if}
+			</div>
+		{/if}
 
 		<!-- ── Partner ────────────────────────────────────────────── -->
 		{#if partner}
@@ -598,6 +637,89 @@
 		font-size: var(--fs-xs);
 		color: var(--faint);
 		font-family: var(--mono);
+	}
+
+	/* ── Relevance Lab score section ────────────────────────── */
+	.score-section {
+		border-top: 1px solid var(--line-soft);
+		padding: var(--sp-3) var(--sp-4);
+		display: flex;
+		flex-direction: column;
+		gap: var(--sp-2);
+	}
+
+	.score-header {
+		display: flex;
+		align-items: baseline;
+		gap: var(--sp-2);
+	}
+
+	.score-title {
+		font-size: var(--fs-xs);
+		font-weight: 700;
+		color: var(--accent);
+		text-transform: uppercase;
+		letter-spacing: .06em;
+	}
+
+	.score-caption {
+		font-size: var(--fs-xs);
+		color: var(--faint);
+	}
+
+	.score-tail-note {
+		margin: 0;
+		font-size: var(--fs-xs);
+		color: var(--faint);
+		font-style: italic;
+	}
+
+	.score-rows {
+		display: flex;
+		flex-direction: column;
+		gap: 5px;
+	}
+
+	.score-row {
+		display: grid;
+		grid-template-columns: 140px 1fr 36px;
+		align-items: center;
+		gap: var(--sp-2);
+	}
+
+	.score-name {
+		font-size: var(--fs-xs);
+		color: var(--muted);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.score-bar-wrap {
+		height: 6px;
+		background: var(--panel-3);
+		border-radius: 3px;
+		overflow: hidden;
+	}
+
+	.score-bar-fill {
+		height: 100%;
+		background: color-mix(in srgb, var(--accent) 70%, var(--k-tool_result));
+		border-radius: 3px;
+		min-width: 2px;
+		transition: width var(--dur-fast) var(--ease-out);
+	}
+
+	.score-val {
+		font-size: var(--fs-xs);
+		color: var(--text);
+		text-align: right;
+	}
+
+	.score-na {
+		font-size: var(--fs-xs);
+		color: var(--faint);
+		grid-column: 2 / 4;
 	}
 
 	/* ── Partner section ────────────────────────────────────── */

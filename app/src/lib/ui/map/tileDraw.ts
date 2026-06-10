@@ -39,6 +39,12 @@ export type TileSpec = {
    * Mirrors the old `.cell.ghost.k-{kind}` CSS class. Defaults to "text" if absent.
    */
   colorKind?: BlockKind;
+  /**
+   * Relevance Lab heat tint: rank-normalized score in [0, 1].
+   * When defined, a translucent tint overlay is drawn AFTER the base fill
+   * and BEFORE pips/rings. Absent when the lab is off → zero extra work.
+   */
+  score?: number;
 };
 
 export type Palette = {
@@ -94,6 +100,46 @@ export function readPalette(): Palette {
     groupEdge: v("--group-edge") || "#9c6b43",
     groupAccent: v("--group-accent") || "#d39455",
   };
+}
+
+// ---------------------------------------------------------------------------
+// Relevance Lab heat tint LUT — 16 pre-built rgba strings, index 0 = cold, 15 = hot.
+// Blend: cool blue (110,168,254,0.10) → amber (240,163,94) around bucket 10 → hot red (255,107,107,0.55).
+// One flat translucent roundRectFill per scored tile — no per-tile string building, no ctx.filter.
+// ---------------------------------------------------------------------------
+
+const HEAT_LUT: readonly string[] = (() => {
+  // Control points: [r, g, b, a] at t=0 (cold), t=10/15 (amber), t=15 (hot).
+  // We linearly interpolate through two segments.
+  const cold = [110, 168, 254, 0.10];
+  const amber = [240, 163, 94, 0.38];
+  const hot = [255, 107, 107, 0.55];
+
+  const lut: string[] = [];
+  for (let i = 0; i < 16; i++) {
+    let r: number, g: number, b: number, a: number;
+    if (i <= 10) {
+      const t = i / 10;
+      r = cold[0] + (amber[0] - cold[0]) * t;
+      g = cold[1] + (amber[1] - cold[1]) * t;
+      b = cold[2] + (amber[2] - cold[2]) * t;
+      a = cold[3] + (amber[3] - cold[3]) * t;
+    } else {
+      const t = (i - 10) / 5;
+      r = amber[0] + (hot[0] - amber[0]) * t;
+      g = amber[1] + (hot[1] - amber[1]) * t;
+      b = amber[2] + (hot[2] - amber[2]) * t;
+      a = amber[3] + (hot[3] - amber[3]) * t;
+    }
+    lut.push(`rgba(${Math.round(r)},${Math.round(g)},${Math.round(b)},${a.toFixed(3)})`);
+  }
+  return lut;
+})();
+
+/** Map a normalized [0,1] score to one of the 16 LUT entries. */
+function heatColor(score: number): string {
+  const bucket = Math.min(15, Math.floor(score * 16));
+  return HEAT_LUT[bucket];
 }
 
 // ---------------------------------------------------------------------------
@@ -493,6 +539,15 @@ export function drawTile(
 
   // ---- restore alpha for ring/overlay work ----
   ctx.globalAlpha = 1;
+
+  // ---- Relevance Lab heat tint (AFTER base fill, BEFORE pips/decorations) ----
+  // One flat translucent roundRectFill from the pre-built LUT — no per-tile string
+  // building, no gradients, no ctx.filter. Unscored tiles (score === undefined)
+  // skip this block entirely so the hot path is unchanged when the lab is off.
+  if (spec.score !== undefined) {
+    ctx.fillStyle = heatColor(spec.score);
+    roundRectFill(ctx, x, y, w, h, isGroup ? 4 : r);
+  }
 
   // ---- inset edge shadow: rgba(0,0,0,.22) 1px ----
   // (skip for folded+non-hovered — visual noise at .36 alpha)
