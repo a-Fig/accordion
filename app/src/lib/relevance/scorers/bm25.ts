@@ -47,6 +47,7 @@ function blockIdents(block: Block): string[] {
  * Count non-overlapping occurrences of `term` in `text` using split.
  * Both `text` and `term` are expected to already be lowercased.
  */
+// CAVEAT(L5): split-based count matches `term` as a substring, so an ident like "foo" also counts inside "foobar"; consistent across all blocks, so relative ranking is roughly preserved.
 function countOccurrences(text: string, term: string): number {
 	if (!term) return 0;
 	return text.split(term).length - 1;

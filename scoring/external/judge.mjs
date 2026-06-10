@@ -124,7 +124,7 @@ async function runBatch(tailExcerpt, tailHash, blockBatch, blocks) {
   const prompt = buildPrompt(tailExcerpt, blockItems);
   const promptTokens = estTokens(prompt);
   const projectedUsd = (promptTokens / 1e6) * 0.10 + (200 / 1e6) * 0.40;
-  assertBudget(projectedUsd);
+  assertBudget(projectedUsd); // reserves projectedUsd in pendingUsd
 
   const body = {
     contents: [{ role: "user", parts: [{ text: prompt }] }],
@@ -157,7 +157,7 @@ async function runBatch(tailExcerpt, tailHash, blockBatch, blocks) {
   const usage = json.usageMetadata ?? {};
   const inTokens = usage.promptTokenCount ?? promptTokens;
   const outTokens = usage.candidatesTokenCount ?? 50;
-  const costUsd = recordSpend({ model: MODEL, inTokens, outTokens });
+  const costUsd = recordSpend({ model: MODEL, inTokens, outTokens, projectedUsd });
 
   const rawText = json.candidates?.[0]?.content?.parts?.[0]?.text ?? "[]";
   let parsed;
@@ -165,8 +165,9 @@ async function runBatch(tailExcerpt, tailHash, blockBatch, blocks) {
     parsed = JSON.parse(rawText);
   } catch {
     console.error(`    [judge] JSON parse failure, will retry once`);
-    // One retry
+    // One retry — re-check budget before spending again.
     try {
+      assertBudget(projectedUsd);
       const resp2 = await vertexFetch(MODEL, "generateContent", body);
       const json2 = await resp2.json();
       const usage2 = json2.usageMetadata ?? {};
@@ -174,6 +175,7 @@ async function runBatch(tailExcerpt, tailHash, blockBatch, blocks) {
         model: MODEL,
         inTokens: usage2.promptTokenCount ?? promptTokens,
         outTokens: usage2.candidatesTokenCount ?? 50,
+        projectedUsd,
       });
       const rawText2 = json2.candidates?.[0]?.content?.parts?.[0]?.text ?? "[]";
       parsed = JSON.parse(rawText2);

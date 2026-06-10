@@ -186,7 +186,17 @@ def assemble_windows(tokenizer, tail: str, blocks: list[dict], window: int):
             input_ids.extend(ids)
             spans[bid] = (s, len(input_ids))
 
-        # Anchor always last among the blocks (same position class).
+        # CAVEAT(M1): The anchor is placed in a fixed slot adjacent to the tail
+        # in every window (always last among the content blocks). A reviewer flagged
+        # position bias; we are deliberately NOT changing it this cut because:
+        # (a) within a window, dividing by the anchor is a monotone transform —
+        #     within-window ranking is unaffected by the anchor's absolute score;
+        # (b) the anchor's position is constant across ALL windows, so the positional
+        #     component is a constant — exactly what a calibration constant wants;
+        # (c) the residual risk is content-competition: windows with many strong blocks
+        #     will deflate the anchor score, which in turn inflates calibrated scores
+        #     for those windows. Acceptable this cut; revisit if cross-window
+        #     score distributions show systematic window-size bias.
         s = len(input_ids)
         input_ids.extend(anchor_ids)
         spans[ANCHOR_ID] = (s, len(input_ids))
@@ -420,10 +430,24 @@ def main() -> int:
         try:
             win_scores = score_window(model, device, win, scaling)
         except torch.cuda.OutOfMemoryError:  # type: ignore[attr-defined]
+            oom = True
+        except MemoryError:
+            oom = True
+        except RuntimeError as _re:
+            if not any(
+                phrase in str(_re).lower()
+                for phrase in ("out of memory", "not enough memory")
+            ):
+                raise
+            oom = True
+        else:
+            oom = False
+
+        if oom:
             torch.cuda.empty_cache()
             cur_window = max(512, cur_window // 2)
             log(
-                f"[attn] window {wi}/{total}: CUDA OOM — halving budget to "
+                f"[attn] window {wi}/{total}: OOM — halving budget to "
                 f"{cur_window} and re-splitting this block set"
             )
             if cur_window <= 512 and device == "cuda":

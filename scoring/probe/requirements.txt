@@ -19,7 +19,7 @@ sentencepiece==0.2.1
 regex==2026.5.9
 
 # transformers runtime deps (pinned to what the verified venv carries).
-# Note: `accelerate` is NOT required — the eager single-GPU path needs no it.
+# Note: `accelerate` is NOT required -- the eager single-GPU path does not need it.
 Jinja2==3.1.6
 PyYAML==6.0.3
 filelock==3.29.0

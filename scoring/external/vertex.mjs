@@ -35,6 +35,10 @@ const LEDGER_DIR = path.join(os.homedir(), ".accordion", "relevance");
 const LEDGER_PATH = path.join(LEDGER_DIR, "spend.jsonl");
 const BUDGET_LIMIT_USD = 25.00;
 
+// In-process reservation to guard against concurrent assertBudget TOCTOU races.
+// assertBudget adds projected to pendingUsd on success; recordSpend subtracts it.
+let pendingUsd = 0;
+
 function ensureLedgerDir() {
   fs.mkdirSync(LEDGER_DIR, { recursive: true });
 }
@@ -69,9 +73,10 @@ export class BudgetExceededError extends Error {
 
 export function assertBudget(projectedUsd) {
   const spent = spentTotal();
-  if (spent + projectedUsd > BUDGET_LIMIT_USD) {
-    throw new BudgetExceededError(spent, projectedUsd);
+  if (spent + pendingUsd + projectedUsd > BUDGET_LIMIT_USD) {
+    throw new BudgetExceededError(spent + pendingUsd, projectedUsd);
   }
+  pendingUsd += projectedUsd;
 }
 
 // ---------------------------------------------------------------------------
@@ -130,12 +135,18 @@ export async function vertexFetch(model, method, body) {
     }
 
     const text = await resp.text();
+    if (resp.status === 401 || resp.status === 403) {
+      // Token is invalid — clear cache so next attempt fetches a fresh one.
+      // Allow at most 1 token-refresh retry (attempt 0 → retry on attempt 1).
+      if (attempt === 0) {
+        _cachedToken = null;
+        lastErr = new Error(`Vertex ${resp.status}: ${text}`);
+        continue;
+      }
+      throw new Error(`Vertex ${resp.status}: ${text}`);
+    }
     if (resp.status === 429 || resp.status >= 500) {
       lastErr = new Error(`Vertex ${resp.status}: ${text}`);
-      // If 401/403, refresh token on next attempt
-      if (resp.status === 401 || resp.status === 403) {
-        _cachedToken = null;
-      }
       continue;
     }
     // Non-retryable error
@@ -147,9 +158,11 @@ export async function vertexFetch(model, method, body) {
 // ---------------------------------------------------------------------------
 // recordSpend — helper for scorers
 // ---------------------------------------------------------------------------
-export function recordSpend({ model, inTokens, outTokens }) {
+export function recordSpend({ model, inTokens, outTokens, projectedUsd = 0 }) {
   const prices = PRICES[model] ?? { inputPerM: 0, outputPerM: 0 };
   const usd = (inTokens / 1e6) * prices.inputPerM + (outTokens / 1e6) * prices.outputPerM;
+  // Release the in-process reservation for this call.
+  pendingUsd = Math.max(0, pendingUsd - projectedUsd);
   appendLedger({
     ts: new Date().toISOString(),
     model,
