@@ -14,10 +14,25 @@ const TOTAL_CHARS = HEAD_CHARS + TAIL_CHARS;
 const TRUNCATION_MARKER =
 	"\n\n[... content truncated for summarization; head and tail preserved ...]\n\n";
 
+/**
+ * Move a slice boundary away from a surrogate pair by one code unit if needed.
+ * JS strings are UTF-16; a high surrogate at `text[i-1]` means the boundary
+ * falls inside a surrogate pair — step back one position to keep the pair intact.
+ */
+function safeBoundary(text: string, index: number): number {
+	if (index <= 0 || index >= text.length) return index;
+	const code = text.charCodeAt(index - 1);
+	// High surrogate: U+D800–U+DBFF followed by a low surrogate U+DC00–U+DFFF.
+	if (code >= 0xd800 && code <= 0xdbff) return index - 1;
+	return index;
+}
+
 /** Trim blockText to ≤24 k chars (head 16 k + tail 8 k) with a visible marker. */
 function truncateInput(text: string): string {
 	if (text.length <= TOTAL_CHARS) return text;
-	return text.slice(0, HEAD_CHARS) + TRUNCATION_MARKER + text.slice(-TAIL_CHARS);
+	const headEnd = safeBoundary(text, HEAD_CHARS);
+	const tailStart = safeBoundary(text, text.length - TAIL_CHARS);
+	return text.slice(0, headEnd) + TRUNCATION_MARKER + text.slice(tailStart);
 }
 
 // ── System prompt ─────────────────────────────────────────────────────────────

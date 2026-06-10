@@ -64,8 +64,8 @@
 		return "actor-auto";
 	}
 
-	// ── Derived: newest log entries for the popover (cap 14 visible via CSS) ──
-	const recentLog = $derived(log.slice().reverse());
+	// ── Derived: log entries for the popover — already newest-first from the store ──
+	const recentLog = $derived(log);
 
 	// ── Handle seg change (disabled in readOnly) ──
 	function onModeChange(id: string) {
@@ -97,7 +97,11 @@
 		>
 			<div class="seg-inner">
 				{#each SEG_OPTIONS as o (o.id)}
-					<span class="seg-pill-off seg-pill-static">{o.label}</span>
+					<span
+						class="seg-pill-static"
+						class:seg-pill-on={o.id === conductor.mode}
+						class:seg-pill-off={o.id !== conductor.mode}
+					>{o.label}</span>
 				{/each}
 			</div>
 		</div>
@@ -170,7 +174,6 @@
 							<span class="actor-chip {actorClass(entry.by)}">{entry.by}</span>
 							<span class="log-action">{entry.action}</span>
 							<span class="log-detail">{entry.detail}</span>
-							{#if entry.n > 1}<span class="log-n tnum">×{entry.n}</span>{/if}
 						</li>
 					{/each}
 				</ul>
@@ -233,8 +236,6 @@
 	.seg-pill-static {
 		display: inline-flex;
 		align-items: center;
-		background: transparent;
-		color: var(--muted);
 		font-size: var(--fs-xs);
 		font-weight: 500;
 		padding: var(--sp-1) var(--sp-2);
@@ -242,6 +243,16 @@
 		white-space: nowrap;
 		pointer-events: none;
 		user-select: none;
+	}
+	.seg-pill-off {
+		background: transparent;
+		color: var(--muted);
+	}
+	/* Active pill in read-only mode — mirrors the SegControl "on" appearance. */
+	.seg-pill-on {
+		background: var(--panel-3);
+		color: var(--text);
+		box-shadow: 0 1px 2px color-mix(in srgb, #000 20%, transparent);
 	}
 
 	/* ── Status cluster ── */
@@ -492,12 +503,5 @@
 		flex: 1 1 0;
 		min-width: 0;
 	}
-	.log-n {
-		color: var(--faint);
-		font-family: var(--mono);
-		font-variant-numeric: tabular-nums;
-		font-size: var(--fs-2xs);
-		white-space: nowrap;
-		flex: 0 0 auto;
-	}
+
 </style>

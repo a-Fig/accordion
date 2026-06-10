@@ -39,7 +39,8 @@ export async function llmGenerate(req: LlmRequest): Promise<LlmResponse> {
 		const msg = typeof e === "string" ? e : e instanceof Error ? e.message : String(e);
 
 		// Surface structured error kinds based on the Rust error messages.
-		if (msg.includes("unavailable") || msg.includes("no provider")) {
+		// "unavailable: " is the stable prefix emitted by Rust when no provider is usable.
+		if (msg.startsWith("unavailable:") || msg.includes("unavailable") || msg.includes("no provider")) {
 			throw new LlmError("unavailable", msg);
 		}
 		if (msg.includes("quota") || msg.includes("429") || msg.includes("RESOURCE_EXHAUSTED") || msg.includes("prepay")) {

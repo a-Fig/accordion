@@ -384,9 +384,25 @@ fn read_claude_session(path: String) -> Result<String, String> {
 
 // ── Accordion home I/O ────────────────────────────────────────────────────────
 
+/// Windows reserved device basenames that must never be used as file names
+/// (case-insensitive; with or without extension).
+const WIN_RESERVED: &[&str] = &[
+    "CON", "PRN", "AUX", "NUL",
+    "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+    "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
+fn is_reserved_device_name(name: &str) -> bool {
+    // Strip extension for the comparison (e.g. "NUL.txt" → "NUL").
+    let stem = name.split('.').next().unwrap_or(name);
+    let upper = stem.to_ascii_uppercase();
+    WIN_RESERVED.contains(&upper.as_str())
+}
+
 /// Validate a relative path component: no absolute paths, no drive letters,
 /// no `..` segments, no backslashes (we normalize separators to `/`). Returns
-/// a `PathBuf` rooted in `~/.accordion` on success.
+/// a `PathBuf` rooted in `~/.accordion` on success, canonicalized so symlinks
+/// and mixed separators cannot escape the root.
 fn accordion_path(rel_path: &str) -> Result<PathBuf, String> {
     // Normalize: convert backslashes to forward slashes.
     let normalized = rel_path.replace('\\', "/");
@@ -395,15 +411,38 @@ fn accordion_path(rel_path: &str) -> Result<PathBuf, String> {
     if normalized.starts_with('/') || normalized.contains(':') {
         return Err(format!("forbidden path (absolute or drive letter): {rel_path}"));
     }
-    // Reject any `..` segment (path traversal attempt).
+    // Validate each path segment.
     for segment in normalized.split('/') {
         if segment == ".." {
             return Err(format!("forbidden path (contains ..): {rel_path}"));
         }
+        if is_reserved_device_name(segment) {
+            return Err(format!("forbidden path (Windows reserved device name '{segment}'): {rel_path}"));
+        }
     }
 
     let root = registry_root().ok_or_else(|| "no accordion home".to_string())?;
-    Ok(root.join(&normalized))
+    // Ensure the base directory exists so canonicalize succeeds.
+    fs::create_dir_all(&root).map_err(|e| format!("create accordion home failed: {e}"))?;
+    let canon_root = fs::canonicalize(&root)
+        .map_err(|e| format!("canonicalize accordion home failed: {e}"))?;
+
+    let joined = canon_root.join(&normalized);
+    // For confinement: canonicalize the parent (which must exist after create_dir_all)
+    // so we can verify the final path stays under root. We canonicalize the parent
+    // because the target file itself may not exist yet (writes/appends).
+    let parent = joined.parent().unwrap_or(&joined);
+    fs::create_dir_all(parent).map_err(|e| format!("create parent dirs failed: {e}"))?;
+    let canon_parent = fs::canonicalize(parent)
+        .map_err(|e| format!("canonicalize parent failed: {e}"))?;
+    if !canon_parent.starts_with(&canon_root) {
+        return Err(format!("forbidden path (escapes accordion home): {rel_path}"));
+    }
+    // Re-assemble the final path using the canonicalized parent.
+    let file_name = joined
+        .file_name()
+        .ok_or_else(|| format!("path has no file name component: {rel_path}"))?;
+    Ok(canon_parent.join(file_name))
 }
 
 /// Read a file at `rel_path` under `~/.accordion`. Returns `""` if the file
@@ -426,8 +465,8 @@ fn accordion_read_text(rel_path: String) -> Result<String, String> {
 /// directories as needed. Rejects lines containing a newline character.
 #[tauri::command]
 fn accordion_append_line(rel_path: String, line: String) -> Result<(), String> {
-    if line.contains('\n') {
-        return Err("line must not contain newline characters".to_string());
+    if line.contains('\n') || line.contains('\r') {
+        return Err("line must not contain newline or carriage-return characters".to_string());
     }
     let path = accordion_path(&rel_path)?;
     if let Some(parent) = path.parent() {
@@ -474,6 +513,9 @@ static VERTEX_TOKEN_CACHE: std::sync::OnceLock<
 > = std::sync::OnceLock::new();
 
 const VERTEX_TOKEN_TTL: Duration = Duration::from_secs(45 * 60);
+/// Safety margin subtracted from TTL so we never hand out a token that expires
+/// during the in-flight request (mirrors the 60 s margin in llm-node.mjs).
+const VERTEX_TOKEN_MARGIN: Duration = Duration::from_secs(60);
 const VERTEX_PROJECT: &str  = "runner-frontier-74255";
 const VERTEX_LOCATION: &str = "us-central1";
 
@@ -490,7 +532,7 @@ fn get_vertex_token(force_refresh: bool) -> Result<String, String> {
         let cache = vertex_token_cache();
         if !force_refresh {
             if let Some((ref tok, ref minted_at)) = *cache {
-                if minted_at.elapsed() < VERTEX_TOKEN_TTL {
+                if minted_at.elapsed() + VERTEX_TOKEN_MARGIN < VERTEX_TOKEN_TTL {
                     return Ok(tok.clone());
                 }
             }
@@ -567,12 +609,18 @@ fn build_gemini_body(req: &LlmGenRequest) -> Value {
     body
 }
 
+/// Safely take up to `n` Unicode scalar values from `s` as a new `String`.
+/// Never panics on a char boundary, unlike `&s[..n]`.
+fn truncate_chars(s: &str, n: usize) -> String {
+    s.chars().take(n).collect()
+}
+
 /// Parse the Gemini response envelope into our response type.
 fn parse_gemini_response(raw: &Value, model: &str, provider: &str) -> Result<LlmGenResponse, String> {
     let text = raw
         .pointer("/candidates/0/content/parts/0/text")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| format!("unexpected response shape: {}", &raw.to_string()[..200.min(raw.to_string().len())]))?
+        .ok_or_else(|| format!("unexpected response shape: {}", truncate_chars(&raw.to_string(), 200)))?
         .to_string();
 
     let in_tokens  = raw.pointer("/usageMetadata/promptTokenCount")    .and_then(|v| v.as_u64()).unwrap_or(0);
@@ -587,8 +635,16 @@ fn parse_gemini_response(raw: &Value, model: &str, provider: &str) -> Result<Llm
     })
 }
 
+/// Returns true only when a 429 is caused by depleted prepay/billing credits
+/// (not a plain rate-limit). Case-insensitive check for "prepay", "prepayment",
+/// "billing", or "credits" in the body. A plain RESOURCE_EXHAUSTED without those
+/// keywords is a transient rate-limit, not a permanent provider kill signal.
 fn is_prepay_error(status: u16, body: &str) -> bool {
-    status == 429 && (body.contains("RESOURCE_EXHAUSTED") || body.contains("prepay") || body.contains("prepayment"))
+    if status != 429 {
+        return false;
+    }
+    let lower = body.to_ascii_lowercase();
+    lower.contains("prepay") || lower.contains("billing") || lower.contains("credits")
 }
 
 /// Main LLM generation command. Tries AI Studio first; falls back to Vertex on
@@ -614,13 +670,19 @@ async fn llm_generate(req: LlmGenRequest) -> Result<LlmGenResponse, String> {
     let gemini_key = resolve_gemini_key();
     if let Some(key) = &gemini_key {
         let model = model_for_role("aistudio");
+        // Send the key as a request header, NOT in the URL query string.
+        // (URL query params appear in reqwest error Display which is returned to the webview.)
         let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
+            "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
         );
-        let resp = client.post(&url).json(&body).send().await
-            .map_err(|e| format!("AI Studio request failed: {e}"))?;
+        let resp = client.post(&url)
+            .header("x-goog-api-key", key.as_str())
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("AI Studio request failed: {}", e.without_url()))?;
         let status = resp.status().as_u16();
-        let raw_body = resp.text().await.map_err(|e| format!("read body failed: {e}"))?;
+        let raw_body = resp.text().await.map_err(|e| format!("read body failed: {}", e.without_url()))?;
 
         if status == 200 {
             let parsed: Value = serde_json::from_str(&raw_body)
@@ -633,7 +695,7 @@ async fn llm_generate(req: LlmGenRequest) -> Result<LlmGenResponse, String> {
         } else {
             // Surface other AI Studio errors directly.
             let kind = if status == 429 { "quota" } else { "http" };
-            return Err(format!("{kind}: AI Studio HTTP {status}: {}", &raw_body[..300.min(raw_body.len())]));
+            return Err(format!("{kind}: AI Studio HTTP {status}: {}", truncate_chars(&raw_body, 300)));
         }
     }
 
@@ -644,15 +706,24 @@ async fn llm_generate(req: LlmGenRequest) -> Result<LlmGenResponse, String> {
          /locations/{VERTEX_LOCATION}/publishers/google/models/{vertex_model}:generateContent"
     );
 
-    let token = get_vertex_token(false)?;
+    // Neither provider is usable: no key and gcloud is absent/fails.
+    let vertex_token_result = get_vertex_token(false);
+    let token = match vertex_token_result {
+        Ok(t) => t,
+        Err(e) if gemini_key.is_none() => {
+            return Err(format!("unavailable: no usable LLM provider (no GEMINI_API_KEY and Vertex unavailable: {e})"));
+        }
+        Err(e) => return Err(e),
+    };
+
     let resp = client.post(&vertex_url)
         .bearer_auth(&token)
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("Vertex request failed: {e}"))?;
+        .map_err(|e| format!("Vertex request failed: {}", e.without_url()))?;
     let status = resp.status().as_u16();
-    let raw_body = resp.text().await.map_err(|e| format!("read Vertex body: {e}"))?;
+    let raw_body = resp.text().await.map_err(|e| format!("read Vertex body: {}", e.without_url()))?;
 
     // On 401, refresh token once and retry.
     if status == 401 {
@@ -662,13 +733,13 @@ async fn llm_generate(req: LlmGenRequest) -> Result<LlmGenResponse, String> {
             .json(&body)
             .send()
             .await
-            .map_err(|e| format!("Vertex retry failed: {e}"))?;
+            .map_err(|e| format!("Vertex retry failed: {}", e.without_url()))?;
         let status2 = resp2.status().as_u16();
-        let raw_body2 = resp2.text().await.map_err(|e| format!("read Vertex retry body: {e}"))?;
+        let raw_body2 = resp2.text().await.map_err(|e| format!("read Vertex retry body: {}", e.without_url()))?;
 
         if status2 != 200 {
             let kind = if status2 == 429 { "quota" } else { "http" };
-            return Err(format!("{kind}: Vertex HTTP {status2}: {}", &raw_body2[..300.min(raw_body2.len())]));
+            return Err(format!("{kind}: Vertex HTTP {status2}: {}", truncate_chars(&raw_body2, 300)));
         }
         let parsed: Value = serde_json::from_str(&raw_body2)
             .map_err(|e| format!("parse Vertex response: {e}"))?;
@@ -677,7 +748,7 @@ async fn llm_generate(req: LlmGenRequest) -> Result<LlmGenResponse, String> {
 
     if status != 200 {
         let kind = if status == 429 { "quota" } else { "http" };
-        return Err(format!("{kind}: Vertex HTTP {status}: {}", &raw_body[..300.min(raw_body.len())]));
+        return Err(format!("{kind}: Vertex HTTP {status}: {}", truncate_chars(&raw_body, 300)));
     }
 
     let parsed: Value = serde_json::from_str(&raw_body)

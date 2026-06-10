@@ -29,8 +29,10 @@ const VERTEX_LOCATION = "us-central1";
 /** Simple usage counters exported for callers to print. */
 export const usage = { calls: 0, inTokens: 0, outTokens: 0 };
 
-/** When true, skip AI Studio and go straight to Vertex. */
-let _aistudioDead = false;
+/** When non-null, AI Studio prepay credits are depleted until this ms-epoch timestamp. */
+let _aistudioDeadUntil = /** @type {number | null} */ (null);
+/** 10-minute expiry for the "aistudio dead" flag so transient billing blips self-heal. */
+const AISTUDIO_DEAD_TTL_MS = 10 * 60 * 1000;
 
 /** Vertex OAuth token cache: { token, expiresAt (ms epoch) }. */
 let _vertexToken = /** @type {{ token: string; expiresAt: number } | null} */ (null);
@@ -210,9 +212,17 @@ function callVertex(token, model, body) {
 
 // ── Prepay / quota error detection ───────────────────────────────────────────
 
+/**
+ * Returns true only when a 429 is caused by depleted prepay/billing credits.
+ * A plain RESOURCE_EXHAUSTED / rate-limit is NOT a prepay signal — it's a
+ * transient quota hit that should throw a quota error without killing the provider.
+ * @param {number} status
+ * @param {string} body
+ */
 function isPrepayError(status, body) {
   if (status !== 429) return false;
-  return body.includes("RESOURCE_EXHAUSTED") || body.includes("prepay") || body.includes("prepayment");
+  const lower = body.toLowerCase();
+  return lower.includes("prepay") || lower.includes("billing") || lower.includes("credits");
 }
 
 // ── Main generate function ────────────────────────────────────────────────────
@@ -227,7 +237,8 @@ export async function llmGenerate(req) {
   const body = buildBody(req);
 
   // ── Try AI Studio ──
-  if (!_aistudioDead) {
+  const aistudioAlive = _aistudioDeadUntil === null || Date.now() >= _aistudioDeadUntil;
+  if (aistudioAlive) {
     const apiKey = resolveGeminiKey();
     if (apiKey) {
       const model = PROVIDER_MODELS.aistudio[req.role];
@@ -242,14 +253,21 @@ export async function llmGenerate(req) {
       }
 
       if (isPrepayError(resp.status, resp.body)) {
-        // Prepay credits depleted — mark dead and fall through to Vertex.
-        _aistudioDead = true;
-        console.warn("[llm-node] AI Studio prepay credits depleted; switching to Vertex AI");
+        // Prepay credits depleted — mark dead for 10 minutes and fall through to Vertex.
+        _aistudioDeadUntil = Date.now() + AISTUDIO_DEAD_TTL_MS;
+        console.warn("[llm-node] AI Studio prepay credits depleted; switching to Vertex AI for 10 min");
+      } else if (resp.status === 429) {
+        // Plain rate-limit (RESOURCE_EXHAUSTED, not billing) — throw quota without
+        // killing the provider so the next call can still try AI Studio.
+        throw Object.assign(
+          new Error(`AI Studio HTTP ${resp.status}: ${resp.body.slice(0, 300)}`),
+          { kind: "quota", statusCode: resp.status }
+        );
       } else {
         // Other AI Studio error — surface it immediately.
         throw Object.assign(
           new Error(`AI Studio HTTP ${resp.status}: ${resp.body.slice(0, 300)}`),
-          { kind: resp.status === 429 ? "quota" : "http", statusCode: resp.status }
+          { kind: "http", statusCode: resp.status }
         );
       }
     }
