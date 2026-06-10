@@ -21,6 +21,22 @@ export interface ReplayOptions {
 	applyAgentUnfolds?: boolean;
 }
 
+export interface ReplayAsyncOptions extends ReplayOptions {
+	/**
+	 * Optional async hook called after each turn's appendBlocks+refold settles and
+	 * BEFORE the next turn's blocks are ingested. Receives the live store so the
+	 * caller may run a conductor tick (or any other async operation) between turns.
+	 *
+	 * Used by the ATTENTIVE arm of the eval harness to inject a runTick() call
+	 * after every turn. In the live app the tick is debounced off the sync path;
+	 * this hook reproduces that semantics in an offline replay.
+	 *
+	 * @param store - the AccordionStore in its current mid-replay state
+	 * @param turn  - the turn number that was just processed
+	 */
+	onTurn: (store: import("./store.svelte").AccordionStore, turn: number) => Promise<void>;
+}
+
 export interface ReplayMiss {
 	/** Turn number at which the agent called unfold. */
 	turn: number;
@@ -239,6 +255,112 @@ export function replay(blocks: Block[], opts: ReplayOptions = {}): ReplayMetrics
 	// Count lexical unfolds: log entries with action "unfolded" and by "conductor"
 	metrics.lexicalUnfolds = store.log.filter((e) => e.by === "conductor" && e.action === "unfolded").length;
 
+	metrics.finalLive = store.liveTokens;
+	metrics.finalSaved = store.savedTokens;
+	metrics.foldedCount = store.foldedCount;
+
+	return metrics;
+}
+
+/**
+ * Async replay variant that supports an optional per-turn hook.
+ *
+ * Identical to replay() but runs opts.onTurn after every turn's appendBlocks+refold
+ * settles, BEFORE the next turn's blocks are ingested. This mirrors live semantics
+ * where the conductor tick runs between turns: its unfolds can preempt the next
+ * turn's agent-unfold events.
+ *
+ * Used exclusively by the ATTENTIVE arm of the eval harness. All other callers
+ * should use the synchronous replay().
+ */
+export async function replayAsync(blocks: Block[], opts: ReplayAsyncOptions): Promise<ReplayMetrics> {
+	const applyAgentUnfolds = opts.applyAgentUnfolds !== false;
+
+	const parsed: ParsedSession = {
+		meta: { format: "pi", title: "replay", cwd: "", model: "" },
+		blocks: [],
+		lineCount: 0,
+		skipped: 0,
+	};
+
+	const store = new AccordionStore(parsed);
+
+	if (opts.budget !== undefined) store.setBudget(opts.budget);
+	if (opts.protectTokens !== undefined) store.setProtect(opts.protectTokens);
+
+	const byTurn = new Map<number, Block[]>();
+	for (const b of blocks) {
+		const t = b.turn;
+		const arr = byTurn.get(t);
+		if (arr) arr.push(b);
+		else byTurn.set(t, [b]);
+	}
+
+	const turns = [...byTurn.keys()].sort((a, b) => a - b);
+
+	const metrics: ReplayMetrics = {
+		turns: 0,
+		misses: [],
+		churnPerTurn: [],
+		budgetViolations: 0,
+		finalLive: 0,
+		finalSaved: 0,
+		foldedCount: 0,
+		lexicalUnfolds: 0,
+	};
+
+	for (const t of turns) {
+		const turnBlocks = byTurn.get(t)!;
+		const flipsBefore = store.foldFlips;
+
+		store.appendBlocks(turnBlocks);
+
+		const churnDelta = store.foldFlips - flipsBefore;
+		metrics.churnPerTurn.push(churnDelta);
+		metrics.turns++;
+
+		if (store.liveTokens > store.budget) {
+			metrics.budgetViolations++;
+		}
+
+		const unfoldCalls = turnBlocks.filter((b) => b.kind === "tool_call" && b.toolName === "unfold");
+		for (const call of unfoldCalls) {
+			const tokens = extractUnfoldCodes(call.text);
+			for (const code of tokens) {
+				const matching = resolveToken(code, store.blocks);
+				const blockId = matching[0]?.id ?? null;
+
+				let wasFolded = false;
+				let preempted = false;
+
+				if (matching.length > 0) {
+					const target = matching[0];
+					wasFolded = store.isFolded(target);
+					if (!wasFolded && (target.by === "conductor" || store.recallsOf(target.id).length > 0)) {
+						preempted = true;
+					}
+				}
+
+				if (wasFolded) {
+					metrics.misses.push({ turn: t, code, blockId, wasFolded: true, preempted: false });
+				}
+
+				if (applyAgentUnfolds && matching.length > 0) {
+					for (const target of matching) {
+						if (store.isFolded(target)) {
+							store.unfold(target.id, "agent");
+						}
+					}
+				}
+			}
+		}
+
+		// Per-turn async hook: run conductor tick AFTER this turn's unfolds are applied,
+		// BEFORE the next turn's blocks. Mirrors live one-turn-behind semantics.
+		await opts.onTurn(store, t);
+	}
+
+	metrics.lexicalUnfolds = store.log.filter((e) => e.by === "conductor" && e.action === "unfolded").length;
 	metrics.finalLive = store.liveTokens;
 	metrics.finalSaved = store.savedTokens;
 	metrics.foldedCount = store.foldedCount;
