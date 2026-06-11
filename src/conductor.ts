@@ -536,8 +536,10 @@ export function categorizeSalienceMarkers(text: string): {
 		const key = m[1], val = m[2];
 		if (!STOPWORDS.has(key.toLowerCase()) && val.length > 2 && val.length < 60) add(result.exact_values, `${key}=${val}`);
 	}
-	// Decisions: sentences containing explicit decision language
-	for (const m of text.matchAll(/[^.!?\n]*\b(?:decided|chose|standardized on|going with|will use|selected|picked)\b[^.!?\n]*/gi)) {
+	// Decisions: sentences containing explicit decision language.
+	// Leading [^.!?\n]* before the keyword causes O(n²) backtracking on long no-newline text.
+	// Bound pre-context to 200 chars to keep this O(n).
+	for (const m of text.matchAll(/[^.!?\n]{0,200}\b(?:decided|chose|standardized on|going with|will use|selected|picked)\b[^.!?\n]{0,200}/gi)) {
 		add(result.decisions, m[0].trim().slice(0, 80));
 	}
 	return result;
