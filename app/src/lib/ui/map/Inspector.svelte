@@ -194,6 +194,39 @@
 			</button>
 		</header>
 
+		<!-- ── Relevance Lab score vector (top) ─────────────────── -->
+		{#if relevanceLab.enabled}
+			<div class="score-section score-section-top">
+				<div class="score-header">
+					<span class="score-title">Relevance Lab</span>
+					{#if relevanceLab.file}
+						<span class="score-caption">external scores from tick t{relevanceLab.file.ticks[Math.max(0, Math.min(relevanceLab.tickIndex, relevanceLab.file.ticks.length - 1))]?.tick ?? 0}</span>
+					{/if}
+				</div>
+				{#if protect}
+					<p class="score-tail-note">In tail — not scored (it is the query)</p>
+				{:else}
+					{@const scores = getAllScoresForBlock(block.id)}
+					<div class="score-rows">
+						{#each ALL_SCORER_IDS as sid}
+							{@const val = scores.get(sid)}
+							<div class="score-row">
+								<span class="score-name">{SCORER_LABELS[sid]}</span>
+								{#if val !== null && val !== undefined}
+									<div class="score-bar-wrap">
+										<div class="score-bar-fill" style:width="{(val * 100).toFixed(1)}%"></div>
+									</div>
+									<span class="score-val tnum mono">{val.toFixed(2)}</span>
+								{:else}
+									<span class="score-na">—</span>
+								{/if}
+							</div>
+						{/each}
+					</div>
+				{/if}
+			</div>
+		{/if}
+
 		<!-- ── Meta row ───────────────────────────────────────────── -->
 		<div class="meta-row">
 			<div class="meta-pills">
@@ -272,39 +305,6 @@
 				</p>
 			{/if}
 		</div>
-
-		<!-- ── Relevance Lab score vector ───────────────────────── -->
-		{#if relevanceLab.enabled}
-			<div class="score-section">
-				<div class="score-header">
-					<span class="score-title">Relevance Lab</span>
-					{#if relevanceLab.file}
-						<span class="score-caption">external scores from tick t{relevanceLab.file.ticks[Math.max(0, Math.min(relevanceLab.tickIndex, relevanceLab.file.ticks.length - 1))]?.tick ?? 0}</span>
-					{/if}
-				</div>
-				{#if protect}
-					<p class="score-tail-note">In tail — not scored (it is the query)</p>
-				{:else}
-					{@const scores = getAllScoresForBlock(block.id)}
-					<div class="score-rows">
-						{#each ALL_SCORER_IDS as sid}
-							{@const val = scores.get(sid)}
-							<div class="score-row">
-								<span class="score-name">{SCORER_LABELS[sid]}</span>
-								{#if val !== null && val !== undefined}
-									<div class="score-bar-wrap">
-										<div class="score-bar-fill" style:width="{(val * 100).toFixed(1)}%"></div>
-									</div>
-									<span class="score-val tnum mono">{val.toFixed(2)}</span>
-								{:else}
-									<span class="score-na">—</span>
-								{/if}
-							</div>
-						{/each}
-					</div>
-				{/if}
-			</div>
-		{/if}
 
 		<!-- ── Partner ────────────────────────────────────────────── -->
 		{#if partner}
@@ -646,6 +646,13 @@
 		display: flex;
 		flex-direction: column;
 		gap: var(--sp-2);
+	}
+
+	/* At the top of the panel it sits flush under the sticky header — the
+	   header's own border-bottom is the only separator we need. */
+	.score-section-top {
+		border-top: none;
+		background: color-mix(in srgb, var(--accent) 5%, transparent);
 	}
 
 	.score-header {
