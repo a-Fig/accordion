@@ -7,6 +7,7 @@
  */
 
 import { writeFile } from "node:fs";
+import { readFile as readFileAsync, unlink as unlinkAsync } from "node:fs/promises";
 import { homedir } from "node:os";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
@@ -14,6 +15,7 @@ import { AGENT_TOOL_DEFS, agentFold, agentRecall, agentUnfold } from "./agent-to
 import { ACCORDION_AGENT_SKILL } from "./accordion-skill.ts";
 import {
 	applyDecisionsToState,
+	contentHash,
 	createAccordionState,
 	createGeminiSummaryProvider,
 	createHaikuSummaryProvider,
@@ -36,6 +38,7 @@ import {
 } from "./conductor.ts";
 
 const LIVE_SNAPSHOT_PATH = `${homedir()}/.pi/agent/accordion-live-session.jsonl`;
+const COMMANDS_PATH = `${homedir()}/.pi/agent/accordion-commands.jsonl`;
 
 const LEGACY_STATE_TYPE = "accordion-state";
 const CONDUCTOR_STATE_TYPE = "accordion-conductor-state";
@@ -61,16 +64,44 @@ function effectiveEmbeddingsEnabled(config: ConductorConfig): boolean {
 	return config.embeddingsEnabled || ENV_EMBEDDINGS_ENABLED;
 }
 
+/** Default Ollama; cloud APIs only when summaryModel names them or ACCORDION_OLLAMA=0. */
+function useOllamaSummary(config: ConductorConfig): boolean {
+	const env = process.env.ACCORDION_OLLAMA;
+	if (env === "0" || env === "false") return false;
+	if (env === "1" || env === "true") return true;
+	const m = config.summaryModel.trim().toLowerCase();
+	if (!m || m === config.ollamaModel.trim().toLowerCase()) return true;
+	if (m.includes("claude") || m.includes("haiku") || m.includes("gemini")) return false;
+	return true;
+}
+
 function buildSummaryProvider(config: ConductorConfig): SummaryProvider | undefined {
 	if (!effectiveSummariesEnabled(config)) return undefined;
-	if (process.env.ACCORDION_OLLAMA === "1" || process.env.ACCORDION_OLLAMA === "true") {
-		return createOllamaSummaryProvider({
+	let base: SummaryProvider | undefined;
+	if (useOllamaSummary(config)) {
+		base = createOllamaSummaryProvider({
 			baseUrl: config.ollamaBaseUrl,
 			model: config.ollamaModel,
 			timeoutMs: config.summaryTimeoutMs,
 		});
+	} else {
+		base = createHaikuSummaryProvider(process.env.ANTHROPIC_API_KEY, config.summaryModel) ?? createGeminiSummaryProvider(process.env.GOOGLE_API_KEY);
 	}
-	return createHaikuSummaryProvider(process.env.ANTHROPIC_API_KEY, config.summaryModel) ?? createGeminiSummaryProvider(process.env.GOOGLE_API_KEY);
+	if (!base) return undefined;
+	return async (input) => {
+		try {
+			return await base!(input);
+		} catch (error: any) {
+			state.providerError = `Summary: ${error?.message || error}`.slice(0, 200);
+			throw error;
+		}
+	};
+}
+
+function syncProviderErrorFromState(): void {
+	if (state.missingApiKeyLogged && !state.providerError) {
+		state.providerError = "ANTHROPIC_API_KEY missing; using digests";
+	}
 }
 
 let state: AccordionState = createAccordionState();
@@ -83,16 +114,57 @@ let lastEmbeddingModel = state.config.embeddingModel;
 function writeLiveSnapshot(ctx: ExtensionContext): void {
 	try {
 		const branch = ctx.sessionManager.getBranch() as any[];
-		const relevant = branch.filter((e: any) => e.type === "session" || e.type === "message" || e.type === "compaction");
+		const allEntries = branch.filter((e: any) =>
+			e.type === "session" || e.type === "message" || e.type === "compaction" ||
+			(e.type === "custom" && e.customType === CONDUCTOR_DECISION_TYPE),
+		);
+		const relevant = allEntries.filter((e: any) => e.type !== "custom" || e.customType !== CONDUCTOR_DECISION_TYPE);
+		// include last 20 conductor decisions
+		const decisions = allEntries.filter((e: any) => e.type === "custom" && e.customType === CONDUCTOR_DECISION_TYPE).slice(-20);
+
 		if (!relevant.some((e: any) => e.type === "session")) {
 			relevant.unshift({ type: "session", version: 3, cwd: "", timestamp: new Date().toISOString() });
 		}
+
+		// Build blockId → LLM summary map for currently folded blocks only.
+		const foldedSet = new Set(state.foldedBlockIds);
+		const foldedSummaries: Record<string, string> = {};
+		if (foldedSet.size > 0 && Object.keys(state.summaryCache).length > 0) {
+			// We need blocks to map id → contentHash. Parse from messages in branch.
+			try {
+				const messages = branch
+					.filter((e: any) => e.type === "message")
+					.map((e: any) => e.message)
+					.filter(Boolean);
+				const parsed = parseMessages(messages);
+				for (const block of parsed.blocks) {
+					if (!foldedSet.has(block.id)) continue;
+					const hash = contentHash(block);
+					const summary = state.summaryCache[hash];
+					if (summary) foldedSummaries[block.id] = summary;
+				}
+			} catch {
+				/* tolerate parse errors — snapshot degrades gracefully */
+			}
+		}
+
 		relevant.push({
 			type: "custom",
 			customType: CONDUCTOR_STATE_TYPE,
-			data: { foldTargetCalibrated: state.foldTargetCalibrated, config: state.config },
+			data: {
+				foldTargetCalibrated: state.foldTargetCalibrated,
+				config: state.config,
+				missingApiKeyLogged: state.missingApiKeyLogged,
+				providerError: state.providerError,
+				foldedBlockIds: state.foldedBlockIds,
+				foldLevels: state.foldLevels,
+				foldedSummaries,
+				calibrationEvents: state.calibrationEvents.slice(-10),
+			},
 		});
-		const lines = relevant.map((e: any) => JSON.stringify(e)).join("\n") + "\n";
+
+		const all = [...relevant, ...decisions];
+		const lines = all.map((e: any) => JSON.stringify(e)).join("\n") + "\n";
 		writeFile(LIVE_SNAPSHOT_PATH, lines, "utf8", () => {});
 	} catch {}
 }
@@ -102,6 +174,91 @@ function resetProviders(): void {
 	embeddingProvider = null;
 	embeddingProviderInitAttempted = false;
 	lastEmbeddingModel = state.config.embeddingModel;
+}
+
+/**
+ * Drain app-side commands queued in COMMANDS_PATH (written by the 1420 app's
+ * command bridge). Each line is a JSON command; commands older than 60 s are
+ * skipped. Returns true if any command mutated state (caller should persist).
+ */
+async function drainCommands(messages: AgentMessage[]): Promise<boolean> {
+	let raw: string;
+	try {
+		raw = await readFileAsync(COMMANDS_PATH, "utf8");
+		await unlinkAsync(COMMANDS_PATH).catch(() => {});
+	} catch {
+		return false; // no commands file — nothing to drain
+	}
+
+	const now = Date.now();
+	const lines = raw.split("\n").filter(Boolean);
+	if (lines.length === 0) return false;
+
+	let changed = false;
+	for (const line of lines) {
+		try {
+			const cmd = JSON.parse(line) as Record<string, unknown>;
+			if (!cmd || typeof cmd.type !== "string") continue;
+			if (typeof cmd.ts === "number" && now - cmd.ts > 60_000) continue; // stale
+
+			switch (cmd.type) {
+				case "config": {
+					if (cmd.patch && typeof cmd.patch === "object") {
+						state.config = mergeConductorConfig({ ...state.config, ...(cmd.patch as Partial<ConductorConfig>) });
+						resetProviders();
+						changed = true;
+					}
+					break;
+				}
+				case "fold": {
+					if (!Number.isFinite(cmd.turnIndex) || messages.length === 0) break;
+					const r = agentFold(messages, state, String(cmd.turnIndex));
+					if (r.changes.length) changed = true;
+					break;
+				}
+				case "unfold": {
+					if (!Number.isFinite(cmd.turnIndex) || messages.length === 0) break;
+					const r = agentUnfold(messages, state, String(cmd.turnIndex));
+					if (r.changes.length) changed = true;
+					break;
+				}
+				case "pin": {
+					if (!Number.isFinite(cmd.turnIndex) || messages.length === 0) break;
+					const parsed = parseMessages(messages);
+					if (!parsed.turns.some((t) => t.index === cmd.turnIndex)) break;
+					if (!state.pinnedTurnIndexes.includes(cmd.turnIndex as number)) state.pinnedTurnIndexes.push(cmd.turnIndex as number);
+					const foldedSet = new Set(state.foldedBlockIds);
+					for (const block of parsed.blocks) {
+						if (block.turn !== cmd.turnIndex) continue;
+						foldedSet.delete(block.id);
+						delete state.foldLevels[block.id];
+					}
+					state.foldedBlockIds = [...foldedSet];
+					changed = true;
+					break;
+				}
+				case "unpin": {
+					if (!Number.isFinite(cmd.turnIndex) || messages.length === 0) break;
+					const before = state.pinnedTurnIndexes.length;
+					state.pinnedTurnIndexes = state.pinnedTurnIndexes.filter((n) => n !== cmd.turnIndex);
+					if (state.pinnedTurnIndexes.length !== before) changed = true;
+					break;
+				}
+				case "reset": {
+					state.foldedBlockIds = [];
+					state.foldLevels = {};
+					state.manualChanges = [];
+					state.pinnedTurnIndexes = [];
+					state.pinnedBlockIds = [];
+					changed = true;
+					break;
+				}
+			}
+		} catch {
+			/* skip malformed lines */
+		}
+	}
+	return changed;
 }
 
 function restoreState(ctx: ExtensionContext): void {
@@ -140,6 +297,7 @@ function persist(pi: ExtensionAPI, blocks: ContextBlock[] = [], incomingPrompt =
 		pendingSummaryHashes: state.pendingSummaryHashes,
 		manualChanges: state.manualChanges,
 		missingApiKeyLogged: state.missingApiKeyLogged,
+		providerError: state.providerError,
 		embeddingCache: state.embeddingCache,
 		foldLevels: state.foldLevels,
 		foldTargetCalibrated: state.foldTargetCalibrated,
@@ -225,6 +383,11 @@ export default function accordionExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("context", async (event, ctx) => {
+		// Drain any commands queued by the 1420 app before running the Conductor.
+		if (await drainCommands(event.messages as AgentMessage[])) {
+			persist(pi);
+		}
+
 		const before = JSON.stringify(state);
 		const incomingPrompt = extractIncomingPrompt(event.messages);
 		const parsed = parseMessages(event.messages);
@@ -232,6 +395,7 @@ export default function accordionExtension(pi: ExtensionAPI): void {
 		try {
 			await ensureEmbeddingProvider(state.config);
 		} catch (error: any) {
+			state.providerError = `Embeddings: ${error?.message || error}`.slice(0, 200);
 			ctx.ui.notify(error.message, "warning");
 		}
 
@@ -239,6 +403,7 @@ export default function accordionExtension(pi: ExtensionAPI): void {
 			try {
 				await warmEmbeddings(parsed.blocks, incomingPrompt, embeddingProvider, state);
 			} catch (error: any) {
+				state.providerError = `Embeddings: ${error?.message || error}`.slice(0, 200);
 				ctx.ui.notify(error.message || "Failed to warm embeddings", "warning");
 			}
 		}
@@ -265,6 +430,7 @@ export default function accordionExtension(pi: ExtensionAPI): void {
 			persistDecisions(pi, output.decisions);
 		}
 		for (const warning of output.warnings) ctx.ui.notify(warning, "warning");
+		syncProviderErrorFromState();
 		if (before !== JSON.stringify(state)) persist(pi, parsed.blocks, incomingPrompt);
 		writeLiveSnapshot(ctx);
 
@@ -294,11 +460,19 @@ export default function accordionExtension(pi: ExtensionAPI): void {
 		if (output.decisions.length || finalMessages !== (event.messages as any)) return { messages: finalMessages };
 	});
 
-	pi.on("session_before_compact", (_event, ctx) => {
+	pi.on("session_before_compact", async (_event, ctx) => {
 		const messages = liveMessages(ctx);
 		const parsed = parseMessages(messages);
 		const incomingPrompt = extractIncomingPrompt(messages);
 		const beforeCount = state.foldedBlockIds.length;
+
+		if (effectiveEmbeddingsEnabled(state.config) && embeddingProvider) {
+			try {
+				await warmEmbeddings(parsed.blocks, incomingPrompt, embeddingProvider, state);
+			} catch {
+				/* embedding warm-up failure is non-fatal — fall back to keyword scoring */
+			}
+		}
 
 		const output = runConductor(
 			{
@@ -441,10 +615,20 @@ export default function accordionExtension(pi: ExtensionAPI): void {
 	pi.registerCommand("conductor-config", {
 		description: "Show or update Conductor runtime config (debug): /conductor-config [json]",
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
-			const raw = args.trim();
+			// Drain any pending app commands first so the display/update is current.
+			await drainCommands(lastKnownMessages);
+
+			let raw = args.trim();
 			if (!raw) {
 				ctx.ui.notify(JSON.stringify(state.config, null, 2), "info");
 				return;
+			}
+			// Tolerate shell-style wrapping quotes: '/conductor-config '{"a":1}''
+			if (
+				(raw.startsWith("'") && raw.endsWith("'")) ||
+				(raw.startsWith('"') && raw.endsWith('"'))
+			) {
+				raw = raw.slice(1, -1);
 			}
 			try {
 				const patch = JSON.parse(raw) as Partial<ConductorConfig>;

@@ -31,7 +31,21 @@ export function conductorSnapshotFromEntry(data: Record<string, unknown> | null 
 	const fold = data.foldTargetCalibrated;
 	const foldTargetCalibrated = typeof fold === "number" && Number.isFinite(fold) ? fold : defaultConductorConfig().foldTargetInitial;
 	const config = conductorConfigFromPersisted(data.config as Partial<ConductorConfig> | undefined);
-	return { config, foldTargetCalibrated };
+	const missingApiKeyLogged = data.missingApiKeyLogged === true;
+	const providerError = typeof data.providerError === "string" && data.providerError ? data.providerError : undefined;
+	const foldedBlockIds = Array.isArray(data.foldedBlockIds) ? (data.foldedBlockIds as string[]) : undefined;
+	const foldLevels =
+		data.foldLevels && typeof data.foldLevels === "object" && !Array.isArray(data.foldLevels)
+			? (data.foldLevels as Record<string, 0 | 1 | 2 | 3>)
+			: undefined;
+	const foldedSummaries =
+		data.foldedSummaries && typeof data.foldedSummaries === "object" && !Array.isArray(data.foldedSummaries)
+			? (data.foldedSummaries as Record<string, string>)
+			: undefined;
+	const calibrationEvents = Array.isArray(data.calibrationEvents)
+		? (data.calibrationEvents as Array<{ turn: number; from: number; to: number; reason: string }>)
+		: undefined;
+	return { config, foldTargetCalibrated, missingApiKeyLogged, providerError, foldedBlockIds, foldLevels, foldedSummaries, calibrationEvents };
 }
 
 export function isConductorStateEntry(e: { type?: string; customType?: string }): boolean {
@@ -45,12 +59,12 @@ export function defaultConductorConfig(): ConductorConfig {
 		foldTargetMin: 0.6,
 		foldTargetMax: 0.92,
 		foldTargetInitial: 0.8,
-		summaryModel: "claude-haiku-4-5",
+		summaryModel: "",
 		ollamaBaseUrl: "http://localhost:11434/v1",
 		ollamaModel: "llama3.2:3b",
 		embeddingModel: "Xenova/all-MiniLM-L6-v2",
 		summariesEnabled: true,
-		embeddingsEnabled: false,
+		embeddingsEnabled: true,
 		summaryTimeoutMs: 30_000,
 	};
 }

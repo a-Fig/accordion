@@ -7,7 +7,18 @@
 	const config = $derived(conductorSettings.config);
 	const summary = $derived(summaryBackend(config));
 	const providerStatus = $derived(conductorSettings.providerStatus);
+	const providerDetail = $derived(conductorSettings.providerError);
+	const live = $derived(conductorSettings.liveConnected);
 	const pct = (n: number) => `${Math.round(n * 100)}%`;
+	let copied = $state(false);
+
+	function copyConfigCommand(): void {
+		const cmd = `/conductor-config ${conductorSettings.conductorConfigCommandJson()}`;
+		void navigator.clipboard.writeText(cmd).then(() => {
+			copied = true;
+			setTimeout(() => (copied = false), 2000);
+		});
+	}
 </script>
 
 <div class="wrap">
@@ -29,7 +40,7 @@
 			</div>
 			<div class="ro">
 				<span>Provider</span>
-				<span class="mono status-{providerStatus}">{providerStatus}</span>
+				<span class="mono status-{providerStatus}" title={providerDetail ?? ""}>{providerStatus}{providerDetail ? ` · ${providerDetail}` : ""}</span>
 			</div>
 			<label class="fld"><span>Budget</span><input class="mono" type="number" min="12000" max="500000" step="1000" value={config.budgetTokens} oninput={(e) => conductorSettings.patch({ budgetTokens: +e.currentTarget.value })} /></label>
 			<label class="fld"><span>Protected tail</span><input class="mono" type="number" min="0" max="60000" step="1000" value={config.workingTailTokens} oninput={(e) => conductorSettings.patch({ workingTailTokens: +e.currentTarget.value })} /></label>
@@ -42,13 +53,24 @@
 			<label class="fld"><span>Summary model</span><input class="mono" type="text" placeholder="default" value={config.summaryModel} oninput={(e) => conductorSettings.patch({ summaryModel: e.currentTarget.value })} /></label>
 			{#if summary.backend === "ollama"}
 				<label class="fld"><span>Ollama URL</span><input class="mono" type="text" value={config.ollamaBaseUrl} oninput={(e) => conductorSettings.patch({ ollamaBaseUrl: e.currentTarget.value })} /></label>
+				<label class="fld"><span>Ollama model</span><input class="mono" type="text" value={config.ollamaModel} oninput={(e) => conductorSettings.patch({ ollamaModel: e.currentTarget.value })} /></label>
 			{/if}
+			<label class="fld adv"><span>Summary timeout (ms)</span><input class="mono" type="number" min="1000" max="120000" step="1000" value={config.summaryTimeoutMs} oninput={(e) => conductorSettings.patch({ summaryTimeoutMs: +e.currentTarget.value })} /></label>
 			<label class="fld"><span>Embedding model</span><input class="mono" type="text" value={config.embeddingModel} oninput={(e) => conductorSettings.patch({ embeddingModel: e.currentTarget.value })} /></label>
 			<div class="toggles">
 				<label class="tog"><input type="checkbox" checked={config.summariesEnabled} onchange={(e) => conductorSettings.patch({ summariesEnabled: e.currentTarget.checked })} /> Summaries</label>
 				<label class="tog"><input type="checkbox" checked={config.embeddingsEnabled} onchange={(e) => conductorSettings.patch({ embeddingsEnabled: e.currentTarget.checked })} /> Embeddings</label>
 			</div>
-			<p class="hint">Changes apply on the next Conductor run.</p>
+			<p class="hint">
+				{#if live}
+					Live mode: pi is authoritative; edit via <code>/conductor-config</code> or restart pi after local changes.
+				{:else}
+					Changes apply on the next Conductor run.
+				{/if}
+			</p>
+			{#if live}
+				<button class="copy" onclick={copyConfigCommand}>{copied ? "Copied!" : "Copy /conductor-config command"}</button>
+			{/if}
 			<button class="reset" onclick={() => conductorSettings.reset()}>Reset to defaults</button>
 		</div>
 	{/if}
@@ -77,7 +99,11 @@
 	.rng input { width: 100%; accent-color: var(--accent); margin: 0; }
 	.toggles { display: flex; gap: 12px; font-size: 11px; color: var(--muted); }
 	.tog { display: flex; align-items: center; gap: 5px; cursor: pointer; }
-	.hint { margin: 0; font-size: 10px; color: var(--faint); font-style: italic; }
+	.hint { margin: 0; font-size: 10px; color: var(--faint); font-style: italic; line-height: 1.35; }
+	.hint code { font-family: var(--mono); font-size: 9px; font-style: normal; }
+	.copy { align-self: flex-start; background: var(--panel-3); border: 1px solid var(--line); color: var(--muted); padding: 4px 10px; border-radius: var(--radius-sm); font-size: 10px; }
+	.copy:hover { color: var(--text); background: var(--line); }
+	.fld.adv input { opacity: 0.9; }
 	.reset { align-self: flex-start; background: var(--panel-3); border: 1px solid var(--line); color: var(--text); padding: 4px 10px; border-radius: var(--radius-sm); font-size: 11px; }
 	.reset:hover { background: var(--line); }
 	.mono { font-family: var(--mono); }

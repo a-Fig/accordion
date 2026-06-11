@@ -6,6 +6,7 @@
  */
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { setCommandSender } from "./engine/command-bus";
 import { conductorSettings } from "./engine/conductor-settings.svelte";
 import { parse } from "./engine/parse";
 import { AccordionStore } from "./engine/store.svelte";
@@ -13,6 +14,7 @@ import { AccordionStore } from "./engine/store.svelte";
 const env = (import.meta as unknown as { env?: Record<string, string | undefined> }).env;
 const LIVE_BASE_URL = (env?.VITE_ACCORDION_LIVE_URL ?? "").replace(/\/$/, "");
 const LIVE_URL = `${LIVE_BASE_URL}/api/live-session/events`;
+const COMMANDS_URL = `${LIVE_BASE_URL}/api/conductor-commands`;
 const LS_KEY = "accordion.liveMode";
 
 function inTauri(): boolean {
@@ -52,6 +54,7 @@ class LiveSession {
 		this.teardown();
 		this.connected = false;
 		conductorSettings.setLiveConnected(false);
+		setCommandSender(null);
 		this.hint = "";
 	}
 
@@ -100,6 +103,13 @@ class LiveSession {
 		es.onopen = () => {
 			this.connected = true;
 			conductorSettings.setLiveConnected(true);
+			setCommandSender((cmd) => {
+				fetch(COMMANDS_URL, {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify(cmd),
+				}).catch(() => {/* fire-and-forget */});
+			});
 			this.hint = "Connected — waiting for first snapshot…";
 			this.staleTimer = setTimeout(() => {
 				if (!this.gotEvent)
@@ -109,6 +119,7 @@ class LiveSession {
 		es.onerror = () => {
 			this.connected = false;
 			conductorSettings.setLiveConnected(false);
+			setCommandSender(null);
 			this.hint = LIVE_BASE_URL
 				? `Can't reach ${LIVE_BASE_URL} — check the live URL or restart the dev server.`
 				: "Can't reach live session — restart `npm run dev` in app/.";
@@ -131,6 +142,14 @@ class LiveSession {
 			await invoke("start_live_watch");
 			this.connected = true;
 			conductorSettings.setLiveConnected(true);
+			// TODO: replace with Tauri invoke("post_conductor_command") for native path
+			setCommandSender((cmd) => {
+				fetch(COMMANDS_URL, {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify(cmd),
+				}).catch(() => {/* fire-and-forget */});
+			});
 			this.hint = "Connected — waiting for first snapshot…";
 			this.staleTimer = setTimeout(() => {
 				if (!this.gotEvent)
@@ -139,6 +158,7 @@ class LiveSession {
 		} catch {
 			this.connected = false;
 			conductorSettings.setLiveConnected(false);
+			setCommandSender(null);
 			this.hint = "Failed to start native live watch.";
 		}
 	}

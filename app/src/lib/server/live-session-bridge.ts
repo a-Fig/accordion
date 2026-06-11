@@ -1,5 +1,5 @@
 /*
- * live-session-bridge.ts — Node-only live session API (SSE + snapshot).
+ * live-session-bridge.ts — Node-only live session API (SSE + snapshot + command bridge).
  * Used by the Vite dev plugin; mirrors the former visualizer/serve.js contract.
  */
 import fs from "node:fs";
@@ -8,10 +8,12 @@ import path from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 export const LIVE_PATH = path.join(os.homedir(), ".pi", "agent", "accordion-live-session.jsonl");
+export const COMMANDS_PATH = path.join(os.homedir(), ".pi", "agent", "accordion-commands.jsonl");
 
 const CORS = {
 	"Access-Control-Allow-Origin": "*",
-	"Access-Control-Allow-Methods": "GET, OPTIONS",
+	"Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+	"Access-Control-Allow-Headers": "Content-Type",
 };
 
 interface SseClient {
@@ -130,6 +132,30 @@ export function liveSessionMiddleware(
 			sseClients.add(client);
 			ensureWatcher();
 			req.on("close", () => sseClients.delete(client));
+		});
+		return;
+	}
+
+	if (p === "/api/conductor-commands" && req.method === "POST") {
+		let body = "";
+		req.setEncoding("utf8");
+		req.on("data", (chunk: string) => (body += chunk));
+		req.on("end", () => {
+			try {
+				JSON.parse(body); // validate
+				fs.appendFile(COMMANDS_PATH, body.trim() + "\n", (err) => {
+					if (err) {
+						res.writeHead(500, { ...CORS, "Content-Type": "application/json" });
+						res.end(JSON.stringify({ error: String(err) }));
+					} else {
+						res.writeHead(200, { ...CORS, "Content-Type": "application/json" });
+						res.end(JSON.stringify({ ok: true }));
+					}
+				});
+			} catch {
+				res.writeHead(400, { ...CORS, "Content-Type": "application/json" });
+				res.end(JSON.stringify({ error: "Invalid JSON" }));
+			}
 		});
 		return;
 	}

@@ -11,6 +11,7 @@
  * tool_results before thinking before reply text before tool_calls before user
  * intent. Deterministic and explainable; the smarts come later.
  */
+import { postLiveCommand } from "./command-bus";
 import type { Block, BlockKind, Actor, SessionMeta, ParsedSession, TurnGroup } from "./types";
 import { digest, digestTokens } from "./digest";
 
@@ -59,6 +60,8 @@ export class AccordionStore {
 	replayPlaying = $state(false);
 	groups = $state<Map<string, TurnGroup>>(new Map());
 	groupIdByTurn = $state<Map<number, string>>(new Map());
+	/** LLM summaries from pi's summaryCache, keyed by blockId. Only present in live mode when pi has cached them. */
+	summaryCache = $state<Record<string, string>>({});
 	private nextGroupId = 1;
 	private replayTimer: ReturnType<typeof setInterval> | null = null;
 	private recentClearTimer: ReturnType<typeof setTimeout> | null = null;
@@ -67,10 +70,13 @@ export class AccordionStore {
 		this.meta = parsed.meta;
 		this.blocks = parsed.blocks;
 		this.applyConductorSnapshot(parsed, true);
-		this.refold();
+		// Only run local refold() when pi hasn't sent authoritative fold state
+		if (!parsed.conductor?.foldedBlockIds) this.refold();
 	}
 
-	/** Apply the latest conductor snapshot from a parsed session. */
+	/** Apply the latest conductor snapshot from a parsed session.
+	 *  When pi sends foldedBlockIds the store mirrors pi's decisions exactly
+	 *  and skips local refold() — the Conductor is authoritative in live mode. */
 	applyConductorSnapshot(parsed: ParsedSession, seedBudget = false): void {
 		if (!parsed.conductor) return;
 		this.foldTargetCalibrated = parsed.conductor.foldTargetCalibrated;
@@ -78,6 +84,26 @@ export class AccordionStore {
 		if (seedBudget) {
 			this.budget = parsed.conductor.config.budgetTokens;
 			this.protectTokens = parsed.conductor.config.workingTailTokens;
+		}
+
+		// Apply pi's actual fold decisions when present
+		if (parsed.conductor.foldedBlockIds) {
+			const folded = new Set(parsed.conductor.foldedBlockIds);
+			const levels = parsed.conductor.foldLevels ?? {};
+			for (const b of this.blocks) {
+				if (folded.has(b.id)) {
+					b.autoFolded = true;
+					b.foldLevel = (levels[b.id] ?? 2) as 0 | 1 | 2 | 3;
+					b.by = "conductor";
+				} else if (b.by === "conductor") {
+					// pi unfolded this block — restore to full
+					b.autoFolded = false;
+					b.foldLevel = 0;
+					b.by = null;
+				}
+			}
+			this.summaryCache = { ...(parsed.conductor.foldedSummaries ?? {}) };
+			this.version++;
 		}
 	}
 
@@ -91,8 +117,10 @@ export class AccordionStore {
 	effTokens(b: Block): number {
 		return this.isFolded(b) ? digestTokens(b) : b.tokens;
 	}
+	/** Return the best available summary for a folded block.
+	 *  Prefers pi's cached LLM summary; falls back to local deterministic digest. */
 	digestOf(b: Block): string {
-		return digest(b);
+		return this.summaryCache[b.id] ?? digest(b);
 	}
 
 	/** Blocks visible in the current view (respects replay reveal pointer). */
@@ -259,6 +287,7 @@ export class AccordionStore {
 		}
 		this.emit(by, "folded", label(b));
 		this.refold();
+		if (this.liveConnected && by === "you") postLiveCommand({ type: "fold", turnIndex: b.turn, ts: Date.now() });
 	}
 	unfold(id: string, by: Actor = "you"): void {
 		const b = this.get(id);
@@ -269,6 +298,7 @@ export class AccordionStore {
 		}
 		this.emit(by, "unfolded", label(b));
 		this.refold();
+		if (this.liveConnected && by === "you") postLiveCommand({ type: "unfold", turnIndex: b.turn, ts: Date.now() });
 	}
 	toggle(id: string, by: Actor = "you"): void {
 		const b = this.get(id);
@@ -284,6 +314,7 @@ export class AccordionStore {
 		}
 		this.emit("you", "pinned", label(b));
 		this.refold();
+		if (this.liveConnected) postLiveCommand({ type: "pin", turnIndex: b.turn, ts: Date.now() });
 	}
 	unpin(id: string): void {
 		const b = this.get(id);
@@ -295,6 +326,7 @@ export class AccordionStore {
 		}
 		this.emit("you", "unpinned", label(b));
 		this.refold();
+		if (this.liveConnected) postLiveCommand({ type: "unpin", turnIndex: b.turn, ts: Date.now() });
 	}
 	/** Hand a block back to the automatic folder. */
 	auto(id: string): void {
@@ -305,6 +337,7 @@ export class AccordionStore {
 			member.by = null;
 		}
 		this.refold();
+		if (this.liveConnected) postLiveCommand({ type: "unfold", turnIndex: b.turn, ts: Date.now() });
 	}
 	/** Clear every manual override — pure budget view. */
 	resetAll(): void {
@@ -314,6 +347,7 @@ export class AccordionStore {
 		}
 		this.emit("you", "reset", "all blocks to auto");
 		this.refold();
+		if (this.liveConnected) postLiveCommand({ type: "reset", ts: Date.now() });
 	}
 
 	// ---- replay ------------------------------------------------------------
@@ -476,7 +510,8 @@ export class AccordionStore {
 		this.meta = parsed.meta;
 		this.applyConductorSnapshot(parsed, false);
 		if (newIds.length) this.markRecent(newIds);
-		this.refold();
+		// Skip local refold() when pi's fold state was applied — Conductor is authoritative
+		if (!parsed.conductor?.foldedBlockIds) this.refold();
 	}
 
 	private markRecent(ids: string[]): void {

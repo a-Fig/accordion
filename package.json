@@ -1,7 +1,12 @@
 {
 	"name": "accordion",
+	"keywords": ["pi-package"],
 	"main": "src/accordion.ts",
 	"type": "module",
+	"pi": {
+		"extensions": ["./src/accordion.ts"],
+		"skills": ["./skills"]
+	},
 	"scripts": {
 		"test": "node --test --experimental-strip-types src/*.test.ts",
 		"test:claims": "node --test --experimental-strip-types src/claims.test.ts",

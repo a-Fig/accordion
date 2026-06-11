@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { summaryBackend } from "../../engine/conductor-config";
+	import { conductorSettings } from "../../engine/conductor-settings.svelte";
 	import type { AccordionStore } from "../../engine/store.svelte";
 	import type { BlockKind } from "../../engine/types";
 	import ConductorSettings from "../ConductorSettings.svelte";
@@ -25,6 +27,15 @@
 	const fmt = (n: number) => n.toLocaleString();
 	const pct = (n: number, d: number) => (d > 0 ? Math.round((n / d) * 100) : 0);
 	const k = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : `${n}`);
+
+	const conductorBadge = $derived.by(() => {
+		const cfg = conductorSettings.config;
+		const sum = summaryBackend(cfg);
+		const sumLabel =
+			sum.backend === "disabled" ? "summaries off" : sum.backend === "haiku" ? "Haiku" : sum.backend === "gemini" ? "Gemini" : sum.model || "Ollama";
+		const emb = cfg.embeddingsEnabled ? "embeddings on" : "embeddings off";
+		return `${sumLabel} · ${emb} · target ${Math.round(store.foldTargetCalibrated * 100)}%`;
+	});
 </script>
 
 <div class="hdr">
@@ -37,6 +48,9 @@
 			</span>
 			{#if store.savedTokens > 0}
 				<span class="saved">folding saved {fmt(store.savedTokens)} ({pct(store.savedTokens, store.fullTokens)}% of {k(store.fullTokens)})</span>
+			{/if}
+			{#if !conductorSettings.open}
+				<span class="badge mono" title="Conductor settings">{conductorBadge}</span>
 			{/if}
 		</div>
 		<div class="ctl">
@@ -133,6 +147,15 @@
 	.saved {
 		font-size: 11px;
 		color: var(--faint);
+	}
+	.badge {
+		font-size: 10px;
+		color: var(--muted);
+		background: var(--panel-2);
+		border: 1px solid var(--line);
+		padding: 2px 8px;
+		border-radius: 999px;
+		white-space: nowrap;
 	}
 	.ctl {
 		margin-left: auto;

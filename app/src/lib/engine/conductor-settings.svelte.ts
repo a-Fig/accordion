@@ -4,6 +4,7 @@
  * Offline: localStorage holds user edits. Live: applySession() overlays config
  * and fold target from the SSE snapshot (authoritative from pi).
  */
+import { postLiveCommand } from "./command-bus";
 import {
 	conductorConfigFromPersisted,
 	defaultConductorConfig,
@@ -19,6 +20,8 @@ class ConductorSettingsState {
 	config = $state<ConductorConfig>(defaultConductorConfig());
 	open = $state(false);
 	liveConnected = $state(false);
+	missingApiKeyLogged = $state(false);
+	providerError = $state<string | undefined>(undefined);
 	private syncing = false;
 
 	constructor() {
@@ -32,6 +35,7 @@ class ConductorSettingsState {
 	}
 
 	get providerStatus(): ProviderStatus {
+		if (this.providerError || this.missingApiKeyLogged) return "error";
 		return this.liveConnected ? "connected" : "disconnected";
 	}
 
@@ -64,11 +68,25 @@ class ConductorSettingsState {
 	applySession(conductor?: ConductorSnapshot): void {
 		if (!conductor) return;
 		this.config = conductorConfigFromPersisted(conductor.config);
+		this.missingApiKeyLogged = conductor.missingApiKeyLogged ?? false;
+		this.providerError = conductor.providerError;
 		this.persist();
 	}
 
+	/** JSON for `/conductor-config` when live mode is authoritative. */
+	conductorConfigCommandJson(): string {
+		return JSON.stringify(this.config);
+	}
+
+	private pushTimer: ReturnType<typeof setTimeout> | null = null;
+
 	pushToExtension(): void {
-		// TODO: wire to pi extension via Tauri invoke → /conductor-config
+		if (this.pushTimer) clearTimeout(this.pushTimer);
+		const config = this.config;
+		this.pushTimer = setTimeout(() => {
+			this.pushTimer = null;
+			postLiveCommand({ type: "config", patch: config, ts: Date.now() });
+		}, 400);
 	}
 
 	syncToStore(store: AccordionStore): void {

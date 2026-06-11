@@ -11,6 +11,7 @@ import {
 	FOLD_TARGET_MIN,
 	SUMMARY_MODEL,
 	WORKING_TAIL_TOKENS,
+	calibrateFoldTarget,
 	createAccordionState,
 	defaultConductorConfig,
 	mergeConductorConfig,
@@ -40,12 +41,13 @@ test("defaultConductorConfig returns values matching exported constants", () => 
 	assert.equal(config.foldTargetMin, FOLD_TARGET_MIN);
 	assert.equal(config.foldTargetMax, FOLD_TARGET_MAX);
 	assert.equal(config.foldTargetInitial, FOLD_TARGET_INITIAL);
-	assert.equal(config.summaryModel, SUMMARY_MODEL);
+	assert.equal(config.summaryModel, "");
+	assert.equal(SUMMARY_MODEL, "claude-haiku-4-5");
 	assert.equal(config.ollamaBaseUrl, DEFAULT_OLLAMA_BASE_URL);
 	assert.equal(config.ollamaModel, DEFAULT_OLLAMA_MODEL);
 	assert.equal(config.embeddingModel, EMBEDDING_MODEL);
 	assert.equal(config.summariesEnabled, true);
-	assert.equal(config.embeddingsEnabled, false);
+	assert.equal(config.embeddingsEnabled, true);
 	assert.equal(config.summaryTimeoutMs, DEFAULT_SUMMARY_TIMEOUT_MS);
 });
 
@@ -89,4 +91,19 @@ test("custom budgetTokens in config is respected through ConductorInput", () => 
 	});
 	assert.ok(output.assembledTokens <= state.config.budgetTokens);
 	assert.ok(parseMessages(output.messages).blocks.length > 0);
+});
+
+test("custom foldTargetMax in config caps calibrated fold target", () => {
+	const state = createAccordionState({
+		config: { foldTargetMax: 0.7, foldTargetMin: 0.6, foldTargetInitial: 0.65 },
+		foldTargetCalibrated: 0.65,
+	});
+	state.manualChanges = [
+		{ blockId: "b1", action: "unfold", actor: "you", turn: 9 },
+		{ blockId: "b2", action: "unfold", actor: "agent", turn: 9 },
+	];
+	state.lastCalibrationTurn = -1;
+	const target = calibrateFoldTarget(state, 10);
+	assert.ok(target <= 0.7);
+	assert.ok(target >= 0.6);
 });

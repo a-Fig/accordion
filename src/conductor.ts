@@ -90,6 +90,8 @@ export interface AccordionState {
 	pendingSummaryHashes: string[];
 	manualChanges: ManualChange[];
 	missingApiKeyLogged?: boolean;
+	/** Short provider failure message for live UI (summary/embedding). */
+	providerError?: string;
 	embeddingCache: Record<string, number[]>;
 	/** Graduated fold level per block id; absent or 0 means full. */
 	foldLevels: Record<string, FoldLevel>;
@@ -297,12 +299,12 @@ export function defaultConductorConfig(): ConductorConfig {
 		foldTargetMin: FOLD_TARGET_MIN,
 		foldTargetMax: FOLD_TARGET_MAX,
 		foldTargetInitial: FOLD_TARGET_INITIAL,
-		summaryModel: SUMMARY_MODEL,
+		summaryModel: "",
 		ollamaBaseUrl: DEFAULT_OLLAMA_BASE_URL,
 		ollamaModel: DEFAULT_OLLAMA_MODEL,
 		embeddingModel: EMBEDDING_MODEL,
 		summariesEnabled: true,
-		embeddingsEnabled: false,
+		embeddingsEnabled: true,
 		summaryTimeoutMs: DEFAULT_SUMMARY_TIMEOUT_MS,
 	};
 }
@@ -325,6 +327,8 @@ export function createAccordionState(seed: Partial<AccordionState> = {}): Accord
 		const normalized = normalizeLevel(seededLevels[id] ?? 2);
 		foldLevels[id] = normalized > 0 ? normalized : 2;
 	}
+	const config = mergeConductorConfig(seed.config);
+	const foldBand = foldTargetBand(config);
 	return {
 		foldedBlockIds: Object.keys(foldLevels),
 		pinnedBlockIds: [...(seed.pinnedBlockIds ?? [])],
@@ -333,16 +337,17 @@ export function createAccordionState(seed: Partial<AccordionState> = {}): Accord
 		pendingSummaryHashes: [...(seed.pendingSummaryHashes ?? [])],
 		manualChanges: [...(seed.manualChanges ?? [])],
 		missingApiKeyLogged: seed.missingApiKeyLogged ?? false,
+		providerError: seed.providerError,
 		embeddingCache: { ...(seed.embeddingCache ?? {}) },
 		foldLevels,
-		foldTargetCalibrated: clampFoldTarget(seed.foldTargetCalibrated ?? FOLD_TARGET_INITIAL),
+		foldTargetCalibrated: clampFoldTarget(seed.foldTargetCalibrated ?? config.foldTargetInitial, foldBand),
 		lastCalibrationTurn: seed.lastCalibrationTurn ?? -1,
 		recentProactiveUnfoldTurns: [...(seed.recentProactiveUnfoldTurns ?? [])],
 		lastRunHadPressure: seed.lastRunHadPressure ?? false,
 		lastRunWithinBudget: seed.lastRunWithinBudget ?? false,
 		calibrationEvents: [...(seed.calibrationEvents ?? [])].slice(-MAX_CALIBRATION_EVENTS),
 		conductorPins: { ...(seed.conductorPins ?? {}) },
-		config: mergeConductorConfig(seed.config),
+		config,
 	};
 }
 
@@ -353,9 +358,26 @@ export function normalizeLevel(level: unknown): FoldLevel {
 	return n as FoldLevel;
 }
 
-export function clampFoldTarget(value: number): number {
-	if (!Number.isFinite(value)) return FOLD_TARGET_INITIAL;
-	return Math.min(FOLD_TARGET_MAX, Math.max(FOLD_TARGET_MIN, value));
+export interface FoldTargetBand {
+	min?: number;
+	max?: number;
+	initial?: number;
+}
+
+export function foldTargetBand(config: ConductorConfig): FoldTargetBand {
+	return {
+		min: config.foldTargetMin,
+		max: config.foldTargetMax,
+		initial: config.foldTargetInitial,
+	};
+}
+
+export function clampFoldTarget(value: number, band: FoldTargetBand = {}): number {
+	const min = band.min ?? FOLD_TARGET_MIN;
+	const max = band.max ?? FOLD_TARGET_MAX;
+	const initial = band.initial ?? FOLD_TARGET_INITIAL;
+	if (!Number.isFinite(value)) return initial;
+	return Math.min(max, Math.max(min, value));
 }
 
 /** Tick the self-calibrating fold target for this turn. Pure given state + deps:
@@ -369,10 +391,11 @@ export function calibrateFoldTarget(
 	currentTurn: number,
 	deps: ConductorDependencies = {},
 ): number {
+	const band = foldTargetBand(state.config);
 	const rawPinned = parseFloat(process?.env?.ACCORDION_FIXED_TARGET ?? "");
 	const pinned = deps.fixedFoldTarget ?? (!isNaN(rawPinned) ? rawPinned : undefined);
 	if (pinned !== undefined) {
-		const target = clampFoldTarget(pinned);
+		const target = clampFoldTarget(pinned, band);
 		if (state.foldTargetCalibrated !== target) {
 			recordCalibration(state, { turn: currentTurn, from: state.foldTargetCalibrated, to: target, corrections: 0, reason: "pinned" });
 			state.foldTargetCalibrated = target;
@@ -380,7 +403,7 @@ export function calibrateFoldTarget(
 		return target;
 	}
 
-	const from = clampFoldTarget(state.foldTargetCalibrated ?? FOLD_TARGET_INITIAL);
+	const from = clampFoldTarget(state.foldTargetCalibrated ?? state.config.foldTargetInitial, band);
 	if (state.lastCalibrationTurn >= currentTurn) return from;
 
 	const inWindow = (turn: number) =>
@@ -394,10 +417,10 @@ export function calibrateFoldTarget(
 	let to = from;
 	let reason: CalibrationEvent["reason"] = "hold";
 	if (corrections > 0) {
-		to = clampFoldTarget(from + Math.min(CALIBRATION_UP_MAX_PER_TURN, corrections * CALIBRATION_UP_STEP));
+		to = clampFoldTarget(from + Math.min(CALIBRATION_UP_MAX_PER_TURN, corrections * CALIBRATION_UP_STEP), band);
 		reason = "correction";
 	} else if (state.lastRunHadPressure && state.lastRunWithinBudget) {
-		to = clampFoldTarget(from - CALIBRATION_DOWN_STEP);
+		to = clampFoldTarget(from - CALIBRATION_DOWN_STEP, band);
 		reason = "decay";
 	}
 
@@ -828,7 +851,7 @@ export function choosePromptWeights(
 	currentTurn: number,
 	calibratedTarget: number = FOLD_TARGET_INITIAL,
 ): PromptWeights {
-	const target = clampFoldTarget(calibratedTarget);
+	const target = clampFoldTarget(calibratedTarget, foldTargetBand(state.config));
 	let weights: PromptWeights;
 	if (hasIdentifierOrError(prompt)) {
 		weights = { kind: 0.3, keyword: 0.6, recency: 0.1, foldTargetRatio: target };
@@ -1195,7 +1218,10 @@ function applyFoldedContent(messages: AgentMessage[], block: ContextBlock, summa
 export function runConductor(input: ConductorInput, deps: ConductorDependencies = {}): ConductorOutput {
 	const parsed = parseMessages(input.messages);
 	const warnings: string[] = [];
-	const restingTarget = clampFoldTarget(input.state.foldTargetCalibrated ?? FOLD_TARGET_INITIAL);
+	const restingTarget = clampFoldTarget(
+		input.state.foldTargetCalibrated ?? input.state.config.foldTargetInitial,
+		foldTargetBand(input.state.config),
+	);
 	if (parsed.turns.length === 0 || parsed.blocks.length === 0) {
 		return { messages: input.messages, decisions: [], warnings, proactiveUnfolds: [], foldTarget: restingTarget, assembledTokens: 0 };
 	}

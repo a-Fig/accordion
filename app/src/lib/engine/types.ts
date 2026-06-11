@@ -16,7 +16,7 @@ export type BlockKind =
 	| "tool_result"; // WHAT the agent saw (often huge, decays fast)
 
 /** Who last changed a block's fold state. */
-export type Actor = "you" | "agent" | "auto";
+export type Actor = "you" | "agent" | "auto" | "conductor";
 
 /** A bundle of consecutive leading folded turns (display grouping only). */
 export interface TurnGroup {
@@ -80,6 +80,13 @@ export interface SessionMeta {
 export interface ConductorSnapshot {
 	config: import("./conductor-config").ConductorConfig;
 	foldTargetCalibrated: number;
+	missingApiKeyLogged?: boolean;
+	providerError?: string;
+	foldedBlockIds?: string[];
+	foldLevels?: Record<string, 0 | 1 | 2 | 3>;
+	/** blockId → LLM summary text (only for currently-folded blocks) */
+	foldedSummaries?: Record<string, string>;
+	calibrationEvents?: Array<{ turn: number; from: number; to: number; reason: string }>;
 }
 
 export interface ParsedSession {

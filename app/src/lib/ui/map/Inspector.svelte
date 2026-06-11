@@ -58,8 +58,11 @@
 		</div>
 
 		{#if folded}
-			<div class="digestlbl">Digest in context now</div>
-			<pre class="digest mono">{store.digestOf(block)}</pre>
+			{@const hasLLM = !!store.summaryCache[block.id]}
+			<div class="digestlbl">
+				{hasLLM ? "LLM summary in context now" : "Digest in context now"}
+			</div>
+			<pre class="digest mono" class:llm={hasLLM}>{store.digestOf(block)}</pre>
 			<div class="digestlbl">Original content (peek only; unfold to restore to context)</div>
 		{/if}
 		<pre class="content" class:mono={block.kind === "tool_call" || block.kind === "tool_result"}>{bd.text}</pre>
@@ -201,6 +204,11 @@
 		color: var(--warn);
 		white-space: pre-wrap;
 		word-break: break-word;
+	}
+	.digest.llm {
+		color: var(--ok);
+		border-style: solid;
+		border-color: color-mix(in srgb, var(--ok) 35%, var(--line));
 	}
 	.content {
 		margin: 8px 14px 0;
