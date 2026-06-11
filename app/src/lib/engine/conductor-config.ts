@@ -60,7 +60,7 @@ export function defaultConductorConfig(): ConductorConfig {
 		foldTargetMax: 0.92,
 		foldTargetInitial: 0.8,
 		summaryModel: "",
-		ollamaBaseUrl: "http://localhost:11434/v1",
+		ollamaBaseUrl: "http://localhost:11434",
 		ollamaModel: "llama3.2:3b",
 		embeddingModel: "Xenova/all-MiniLM-L6-v2",
 		summariesEnabled: true,

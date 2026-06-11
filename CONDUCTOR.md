@@ -42,7 +42,7 @@ Defaults live at the top of `src/conductor.ts`:
 - `EMBEDDING_MODEL = "Xenova/all-MiniLM-L6-v2"` — 384d, 256-token input cap; no prefixes needed. For longer tool outputs upgrade to `"nomic-ai/nomic-embed-text-v1.5"` (768d, 8k ctx) but that model requires `"search_document:"` / `"search_query:"` prefixes on inputs. Override at runtime via env var `ACCORDION_EMBEDDING_MODEL`. The provider handles the prefixing automatically for known models like `nomic-embed-text`.
 - `UNFOLD_FEEDBACK_TURNS = 5`
 - `SUMMARY_MODEL = "claude-haiku-4-5"`
-- `DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434/v1"`
+- `DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"`
 - `DEFAULT_OLLAMA_MODEL = "llama3.2:3b"`
 - `DEFAULT_SUMMARY_TIMEOUT_MS = 30_000`
 - `CONDUCTOR_PIN_LIFETIME = 3` — how many turns a conductor-initiated pin remains active before expiring. Renewal resets the clock.
@@ -202,7 +202,7 @@ For a true `/compact` comparison, generate the external template and guide, repl
 
 Folded blocks use deterministic digests immediately. The pi extension keeps Anthropic Haiku as the default provider: if `ANTHROPIC_API_KEY` is set, it schedules async `claude-haiku-4-5` summaries off the critical path and caches them by SHA-256 content hash. Missing or failing summary calls never block context assembly.
 
-`src/conductor.ts` also exports `createOllamaSummaryProvider()` for local testing and alternate deployments. It uses Ollama's OpenAI-compatible endpoint at `http://localhost:11434/v1/chat/completions`; the model defaults to `llama3.2:3b` and can be overridden with the provider option or `OLLAMA_SUMMARY_MODEL` in the live test.
+`src/conductor.ts` also exports `createOllamaSummaryProvider()` for local testing and alternate deployments. The config default is the Ollama root URL `http://localhost:11434`; the provider normalizes that to Ollama's OpenAI-compatible `/v1/chat/completions` endpoint. The model defaults to `llama3.2:3b` and can be overridden with the provider option or `OLLAMA_SUMMARY_MODEL` in the live test.
 
 Run the fast claim/invariant suite with `npm run test:claims`. It verifies equal-budget assembly, reversible/non-mutating folds, provider-safe tool pairs, protected-tail behavior, and semantic restore on a deterministic fixture.
 

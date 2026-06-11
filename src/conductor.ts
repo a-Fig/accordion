@@ -237,7 +237,7 @@ export const EMBEDDING_MODEL = process?.env?.ACCORDION_EMBEDDING_MODEL || "Xenov
 export const UNFOLD_FEEDBACK_TURNS = 5;
 export const HIGH_UNFOLD_RATE = 2;
 export const SUMMARY_MODEL = "claude-haiku-4-5";
-export const DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434/v1";
+export const DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434";
 export const DEFAULT_OLLAMA_MODEL = "llama3.2:3b";
 export const DEFAULT_SUMMARY_TIMEOUT_MS = 30_000;
 /** Conductor pins expire after this many turns without renewal (auto-fold protection). */
@@ -612,11 +612,17 @@ function getText(content: unknown): string {
 	return "";
 }
 
+const MAX_SUMMARY_INPUT_CHARS = 4_000;
+
 function summaryPrompt(block: ContextBlock, digest: string): string {
+	const text =
+		block.text.length > MAX_SUMMARY_INPUT_CHARS
+			? `${block.text.slice(0, MAX_SUMMARY_INPUT_CHARS)}\n[... truncated at ${MAX_SUMMARY_INPUT_CHARS} chars]`
+			: block.text;
 	return (
 		`Summarize this Accordion ${block.kind} block for future agent context. ` +
 		`Keep durable facts, decisions, filenames, errors, and outcomes. Be concise.\n\n` +
-		`Fallback digest:\n${digest}\n\nFull block:\n${block.text}`
+		`Fallback digest:\n${digest}\n\nFull block:\n${text}`
 	);
 }
 
@@ -1804,9 +1810,14 @@ export function createOpenAICompatibleSummaryProvider(
 	};
 }
 
+function ollamaOpenAIBaseUrl(baseUrl: string): string {
+	const trimmed = baseUrl.replace(/\/$/, "");
+	return /\/v\d+(?:\/|$)/.test(trimmed) ? trimmed : `${trimmed}/v1`;
+}
+
 export function createOllamaSummaryProvider(options: OllamaSummaryProviderOptions = {}): SummaryProvider {
 	return createOpenAICompatibleSummaryProvider({
-		baseUrl: options.baseUrl ?? DEFAULT_OLLAMA_BASE_URL,
+		baseUrl: ollamaOpenAIBaseUrl(options.baseUrl ?? DEFAULT_OLLAMA_BASE_URL),
 		model: options.model ?? DEFAULT_OLLAMA_MODEL,
 		timeoutMs: options.timeoutMs,
 	});

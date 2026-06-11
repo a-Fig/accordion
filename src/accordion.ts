@@ -64,11 +64,14 @@ function effectiveEmbeddingsEnabled(config: ConductorConfig): boolean {
 	return config.embeddingsEnabled || ENV_EMBEDDINGS_ENABLED;
 }
 
-/** Default Ollama; cloud APIs only when summaryModel names them or ACCORDION_OLLAMA=0. */
+/** Default Ollama; prefer Gemini when GOOGLE_API_KEY is set (faster, no local timeout risk).
+ *  Force Ollama with ACCORDION_OLLAMA=1; force cloud with ACCORDION_OLLAMA=0. */
 function useOllamaSummary(config: ConductorConfig): boolean {
 	const env = process.env.ACCORDION_OLLAMA;
 	if (env === "0" || env === "false") return false;
 	if (env === "1" || env === "true") return true;
+	// Auto-prefer Gemini when key is available and no explicit model override
+	if (process.env.GOOGLE_API_KEY && !config.summaryModel.trim()) return false;
 	const m = config.summaryModel.trim().toLowerCase();
 	if (!m || m === config.ollamaModel.trim().toLowerCase()) return true;
 	if (m.includes("claude") || m.includes("haiku") || m.includes("gemini")) return false;
