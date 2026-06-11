@@ -1,8 +1,9 @@
 <script lang="ts">
 	import { summaryBackend } from "../engine/conductor-config";
 	import { conductorSettings } from "../engine/conductor-settings.svelte";
+	import type { AccordionStore } from "../engine/store.svelte";
 
-	let { foldTargetCalibrated = 0.8 }: { foldTargetCalibrated?: number } = $props();
+	let { foldTargetCalibrated = 0.8, store = null }: { foldTargetCalibrated?: number; store?: AccordionStore | null } = $props();
 
 	const config = $derived(conductorSettings.config);
 	const summary = $derived(summaryBackend(config));
@@ -72,6 +73,16 @@
 				<button class="copy" onclick={copyConfigCommand}>{copied ? "Copied!" : "Copy /conductor-config command"}</button>
 			{/if}
 			<button class="reset" onclick={() => conductorSettings.reset()}>Reset to defaults</button>
+			{#if store && store.calibrationEvents.length > 0}
+				<div class="activity">
+					<div class="act-label">Conductor activity</div>
+					{#each store.calibrationEvents.slice(-5).reverse() as ev}
+						<div class="act-row mono">
+							t{ev.turn}&nbsp;&nbsp;{Math.round(ev.from * 100)}%→{Math.round(ev.to * 100)}%&nbsp;&nbsp;<span class="act-reason">{ev.reason ?? ""}</span>
+						</div>
+					{/each}
+				</div>
+			{/if}
 		</div>
 	{/if}
 </div>
@@ -84,7 +95,12 @@
 		position: absolute; right: 0; top: calc(100% + 6px); z-index: 20;
 		width: min(320px, 92vw); padding: 10px 12px; display: flex; flex-direction: column; gap: 8px;
 		background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--radius-sm);
-		box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+		box-shadow: var(--elev-3), 0 8px 24px rgba(0, 0, 0, 0.35);
+		animation: panel-open var(--dur-1) var(--ease-out) both;
+	}
+	@keyframes panel-open {
+		from { opacity: 0; transform: scale(0.97); }
+		to   { opacity: 1; transform: scale(1); }
 	}
 	.ro { display: flex; justify-content: space-between; gap: 8px; font-size: 11px; color: var(--faint); }
 	.ro .mono { color: var(--muted); font-size: 10px; text-align: right; }
@@ -107,4 +123,8 @@
 	.reset { align-self: flex-start; background: var(--panel-3); border: 1px solid var(--line); color: var(--text); padding: 4px 10px; border-radius: var(--radius-sm); font-size: 11px; }
 	.reset:hover { background: var(--line); }
 	.mono { font-family: var(--mono); }
+	.activity { margin-top: 10px; border-top: 1px solid var(--line-soft); padding-top: 8px; }
+	.act-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--faint); margin-bottom: 4px; }
+	.act-row { font-size: 11px; color: var(--muted); line-height: 1.6; }
+	.act-reason { color: var(--faint); }
 </style>

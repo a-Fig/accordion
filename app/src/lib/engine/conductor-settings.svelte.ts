@@ -105,6 +105,7 @@ class ConductorSettingsState {
 		this.syncing = true;
 		this.config = { ...this.config, budgetTokens: budget, workingTailTokens: tail };
 		this.persist();
+		this.pushToExtension();
 		this.syncing = false;
 	}
 

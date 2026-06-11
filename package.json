@@ -4,8 +4,7 @@
 	"main": "src/accordion.ts",
 	"type": "module",
 	"pi": {
-		"extensions": ["./src/accordion.ts"],
-		"skills": ["./skills"]
+		"extensions": ["./src/accordion.ts"]
 	},
 	"scripts": {
 		"test": "node --test --experimental-strip-types src/*.test.ts",

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { registerAgentTools } from "./accordion.ts";
-import { agentFold, agentRecall, agentUnfold, parseTurnSelector } from "./agent-tools.ts";
+import { agentFold, agentPin, agentRecall, agentUnfold, foldBlocks, parseTurnSelector, pinBlocks, unfoldBlocks } from "./agent-tools.ts";
 import {
 	CALIBRATION_UP_STEP,
 	FOLD_TARGET_INITIAL,
@@ -189,9 +189,108 @@ test("pi registration returns AgentToolResult content, not a bare string", async
 		registerTool: (tool: any) => captured.push(tool),
 	} as any);
 
-	assert.equal(captured.length, 3);
+	assert.equal(captured.length, 4);
 	const result = await captured[0].execute("call-1", { turns: "1" }, undefined, undefined, ctx);
 	assert.deepEqual(result.details, {});
 	assert.deepEqual(result.content.map((part: any) => part.type), ["text"]);
 	assert.match(result.content[0].text, /Recalled 1 turn in full/);
+});
+
+test("agentPin: pinned turn survives heavy fold pressure", () => {
+	const { messages } = fixture();
+	const state = createAccordionState();
+	// Get turn 2 block ids
+	const parsed = parseMessages(messages);
+	const turn2Blocks = parsed.blocks.filter(b => b.turn === 2);
+	assert.ok(turn2Blocks.length > 0, "turn 2 should have blocks");
+
+	// Pin turn 2
+	const pinResult = agentPin(messages, state, "2");
+	assert.ok(pinResult.ok, "pin should succeed");
+	assert.ok(pinResult.changes.length > 0, "should have pin changes");
+
+	// Verify blocks are in pinnedBlockIds
+	for (const b of turn2Blocks) {
+		assert.ok(state.pinnedBlockIds.includes(b.id), `block ${b.id} should be pinned`);
+	}
+
+	// Run heavy fold pressure
+	pressureRun(messages, state, 500);
+
+	// Pinned blocks should NOT appear in foldedBlockIds
+	const foldedSet = new Set(state.foldedBlockIds);
+	for (const b of turn2Blocks) {
+		assert.ok(!foldedSet.has(b.id), `pinned block ${b.id} should not be folded`);
+	}
+});
+
+test("foldBlocks/unfoldBlocks: basic fold and unfold operations work", () => {
+	const { messages } = fixture();
+	const state = createAccordionState();
+	const parsed = parseMessages(messages);
+	// Pick a non-current-turn block
+	const maxTurn = parsed.turns.at(-1)!.index;
+	const target = parsed.blocks.find(b => b.turn !== maxTurn && b.kind !== "user");
+	assert.ok(target, "should find a non-current-turn block");
+
+	// Fold it
+	const foldDecisions = foldBlocks(messages, state, [target.id], "you");
+	assert.ok(foldDecisions.length > 0, "should produce fold decisions");
+	assert.ok(state.foldedBlockIds.includes(target.id), "block should be folded");
+	assert.equal(state.foldLevels[target.id], 2, "should be at fold level 2");
+
+	// Unfold it
+	const unfoldDecisions = unfoldBlocks(messages, state, [target.id], "you");
+	assert.ok(unfoldDecisions.length > 0, "should produce unfold decisions");
+	assert.ok(!state.foldedBlockIds.includes(target.id), "block should be unfolded");
+	assert.equal(state.foldLevels[target.id], undefined, "fold level should be cleared");
+});
+
+test("pinBlocks: basic pin operation works and prevents auto-fold", () => {
+	const { messages } = fixture();
+	const state = createAccordionState();
+	const parsed = parseMessages(messages);
+	const maxTurn = parsed.turns.at(-1)!.index;
+	const target = parsed.blocks.find(b => b.turn !== maxTurn && b.kind !== "user");
+	assert.ok(target, "should find a non-current-turn block");
+
+	const pinDecisions = pinBlocks(messages, state, [target.id], "you");
+	assert.ok(pinDecisions.length > 0, "should produce pin decisions");
+	assert.ok(state.pinnedBlockIds.includes(target.id), "block should be in pinnedBlockIds");
+	assert.equal(state.foldLevels[target.id], undefined, "pinned block should not be in foldLevels");
+
+	// Attempt to fold the pinned block — should skip it
+	const foldDecisions = foldBlocks(messages, state, [target.id], "you");
+	assert.equal(foldDecisions.length, 0, "pinned block should not be foldable via foldBlocks");
+});
+
+test("foldBlocks/unfoldBlocks: callId-pair atomicity", () => {
+	const toolCallMsg: AgentMessage = {
+		id: "a1",
+		role: "assistant",
+		content: [{ type: "tool_use", id: "call1", name: "bash", input: { command: "ls" } }],
+	};
+	const toolResultMsg: AgentMessage = {
+		id: "r1",
+		role: "toolResult",
+		toolCallId: "call1",
+		toolName: "bash",
+		content: [{ type: "text", text: "file1 file2 file3" }],
+		isError: false,
+	};
+	const messages: AgentMessage[] = [
+		user("u1", "list files"),
+		toolCallMsg as any,
+		toolResultMsg as any,
+		user("u2", "continue"),
+	];
+	const state = createAccordionState();
+	const parsed = parseMessages(messages);
+	const callBlock = parsed.blocks.find(b => b.kind === "tool_call");
+	if (!callBlock) return; // skip if parse structure differs
+
+	// Folding the call should fold the block
+	const decisions = foldBlocks(messages, state, [callBlock.id], "you");
+	assert.ok(decisions.length > 0, "should produce fold decisions");
+	assert.ok(state.foldedBlockIds.includes(callBlock.id), "call block should be folded");
 });

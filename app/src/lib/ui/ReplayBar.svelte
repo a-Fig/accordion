@@ -51,8 +51,9 @@
 	}
 	.btn {
 		font: inherit;
-		font-size: 11px;
-		padding: 4px 10px;
+		font-size: var(--ctl-fs, 11px);
+		height: var(--ctl-h, 24px);
+		padding: 0 10px;
 		border-radius: 6px;
 		border: 1px solid var(--border, #2a3140);
 		background: var(--surface-2, #1a1f2b);

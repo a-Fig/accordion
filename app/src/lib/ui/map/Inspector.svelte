@@ -94,6 +94,7 @@
 		background: var(--panel);
 		border-left: 1px solid var(--line);
 		overflow-y: auto;
+		box-shadow: var(--elev-3);
 	}
 	header {
 		display: flex;

@@ -5,6 +5,13 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter};
 
+fn commands_path() -> PathBuf {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_default();
+    PathBuf::from(home).join(".pi/agent/accordion-commands.jsonl")
+}
+
 fn live_path() -> PathBuf {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
@@ -124,6 +131,26 @@ fn stop_live_watch() -> Result<(), String> {
 }
 
 #[tauri::command]
+fn post_conductor_command(cmd: String) -> Result<(), String> {
+    // Validate JSON
+    serde_json::from_str::<serde_json::Value>(&cmd).map_err(|e| format!("invalid JSON: {e}"))?;
+    let path = commands_path();
+    // Create parent dirs if needed
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    // Append cmd + newline
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| e.to_string())?;
+    writeln!(file, "{}", cmd).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
 fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
 }
@@ -132,7 +159,7 @@ fn greet(name: &str) -> String {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![greet, start_live_watch, stop_live_watch])
+        .invoke_handler(tauri::generate_handler![greet, start_live_watch, stop_live_watch, post_conductor_command])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

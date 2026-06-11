@@ -11,7 +11,7 @@ import { readFile as readFileAsync, unlink as unlinkAsync } from "node:fs/promis
 import { homedir } from "node:os";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { AGENT_TOOL_DEFS, agentFold, agentRecall, agentUnfold } from "./agent-tools.ts";
+import { AGENT_TOOL_DEFS, agentFold, agentPin, agentRecall, agentUnfold, foldBlocks, pinBlocks, unfoldBlocks, unpinBlocks } from "./agent-tools.ts";
 import { ACCORDION_AGENT_SKILL } from "./accordion-skill.ts";
 import {
 	applyDecisionsToState,
@@ -90,7 +90,9 @@ function buildSummaryProvider(config: ConductorConfig): SummaryProvider | undefi
 	if (!base) return undefined;
 	return async (input) => {
 		try {
-			return await base!(input);
+			const result = await base!(input);
+			if (result.startsWith("Summary:")) state.providerError = undefined;
+			return result;
 		} catch (error: any) {
 			state.providerError = `Summary: ${error?.message || error}`.slice(0, 200);
 			throw error;
@@ -179,22 +181,24 @@ function resetProviders(): void {
 /**
  * Drain app-side commands queued in COMMANDS_PATH (written by the 1420 app's
  * command bridge). Each line is a JSON command; commands older than 60 s are
- * skipped. Returns true if any command mutated state (caller should persist).
+ * skipped. Returns { changed, decisions } where changed is true if any command
+ * mutated state and decisions collects FoldDecision records for persistence.
  */
-async function drainCommands(messages: AgentMessage[]): Promise<boolean> {
+async function drainCommands(messages: AgentMessage[]): Promise<{ changed: boolean; decisions: FoldDecision[] }> {
 	let raw: string;
 	try {
 		raw = await readFileAsync(COMMANDS_PATH, "utf8");
 		await unlinkAsync(COMMANDS_PATH).catch(() => {});
 	} catch {
-		return false; // no commands file — nothing to drain
+		return { changed: false, decisions: [] }; // no commands file — nothing to drain
 	}
 
 	const now = Date.now();
 	const lines = raw.split("\n").filter(Boolean);
-	if (lines.length === 0) return false;
+	if (lines.length === 0) return { changed: false, decisions: [] };
 
 	let changed = false;
+	const decisions: FoldDecision[] = [];
 	for (const line of lines) {
 		try {
 			const cmd = JSON.parse(line) as Record<string, unknown>;
@@ -211,37 +215,70 @@ async function drainCommands(messages: AgentMessage[]): Promise<boolean> {
 					break;
 				}
 				case "fold": {
-					if (!Number.isFinite(cmd.turnIndex) || messages.length === 0) break;
-					const r = agentFold(messages, state, String(cmd.turnIndex));
-					if (r.changes.length) changed = true;
+					if (messages.length === 0) break;
+					if (cmd.blockId) {
+						const r = foldBlocks(messages, state, [cmd.blockId as string], "you");
+						if (r.length) { changed = true; decisions.push(...r); }
+					} else {
+						if (!Number.isFinite(cmd.turnIndex)) break;
+						const r = agentFold(messages, state, String(cmd.turnIndex));
+						if (r.changes.length) {
+							for (const c of r.changes) c.actor = "you";
+							changed = true;
+							decisions.push(...r.changes);
+						}
+					}
 					break;
 				}
 				case "unfold": {
-					if (!Number.isFinite(cmd.turnIndex) || messages.length === 0) break;
-					const r = agentUnfold(messages, state, String(cmd.turnIndex));
-					if (r.changes.length) changed = true;
+					if (messages.length === 0) break;
+					if (cmd.blockId) {
+						const r = unfoldBlocks(messages, state, [cmd.blockId as string], "you");
+						if (r.length) { changed = true; decisions.push(...r); }
+					} else {
+						if (!Number.isFinite(cmd.turnIndex)) break;
+						const r = agentUnfold(messages, state, String(cmd.turnIndex));
+						if (r.changes.length) {
+							for (const c of r.changes) c.actor = "you";
+							changed = true;
+							decisions.push(...r.changes);
+						}
+					}
 					break;
 				}
 				case "pin": {
-					if (!Number.isFinite(cmd.turnIndex) || messages.length === 0) break;
-					const parsed = parseMessages(messages);
-					if (!parsed.turns.some((t) => t.index === cmd.turnIndex)) break;
-					if (!state.pinnedTurnIndexes.includes(cmd.turnIndex as number)) state.pinnedTurnIndexes.push(cmd.turnIndex as number);
-					const foldedSet = new Set(state.foldedBlockIds);
-					for (const block of parsed.blocks) {
-						if (block.turn !== cmd.turnIndex) continue;
-						foldedSet.delete(block.id);
-						delete state.foldLevels[block.id];
+					if (messages.length === 0) break;
+					if (cmd.blockId) {
+						const r = pinBlocks(messages, state, [cmd.blockId as string], "you");
+						if (r.length) { changed = true; decisions.push(...r); }
+					} else {
+						if (!Number.isFinite(cmd.turnIndex)) break;
+						const parsed = parseMessages(messages);
+						if (!parsed.turns.some((t) => t.index === cmd.turnIndex)) break;
+						if (!state.pinnedTurnIndexes.includes(cmd.turnIndex as number)) state.pinnedTurnIndexes.push(cmd.turnIndex as number);
+						const foldedSet = new Set(state.foldedBlockIds);
+						const maxTurn = parsed.turns.at(-1)?.index ?? 0;
+						for (const block of parsed.blocks) {
+							if (block.turn !== cmd.turnIndex) continue;
+							foldedSet.delete(block.id);
+							delete state.foldLevels[block.id];
+						}
+						state.foldedBlockIds = [...foldedSet];
+						changed = true;
 					}
-					state.foldedBlockIds = [...foldedSet];
-					changed = true;
 					break;
 				}
 				case "unpin": {
-					if (!Number.isFinite(cmd.turnIndex) || messages.length === 0) break;
-					const before = state.pinnedTurnIndexes.length;
-					state.pinnedTurnIndexes = state.pinnedTurnIndexes.filter((n) => n !== cmd.turnIndex);
-					if (state.pinnedTurnIndexes.length !== before) changed = true;
+					if (messages.length === 0) break;
+					if (cmd.blockId) {
+						const r = unpinBlocks(messages, state, [cmd.blockId as string], "you");
+						if (r.length) { changed = true; decisions.push(...r); }
+					} else {
+						if (!Number.isFinite(cmd.turnIndex)) break;
+						const before = state.pinnedTurnIndexes.length;
+						state.pinnedTurnIndexes = state.pinnedTurnIndexes.filter((n) => n !== cmd.turnIndex);
+						if (state.pinnedTurnIndexes.length !== before) changed = true;
+					}
 					break;
 				}
 				case "reset": {
@@ -258,7 +295,7 @@ async function drainCommands(messages: AgentMessage[]): Promise<boolean> {
 			/* skip malformed lines */
 		}
 	}
-	return changed;
+	return { changed, decisions };
 }
 
 function restoreState(ctx: ExtensionContext): void {
@@ -384,7 +421,9 @@ export default function accordionExtension(pi: ExtensionAPI): void {
 
 	pi.on("context", async (event, ctx) => {
 		// Drain any commands queued by the 1420 app before running the Conductor.
-		if (await drainCommands(event.messages as AgentMessage[])) {
+		const { changed: cmdChanged, decisions: cmdDecisions } = await drainCommands(event.messages as AgentMessage[]);
+		if (cmdChanged) {
+			if (cmdDecisions.length) persistDecisions(pi, cmdDecisions);
 			persist(pi);
 		}
 
@@ -733,6 +772,15 @@ export function registerAgentTools(pi: ExtensionAPI): void {
 	});
 	wire(AGENT_TOOL_DEFS[2], (messages, turns, ctx) => {
 		const result = agentFold(messages, state, turns);
+		if (result.changes.length) {
+			persistDecisions(pi, result.changes);
+			persist(pi, parseMessages(messages).blocks);
+			if (ctx) writeLiveSnapshot(ctx);
+		}
+		return result.message;
+	});
+	wire(AGENT_TOOL_DEFS[3], (messages, turns, ctx) => {
+		const result = agentPin(messages, state, turns);
 		if (result.changes.length) {
 			persistDecisions(pi, result.changes);
 			persist(pi, parseMessages(messages).blocks);

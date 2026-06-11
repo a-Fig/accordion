@@ -25,6 +25,27 @@ import {
 	type FoldLevel,
 } from "./conductor.ts";
 
+function expandToPair(blocks: ContextBlock[], blockId: string): ContextBlock[] {
+	const b = blocks.find(x => x.id === blockId);
+	if (!b) return [];
+	if (!b.callId || (b.kind !== "tool_call" && b.kind !== "tool_result")) return [b];
+	const pair = blocks.filter(x => x.callId === b.callId && (x.kind === "tool_call" || x.kind === "tool_result"));
+	const calls = pair.filter(x => x.kind === "tool_call");
+	const results = pair.filter(x => x.kind === "tool_result");
+	return pair.length === 2 && calls.length === 1 && results.length === 1 ? pair.sort((a, z) => a.order - z.order) : [b];
+}
+
+function changeRecord2(
+	block: ContextBlock,
+	action: "fold" | "unfold" | "pin" | "unpin",
+	level: FoldLevel,
+	fromLevel: FoldLevel,
+	currentTurn: number,
+	reason: string,
+): FoldDecision {
+	return { blockId: block.id, action: action as FoldDecision["action"], actor: "agent", reason, turn: currentTurn, kind: block.kind, callId: block.callId, level, fromLevel };
+}
+
 export interface AgentToolOutcome {
 	ok: boolean;
 	/** One-line confirmation or error, written for the model to read. */
@@ -201,6 +222,131 @@ export function agentFold(messages: AgentMessage[], state: AccordionState, selec
 	};
 }
 
+export function foldBlocks(
+	messages: AgentMessage[],
+	state: AccordionState,
+	blockIds: string[],
+	actor: string = "you",
+): FoldDecision[] {
+	const parsed = parseMessages(messages);
+	const maxTurn = parsed.turns.at(-1)?.index ?? 0;
+	const pinnedBlocks = new Set(state.pinnedBlockIds);
+	const changes: FoldDecision[] = [];
+	for (const id of blockIds) {
+		const unit = expandToPair(parsed.blocks, id);
+		for (const b of unit) {
+			if (pinnedBlocks.has(b.id) || b.turn === maxTurn) continue;
+			const fromLevel = (state.foldLevels[b.id] ?? 0) as FoldLevel;
+			if (fromLevel >= 2) continue;
+			state.foldLevels[b.id] = 2;
+			changes.push(changeRecord2(b, "fold", 2, fromLevel, maxTurn, "app command"));
+		}
+	}
+	state.foldedBlockIds = Object.keys(state.foldLevels);
+	state.manualChanges.push(...changes.map(c => ({ blockId: c.blockId, action: c.action as "fold"|"unfold", actor: actor as "you"|"agent", turn: c.turn })));
+	state.manualChanges = state.manualChanges.slice(-200);
+	return changes;
+}
+
+export function unfoldBlocks(
+	messages: AgentMessage[],
+	state: AccordionState,
+	blockIds: string[],
+	actor: string = "you",
+): FoldDecision[] {
+	const parsed = parseMessages(messages);
+	const maxTurn = parsed.turns.at(-1)?.index ?? 0;
+	const changes: FoldDecision[] = [];
+	for (const id of blockIds) {
+		const unit = expandToPair(parsed.blocks, id);
+		for (const b of unit) {
+			const level = (state.foldLevels[b.id] ?? 0) as FoldLevel;
+			if (level === 0) continue;
+			delete state.foldLevels[b.id];
+			changes.push(changeRecord2(b, "unfold", 0, level, maxTurn, "app command"));
+		}
+	}
+	state.foldedBlockIds = Object.keys(state.foldLevels);
+	state.manualChanges.push(...changes.map(c => ({ blockId: c.blockId, action: "unfold" as const, actor: actor as "you"|"agent", turn: c.turn })));
+	state.manualChanges = state.manualChanges.slice(-200);
+	return changes;
+}
+
+export function pinBlocks(
+	messages: AgentMessage[],
+	state: AccordionState,
+	blockIds: string[],
+	actor: string = "you",
+): FoldDecision[] {
+	const parsed = parseMessages(messages);
+	const maxTurn = parsed.turns.at(-1)?.index ?? 0;
+	const changes: FoldDecision[] = [];
+	for (const id of blockIds) {
+		const unit = expandToPair(parsed.blocks, id);
+		for (const b of unit) {
+			if (!state.pinnedBlockIds.includes(b.id)) state.pinnedBlockIds.push(b.id);
+			const fromLevel = (state.foldLevels[b.id] ?? 0) as FoldLevel;
+			delete state.foldLevels[b.id];
+			changes.push(changeRecord2(b, "pin", 0, fromLevel, maxTurn, "app command"));
+		}
+	}
+	state.foldedBlockIds = Object.keys(state.foldLevels);
+	// pin decisions use action "pin" \u2014 push a synthetic unfold to manualChanges for calibrator
+	state.manualChanges.push(...changes.map(c => ({ blockId: c.blockId, action: "unfold" as const, actor: actor as "you"|"agent", turn: c.turn })));
+	state.manualChanges = state.manualChanges.slice(-200);
+	return changes;
+}
+
+export function unpinBlocks(
+	messages: AgentMessage[],
+	state: AccordionState,
+	blockIds: string[],
+	actor: string = "you",
+): FoldDecision[] {
+	const parsed = parseMessages(messages);
+	const maxTurn = parsed.turns.at(-1)?.index ?? 0;
+	const changes: FoldDecision[] = [];
+	for (const id of blockIds) {
+		const before = state.pinnedBlockIds.length;
+		state.pinnedBlockIds = state.pinnedBlockIds.filter(x => x !== id);
+		if (state.pinnedBlockIds.length !== before) {
+			const b = parsed.blocks.find(x => x.id === id);
+			if (b) changes.push(changeRecord2(b, "unpin", 0, 0, maxTurn, "app command"));
+		}
+	}
+	return changes;
+}
+
+export function agentPin(messages: AgentMessage[], state: AccordionState, selector: string): AgentToolOutcome {
+	const parsed = parseMessages(messages);
+	const maxTurn = parsed.turns.at(-1)?.index ?? 0;
+	const turns = parseTurnSelector(selector, maxTurn);
+	if (turns.length === 0) return { ok: false, message: badSelector(selector, maxTurn), turns: [], changes: [] };
+
+	const changes: FoldDecision[] = [];
+	for (const block of blocksForTurns(parsed.blocks, turns)) {
+		if (!state.pinnedBlockIds.includes(block.id)) state.pinnedBlockIds.push(block.id);
+		const fromLevel = (state.foldLevels[block.id] ?? 0) as FoldLevel;
+		delete state.foldLevels[block.id];
+		changes.push(changeRecord2(block, "pin", 0, fromLevel, maxTurn, "agent pinned"));
+	}
+	state.foldedBlockIds = Object.keys(state.foldLevels);
+	state.manualChanges.push(
+		...changes.map(c => ({ blockId: c.blockId, action: "unfold" as const, actor: "agent" as const, turn: c.turn })),
+	);
+	state.manualChanges = state.manualChanges.slice(-200);
+
+	if (changes.length === 0) {
+		return { ok: true, message: `Turn${turns.length === 1 ? "" : "s"} ${turns.join(", ")} already pinned \u2014 nothing changed.`, turns, changes };
+	}
+	return {
+		ok: true,
+		message: `Pinned ${changes.length} block${changes.length === 1 ? "" : "s"} across turn${turns.length === 1 ? "" : "s"} ${turns.join(", ")}. They will stay full for the rest of the session.`,
+		turns,
+		changes,
+	};
+}
+
 /** Tool definitions the pi extension registers when the host supports it.
  *  The descriptions are the agent's instruction manual \u2014 they teach the model
  *  that folded context is addressable and recoverable. */
@@ -241,4 +387,16 @@ export const AGENT_TOOL_DEFS = [
 			required: ["turns"],
 		},
 	},
+	{
+		name: "accordion_pin",
+		description:
+			"Pin earlier turns so Accordion will NEVER auto-fold them — they stay full in your context for the rest of the session. Use when the user says to remember, keep, not lose, or don't forget something. Do NOT recall and restate the content into a new message — pin the original turn so it stays open automatically. Pinned turns survive heavy fold pressure and compact events.",
+		parameters: {
+			type: "object",
+			properties: {
+				turns: { type: "string", description: 'Turn numbers to pin permanently open: "7", "3-5", or "2,7".' },
+			},
+			required: ["turns"],
+		},
+	} as const,
 ] as const;

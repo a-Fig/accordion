@@ -18,4 +18,8 @@ When you will need the material for several turns of ongoing work, use accordion
 
 When you are done with a section of work and will not need it again, call accordion_fold to free context budget. Do not recall every folded turn — only recall what you need right now. Do not fold the current turn.
 
-Nothing is ever deleted. Every fold is reversible.`;
+Nothing is ever deleted. Every fold is reversible.
+
+When the user asks you to remember, keep, or not forget something — call accordion_pin with the relevant turn number. Do NOT recall and restate the content into a new message — pin the original turn so it stays full automatically for the rest of the session.
+
+Decision rule: one-off exact value needed right now → accordion_recall. Material needed for several coming turns → accordion_unfold. Must persist for the whole session → accordion_pin.`;

@@ -62,6 +62,8 @@ export class AccordionStore {
 	groupIdByTurn = $state<Map<number, string>>(new Map());
 	/** LLM summaries from pi's summaryCache, keyed by blockId. Only present in live mode when pi has cached them. */
 	summaryCache = $state<Record<string, string>>({});
+	/** Last calibration events from the Conductor (up to 10). */
+	calibrationEvents = $state<Array<{ turn: number; from: number; to: number; reason: string }>>([]);
 	private nextGroupId = 1;
 	private replayTimer: ReturnType<typeof setInterval> | null = null;
 	private recentClearTimer: ReturnType<typeof setTimeout> | null = null;
@@ -87,6 +89,10 @@ export class AccordionStore {
 		}
 
 		// Apply pi's actual fold decisions when present
+		if (parsed.conductor.calibrationEvents) {
+			this.calibrationEvents = parsed.conductor.calibrationEvents.slice(-10);
+		}
+
 		if (parsed.conductor.foldedBlockIds) {
 			const folded = new Set(parsed.conductor.foldedBlockIds);
 			const levels = parsed.conductor.foldLevels ?? {};
@@ -287,7 +293,7 @@ export class AccordionStore {
 		}
 		this.emit(by, "folded", label(b));
 		this.refold();
-		if (this.liveConnected && by === "you") postLiveCommand({ type: "fold", turnIndex: b.turn, ts: Date.now() });
+		if (this.liveConnected && by === "you") postLiveCommand({ type: "fold", blockId: b.id, turnIndex: b.turn, ts: Date.now() });
 	}
 	unfold(id: string, by: Actor = "you"): void {
 		const b = this.get(id);
@@ -298,7 +304,7 @@ export class AccordionStore {
 		}
 		this.emit(by, "unfolded", label(b));
 		this.refold();
-		if (this.liveConnected && by === "you") postLiveCommand({ type: "unfold", turnIndex: b.turn, ts: Date.now() });
+		if (this.liveConnected && by === "you") postLiveCommand({ type: "unfold", blockId: b.id, turnIndex: b.turn, ts: Date.now() });
 	}
 	toggle(id: string, by: Actor = "you"): void {
 		const b = this.get(id);
@@ -314,7 +320,7 @@ export class AccordionStore {
 		}
 		this.emit("you", "pinned", label(b));
 		this.refold();
-		if (this.liveConnected) postLiveCommand({ type: "pin", turnIndex: b.turn, ts: Date.now() });
+		if (this.liveConnected) postLiveCommand({ type: "pin", blockId: b.id, turnIndex: b.turn, ts: Date.now() });
 	}
 	unpin(id: string): void {
 		const b = this.get(id);
@@ -326,7 +332,7 @@ export class AccordionStore {
 		}
 		this.emit("you", "unpinned", label(b));
 		this.refold();
-		if (this.liveConnected) postLiveCommand({ type: "unpin", turnIndex: b.turn, ts: Date.now() });
+		if (this.liveConnected) postLiveCommand({ type: "unpin", blockId: b.id, turnIndex: b.turn, ts: Date.now() });
 	}
 	/** Hand a block back to the automatic folder. */
 	auto(id: string): void {

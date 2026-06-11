@@ -90,7 +90,7 @@
 					onclick={() => live.toggle()}
 					aria-pressed={live.enabled}
 				>
-					<span class="dot" aria-hidden="true"></span>
+					<span class="dot state-dot state-{live.state}" aria-hidden="true"></span>
 					{live.enabled ? (live.connected ? "LIVE" : "RECONNECTING") : "Go live"}
 				</button>
 				<a class="nav" href="/map" data-sveltekit-reload={false}>Map view →</a>
@@ -109,6 +109,21 @@
 				<ContextTimeline {store} onpick={pick} />
 			{/if}
 		</section>
+
+		{#if live.enabled && (live.state === "waiting" || live.state === "error")}
+			<div class="live-state-banner" class:is-error={live.state === "error"}>
+				{#if live.state === "error"}
+					<span class="ls-glyph">⌯</span>
+					<span class="ls-head">Cannot reach live session</span>
+					<span class="ls-body">{live.hint}</span>
+				{:else}
+					<span class="ls-glyph">⌯</span>
+					<span class="ls-head">Waiting for a live session</span>
+					<span class="ls-body">{live.hint || "Start pi with the accordion extension and run /accordion."}</span>
+					<code class="ls-cmd">pi /accordion</code>
+				{/if}
+			</div>
+		{/if}
 
 		<div class="main">
 			<main class="scroll">
@@ -130,7 +145,7 @@
 						oninput={(e) => store!.setBudget(+e.currentTarget.value)}
 					/>
 					<button class="btn" onclick={() => store!.resetAll()}>Reset all to auto</button>
-					<ConductorSettings foldTargetCalibrated={store.foldTargetCalibrated} />
+					<ConductorSettings foldTargetCalibrated={store.foldTargetCalibrated} {store} />
 				</div>
 
 				<div class="feed">
@@ -418,6 +433,33 @@
 	.muted {
 		color: var(--muted);
 	}
+
+	/* live state dot */
+	.state-dot { transition: background 160ms ease; }
+	.state-off { background: var(--faint); }
+	.state-connecting { background: var(--warn); animation: live-pulse 1.2s ease-in-out infinite; }
+	.state-waiting { background: var(--warn); animation: live-pulse 1.2s ease-in-out infinite; }
+	.state-connected { background: var(--ok); }
+	.state-error { background: var(--danger); }
+
+	/* live empty/error banner */
+	.live-state-banner {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		padding: 10px 16px;
+		background: var(--panel-2);
+		border-bottom: 1px solid var(--line-soft);
+		font-size: 12px;
+		color: var(--muted);
+		flex: 0 0 auto;
+	}
+	.live-state-banner.is-error { color: var(--danger); border-bottom-color: color-mix(in srgb, var(--danger) 30%, var(--line)); }
+	.ls-glyph { font-size: 18px; opacity: 0.5; flex: 0 0 auto; }
+	.ls-head { font-weight: 600; color: var(--text); white-space: nowrap; }
+	.ls-body { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.live-state-banner.is-error .ls-body { color: var(--danger); opacity: 0.8; }
+	.ls-cmd { font-family: var(--mono); font-size: 11px; background: var(--panel-3); border: 1px solid var(--line); padding: 2px 8px; border-radius: var(--radius-sm); color: var(--accent); white-space: nowrap; user-select: all; }
 	:global(.flash) {
 		animation: flash 0.9s ease;
 	}

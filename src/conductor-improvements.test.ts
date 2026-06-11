@@ -22,6 +22,7 @@ import {
 	UNFOLD_SEMANTIC_FLOOR,
 	calibrateFoldTarget,
 	categorizeSalienceMarkers,
+	contentHash,
 	createAccordionState,
 	deterministicDigest,
 	parseMessages,
@@ -32,6 +33,7 @@ import {
 	type AgentMessage,
 	type ContextBlock,
 	type FoldDecision,
+	type SummaryRequest,
 } from "./conductor.ts";
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -682,4 +684,107 @@ test("regression: FoldDecision reason can be string or string array", () => {
 	// Both forms are valid
 	assert.ok(reasonIncludes(stringReason.reason, "relevance"));
 	assert.ok(reasonIncludes(arrayReason.reason, "not_pinned"));
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
+// B3. Summary critical-path tests
+// ──────────────────────────────────────────────────────────────────────────────
+
+function pressureRun(messages: AgentMessage[], state: ReturnType<typeof createAccordionState>, budget: number) {
+	return runConductor({
+		messages,
+		incomingPrompt: "continue",
+		lastCompletedTurn: null,
+		budgetTokens: budget,
+		state,
+		workingTailTokens: 0,
+	});
+}
+
+function conductorFixture() {
+	const bigLine = (label: string, lines: number, wordsPerLine = 14): string =>
+		Array.from({ length: lines }, (_, i) =>
+			Array.from({ length: wordsPerLine }, (_, j) => `${label}_l${i}_w${j}`).join(" "),
+		).join("\n");
+
+	const messages: AgentMessage[] = [
+		user("u1", "set up the deploy pipeline"),
+		assistant("a1", [txt(`Deploy rollout plan recorded.\n${bigLine("deploy_notes", 50)}`)]),
+	];
+	for (let i = 0; i < 5; i++) {
+		messages.push(user(`u${i + 2}`, `boilerplate request ${i}`));
+		messages.push(assistant(`a${i + 2}`, [txt(bigLine(`filler${i}`, 60))]));
+	}
+	messages.push(user("u-last", "continue"));
+	return { messages };
+}
+
+test("summary: seeded summaryCache entry is used in assembled output instead of deterministic digest", () => {
+	const { messages } = conductorFixture();
+	const state = createAccordionState();
+	// First run to fold some blocks — apply decisions to state
+	const firstOut = pressureRun(messages, state, 2000);
+	for (const d of firstOut.decisions) {
+		if (d.action === "fold") state.foldLevels[d.blockId] = d.level ?? 2;
+		else if (d.action === "unfold") delete state.foldLevels[d.blockId];
+	}
+	state.foldedBlockIds = Object.keys(state.foldLevels);
+	const foldedId = state.foldedBlockIds[0];
+	assert.ok(foldedId, "should have at least one folded block");
+	const parsed = parseMessages(messages);
+	const block = parsed.blocks.find(b => b.id === foldedId);
+	assert.ok(block, "should find the folded block");
+	// Seed the LLM summary by contentHash
+	const hash = contentHash(block!);
+	state.summaryCache[hash] = "Summary: LLM_SUMMARY_SENTINEL_42";
+	// Run conductor with the seeded cache
+	const out = runConductor(
+		{ messages, incomingPrompt: "", lastCompletedTurn: null, budgetTokens: 2000, workingTailTokens: 0, state },
+		{},
+	);
+	const assembled = textOf(out.messages);
+	assert.ok(assembled.includes("LLM_SUMMARY_SENTINEL_42"), "assembled output must contain the LLM summary");
+});
+
+test("summary: stubbed summaryProvider populates summaryCache on first run; second run uses it", async () => {
+	const { messages } = conductorFixture();
+	const state = createAccordionState();
+	// First run to fold some blocks — apply decisions to state
+	const firstOut = pressureRun(messages, state, 2000);
+	for (const d of firstOut.decisions) {
+		if (d.action === "fold") state.foldLevels[d.blockId] = d.level ?? 2;
+		else if (d.action === "unfold") delete state.foldLevels[d.blockId];
+	}
+	state.foldedBlockIds = Object.keys(state.foldLevels);
+	const foldedId = state.foldedBlockIds[0];
+	assert.ok(foldedId, "should have a folded block");
+	const parsed = parseMessages(messages);
+	const block = parsed.blocks.find(b => b.id === foldedId);
+	assert.ok(block, "should find folded block");
+
+	let summaryCallCount = 0;
+	const summaryProvider = async (request: SummaryRequest) => {
+		summaryCallCount++;
+		return `Summary: STUB_SUMMARY_for_${request.hash.slice(0, 8)}`;
+	};
+
+	// First run: provider fires asynchronously, output may use digest
+	const out1 = runConductor(
+		{ messages, incomingPrompt: "", lastCompletedTurn: null, budgetTokens: 2000, workingTailTokens: 0, state },
+		{ summaryProvider },
+	);
+	// Wait for async summary promise to settle
+	await new Promise(r => setTimeout(r, 50));
+	// summaryCache should now be populated
+	const hash = contentHash(block!);
+	assert.ok(state.summaryCache[hash], "summaryCache should have the stub summary after settle");
+	assert.ok(state.summaryCache[hash].includes("STUB_SUMMARY"), "cache value should be the stub summary");
+	// Second run: should use the cached summary
+	const out2 = runConductor(
+		{ messages, incomingPrompt: "", lastCompletedTurn: null, budgetTokens: 2000, workingTailTokens: 0, state },
+		{ summaryProvider },
+	);
+	const assembled2 = textOf(out2.messages);
+	assert.ok(assembled2.includes("STUB_SUMMARY"), "second run assembled output should use the cached LLM summary");
+	void out1; // suppress unused warning
 });

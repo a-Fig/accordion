@@ -7,6 +7,7 @@
 
 	const folded = $derived(store.isFolded(block));
 	const pinned = $derived(block.override === "pinned");
+	const hasLlmSummary = $derived(folded && !!store.summaryCache[block.id]);
 
 	const KIND_LABEL: Record<Block["kind"], string> = {
 		user: "User",
@@ -41,6 +42,13 @@
 				<span class="chip" class:auto={block.by === "auto"}>
 					{block.by === "auto" ? "auto" : block.by === "agent" ? "agent" : "folded"}
 				</span>
+			{/if}
+			{#if folded}
+				{#if hasLlmSummary}
+					<span class="chip ai" title="LLM summary">AI</span>
+				{:else}
+					<span class="chip digest-label" title="deterministic digest">digest</span>
+				{/if}
 			{/if}
 			{#if folded}
 				<span class="tok comp mono" title="folded: {fmt(block.tokens)} → {fmt(store.effTokens(block))} tokens">
@@ -92,7 +100,7 @@
 		background: var(--panel);
 		border: 1px solid var(--line-soft);
 		border-radius: var(--radius-sm);
-		box-shadow: 0 1px 2px rgba(0, 0, 0, 0.28);
+		box-shadow: var(--elev-1);
 		overflow: hidden;
 		transition: background 160ms ease, border-color 160ms ease, opacity 160ms ease, margin-left 160ms ease;
 		/* Skip layout/paint for off-screen cards — keeps thousands of blocks smooth. */
@@ -185,6 +193,15 @@
 	.chip.auto {
 		color: var(--warn);
 	}
+	.chip.ai {
+		color: var(--accent);
+		background: var(--accent-dim);
+	}
+	.chip.digest-label {
+		color: var(--faint);
+		background: transparent;
+		border: 1px solid var(--line-soft);
+	}
 
 	.act {
 		display: inline-flex;
@@ -258,14 +275,14 @@
 	}
 	@keyframes card-arrive {
 		0% {
-			box-shadow: 0 0 0 0 var(--kc), 0 1px 2px rgba(0, 0, 0, 0.28);
-			background: color-mix(in srgb, var(--kc) 18%, var(--panel));
+			box-shadow: var(--elev-1), inset 0 0 0 1px var(--kc);
+			background: color-mix(in srgb, var(--kc) 12%, var(--panel));
 		}
-		60% {
-			box-shadow: 0 0 0 3px color-mix(in srgb, var(--kc) 35%, transparent), 0 1px 2px rgba(0, 0, 0, 0.28);
+		70% {
+			box-shadow: var(--elev-1), inset 0 0 0 1px color-mix(in srgb, var(--kc) 30%, transparent);
 		}
 		100% {
-			box-shadow: 0 0 0 0 transparent, 0 1px 2px rgba(0, 0, 0, 0.28);
+			box-shadow: var(--elev-1);
 		}
 	}
 </style>

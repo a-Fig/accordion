@@ -37,6 +37,13 @@ class LiveSession {
 		if (window.localStorage.getItem(LS_KEY) === "1") this.enable();
 	}
 
+	get state(): "off" | "connecting" | "waiting" | "connected" | "error" {
+		if (!this.enabled) return "off";
+		if (!this.connected) return this.hint.includes("Can't reach") ? "error" : "connecting";
+		if (!this.store) return "waiting";
+		return "connected";
+	}
+
 	toggle(): void {
 		this.enabled ? this.disable() : this.enable();
 	}
@@ -142,13 +149,8 @@ class LiveSession {
 			await invoke("start_live_watch");
 			this.connected = true;
 			conductorSettings.setLiveConnected(true);
-			// TODO: replace with Tauri invoke("post_conductor_command") for native path
 			setCommandSender((cmd) => {
-				fetch(COMMANDS_URL, {
-					method: "POST",
-					headers: { "Content-Type": "application/json" },
-					body: JSON.stringify(cmd),
-				}).catch(() => {/* fire-and-forget */});
+				invoke("post_conductor_command", { cmd: JSON.stringify(cmd) }).catch(() => {/* fire-and-forget */});
 			});
 			this.hint = "Connected — waiting for first snapshot…";
 			this.staleTimer = setTimeout(() => {

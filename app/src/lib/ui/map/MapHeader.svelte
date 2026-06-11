@@ -50,7 +50,7 @@
 				<span class="saved">folding saved {fmt(store.savedTokens)} ({pct(store.savedTokens, store.fullTokens)}% of {k(store.fullTokens)})</span>
 			{/if}
 			{#if !conductorSettings.open}
-				<span class="badge mono" title="Conductor settings">{conductorBadge}</span>
+				<span class="badge mono" class:error={conductorSettings.providerStatus === 'error'} title="Conductor settings">{conductorBadge}</span>
 			{/if}
 		</div>
 		<div class="ctl">
@@ -79,7 +79,7 @@
 				/>
 			</label>
 			<button class="reset" onclick={() => store.resetAll()}>Reset</button>
-			<ConductorSettings foldTargetCalibrated={store.foldTargetCalibrated} />
+			<ConductorSettings foldTargetCalibrated={store.foldTargetCalibrated} {store} />
 		</div>
 	</div>
 
@@ -128,7 +128,7 @@
 		color: var(--danger);
 	}
 	.of {
-		font-size: 12px;
+		font-size: var(--ctl-fs);
 		color: var(--muted);
 	}
 	.pill {
@@ -145,7 +145,7 @@
 		border-color: color-mix(in srgb, var(--danger) 45%, var(--line));
 	}
 	.saved {
-		font-size: 11px;
+		font-size: var(--ctl-fs);
 		color: var(--faint);
 	}
 	.badge {
@@ -157,6 +157,7 @@
 		border-radius: 999px;
 		white-space: nowrap;
 	}
+	.badge.error { color: var(--warn); }
 	.ctl {
 		margin-left: auto;
 		display: flex;
@@ -188,8 +189,9 @@
 		border: 1px solid var(--line);
 		color: var(--text);
 		padding: 4px 10px;
+		height: var(--ctl-h);
 		border-radius: var(--radius-sm);
-		font-size: 12px;
+		font-size: var(--ctl-fs);
 	}
 	.reset:hover {
 		background: var(--line);

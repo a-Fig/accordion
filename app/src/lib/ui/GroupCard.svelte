@@ -46,6 +46,7 @@
 		background: var(--surface-2, #151a24);
 		padding: 8px 10px;
 		margin: 2px 0;
+		box-shadow: var(--elev-1);
 	}
 	header {
 		display: flex;

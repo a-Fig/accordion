@@ -513,12 +513,13 @@
 		border: 1.5px solid var(--line);
 		background: var(--panel-2);
 		padding: 12px;
+		box-shadow: var(--elev-1);
 	}
 	/* the protected box: a meaningfully thicker, accented frame implies protection */
 	.box.prot {
 		border: 4px solid var(--accent-dim, var(--accent));
 		background: var(--panel);
-		box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 22%, transparent);
+		box-shadow: var(--elev-1), 0 0 0 1px color-mix(in srgb, var(--accent) 22%, transparent);
 	}
 
 	/* ---- grid: uniform squares, conversation order (no dense backfill) ---- */
