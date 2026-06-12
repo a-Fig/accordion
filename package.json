@@ -1,10 +1,14 @@
 {
 	"name": "accordion",
-	"keywords": ["pi-package"],
+	"keywords": [
+		"pi-package"
+	],
 	"main": "src/accordion.ts",
 	"type": "module",
 	"pi": {
-		"extensions": ["./src/accordion.ts"]
+		"extensions": [
+			"./src/accordion.ts"
+		]
 	},
 	"scripts": {
 		"test": "node --test --experimental-strip-types src/*.test.ts",
@@ -35,6 +39,9 @@
 		"test:e2e": "node --test --experimental-strip-types test/e2e-demo.test.ts",
 		"evidence": "node --experimental-strip-types src/generate-evidence.ts",
 		"demo": "node --experimental-strip-types src/generate-demo-transcript.ts"
+	},
+	"dependencies": {
+		"ws": "^8.21.0"
 	},
 	"optionalDependencies": {
 		"@huggingface/transformers": "^3.8.1"

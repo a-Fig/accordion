@@ -1,8 +1,25 @@
 <script lang="ts">
+	import { fly } from "svelte/transition";
+	import { cubicOut } from "svelte/easing";
 	import type { AccordionStore } from "../../engine/store.svelte";
-	import type { Block } from "../../engine/types";
+	import type { Block, Group } from "../../engine/types";
+	import { groupDigest } from "$lib/engine/digest";
+	import Icon from "$lib/ui/Icon.svelte";
+	import { sendUserAction } from "$lib/live/liveClient.svelte";
 
-	let { store, block, onclose }: { store: AccordionStore; block: Block | null; onclose: () => void } = $props();
+	let {
+		store,
+		block,
+		group,
+		onselect,
+		onclose,
+	}: {
+		store: AccordionStore;
+		block: Block | null;
+		group: Group | null;
+		onselect: (id: string) => void;
+		onclose: () => void;
+	} = $props();
 
 	const KIND_LABEL: Record<Block["kind"], string> = {
 		user: "User",
@@ -17,12 +34,18 @@
 
 	const folded = $derived(block ? store.isFolded(block) : false);
 	const pinned = $derived(block?.override === "pinned");
+	const foldLevel = $derived(block ? (store.liveFoldLevels[block.id] ?? 2) : 2);
+	const FOLD_LEVEL_LABEL: Record<number, string> = { 1: "trim", 2: "digest", 3: "group member" };
+	// Protected working tail — never folded (the safety pillar). The Fold control is
+	// disabled here so the guarantee is visible, not just enforced silently.
+	const protect = $derived(block ? store.isProtected(block) : false);
 
 	// the call/result partner — they're separate blocks sharing a callId
 	const partner = $derived.by<Block | null>(() => {
 		if (!block?.callId) return null;
 		return store.blocks.find((x) => x.id !== block.id && x.callId === block.callId) ?? null;
 	});
+	const partnerProtected = $derived(partner ? store.isProtected(partner) : false);
 
 	function body(b: Block): { text: string; clipped: number } {
 		const t = b.text ?? "";
@@ -30,247 +53,757 @@
 	}
 
 	const bd = $derived(block ? body(block) : { text: "", clipped: 0 });
+
+	const isMono = $derived(block?.kind === "tool_call" || block?.kind === "tool_result");
+
+	// Block mode: is this block part of a group? Used to render the "part of group" link.
+	const inGroup = $derived(block ? store.groupOf(block) : null);
+
+	// Group mode derived values
+	const gMembers = $derived(group ? store.groupMembers(group) : []);
+	const gFullTok = $derived(group ? store.groupFullTokens(group) : 0);
+	const gLiveTok = $derived(group ? store.groupLiveTokens(group) : 0);
+	const gSavedTok = $derived(group ? store.groupSavedTokens(group) : 0);
+	const gStrag = $derived(group ? store.groupStragglerCount(group) : 0);
+	const gDigest = $derived(group ? groupDigest(group, store.groupMembers(group)) : "");
+	const gTurnFirst = $derived(gMembers.length > 0 ? gMembers[0].turn : 0);
+	const gTurnLast = $derived(gMembers.length > 0 ? gMembers[gMembers.length - 1].turn : 0);
+
+	function gTurnLabel(): string {
+		if (gMembers.length === 0) return "";
+		if (gTurnFirst === gTurnLast) return gTurnFirst === 0 ? "preamble" : `turn ${gTurnFirst}`;
+		if (gTurnFirst === 0) return `preamble–turn ${gTurnLast}`;
+		return `turns ${gTurnFirst}–${gTurnLast}`;
+	}
+
+	// ── Peek state — pure UI, never touches store or WebSocket ──────────────
+	// When peeking on a folded block the user reads the full content; the agent
+	// still sees only the digest. Resetting peeking when the selected block changes.
+	let peeking = $state(false);
+	$effect(() => { block; peeking = false; });
+
+	// ── Action routing ───────────────────────────────────────────────────────
+	// In live-mirror mode, fold/unfold/pin/unpin are sent to the extension via
+	// WebSocket so the Conductor sees them immediately. In local mode (file view)
+	// they go directly to the store as before.
+	function doToggle(b: Block) {
+		if (store.liveMode) {
+			sendUserAction({ type: "userAction", action: store.isFolded(b) ? "unfold" : "fold", blockId: b.id });
+		} else {
+			store.toggle(b.id);
+		}
+	}
+
+	function doPin(b: Block) {
+		if (store.liveMode) {
+			sendUserAction({ type: "userAction", action: "pin", blockId: b.id });
+		} else {
+			store.pin(b.id);
+		}
+	}
+
+	function doUnpin(b: Block) {
+		if (store.liveMode) {
+			sendUserAction({ type: "userAction", action: "unpin", blockId: b.id });
+		} else {
+			store.unpin(b.id);
+		}
+	}
 </script>
 
-{#if block}
-	<aside class="insp">
-		<header>
-			<span class="kind k-{block.kind}">{KIND_LABEL[block.kind]}</span>
-			{#if block.toolName}<span class="tool mono">{block.toolName}</span>{/if}
-			<span class="turn">turn {block.turn}</span>
+{#if group}
+	<!-- ── GROUP MODE ──────────────────────────────────────────── -->
+	<aside class="insp" transition:fly={{ x: 24, duration: 200, easing: cubicOut, opacity: 0 }}>
+		<!-- ── Header ─────────────────────────────────────────────── -->
+		<header class="insp-header">
+			<span class="group-dot"></span>
+			<span class="group-label">group · {gMembers.length} blocks</span>
 			<span class="grow"></span>
-			<button class="x" onclick={onclose} aria-label="Close inspector" title="Close">✕</button>
+			<span class="turn-badge tnum">{gTurnLabel()}</span>
+			<button class="close-btn" onclick={onclose} aria-label="Close inspector" title="Close">
+				<Icon name="x" size={16} />
+			</button>
 		</header>
 
-		<div class="meta">
-			{#if folded}
-				<span class="state folded">folded</span>
-				<span class="mono"><s>{fmt(block.tokens)}</s> → <b>{fmt(store.effTokens(block))}</b> tok</span>
-			{:else}
-				<span class="state live">live</span>
-				<span class="mono">{fmt(block.tokens)} tok</span>
-			{/if}
-			<span class="grow"></span>
-			<button class="btn" onclick={() => store.toggle(block.id)}>{folded ? "Unfold" : "Fold"}</button>
-			<button class="btn" class:on={pinned} onclick={() => (pinned ? store.unpin(block.id) : store.pin(block.id))}>
-				{pinned ? "Unpin" : "Pin"}
-			</button>
+		<!-- ── Meta row ───────────────────────────────────────────── -->
+		<div class="meta-row">
+			<div class="meta-pills">
+				{#if group.folded}
+					<span class="pill pill-warn">
+						<span class="pill-dot"></span>folded
+					</span>
+				{:else}
+					<span class="pill pill-ok">
+						<span class="pill-dot"></span>live
+					</span>
+				{/if}
+				<span class="tok-count tnum">
+					full <strong class="tok-eff">{fmt(gFullTok)}</strong>
+					<span class="tok-sep">→</span>
+					live <strong class="tok-eff">{fmt(gLiveTok)}</strong>
+					<span class="tok-unit">tok</span>
+					{#if gSavedTok > 0}
+						<span class="tok-saved"> · saves {fmt(gSavedTok)}</span>
+					{/if}
+				</span>
+				{#if gStrag > 0}
+					<span class="pill pill-accent" title="{gStrag} member(s) kept live (split tool pair)">
+						{gStrag} kept live
+					</span>
+				{/if}
+			</div>
+			<div class="meta-actions">
+				{#if group.folded}
+					<button
+						class="action-btn action-primary-group"
+						onclick={() => store.unfoldGroup(group!.id)}
+						title="Unfold group to context"
+					>
+						<Icon name="chevrons-up-down" size={14} />
+						Unfold to context
+					</button>
+					<button
+						class="action-btn action-danger"
+						onclick={() => { store.deleteGroup(group!.id); onclose(); }}
+						title="Delete group"
+					>
+						<Icon name="trash-2" size={14} />
+						Delete
+					</button>
+				{:else}
+					<button
+						class="action-btn"
+						onclick={() => store.foldGroup(group!.id)}
+						title="Re-fold group"
+					>
+						<Icon name="chevrons-down-up" size={14} />
+						Re-fold
+					</button>
+					<button
+						class="action-btn action-danger"
+						onclick={() => { store.deleteGroup(group!.id); onclose(); }}
+						title="Delete group"
+					>
+						<Icon name="trash-2" size={14} />
+						Delete
+					</button>
+				{/if}
+			</div>
 		</div>
 
-		{#if folded}
-			{@const hasLLM = !!store.summaryCache[block.id]}
-			<div class="digestlbl">
-				{hasLLM ? "LLM summary in context now" : "Digest in context now"}
-			</div>
-			<pre class="digest mono" class:llm={hasLLM}>{store.digestOf(block)}</pre>
-			<div class="digestlbl">Original content (peek only; unfold to restore to context)</div>
-		{/if}
-		<pre class="content" class:mono={block.kind === "tool_call" || block.kind === "tool_result"}>{bd.text}</pre>
-		{#if bd.clipped}
-			<div class="clip mono">showing first {fmt(CAP)} of {fmt(bd.clipped)} chars</div>
-		{/if}
-
-		{#if partner}
-			<div class="partner">
-				<div class="plbl">
-					{partner.kind === "tool_result" ? "↳ Result it produced" : "↰ Call that produced this"}
-					<span class="mono dim">{store.isFolded(partner) ? "folded" : "live"} · {fmt(store.effTokens(partner))} tok</span>
+		<!-- ── Body: group digest ─────────────────────────────────── -->
+		<div class="body-wrap">
+			<div class="digest-callout">
+				<div class="digest-label">
+					<Icon name="chevrons-down-up" size={12} stroke={2} />
+					Group digest — shown to agent when folded
 				</div>
-				<button class="jump" onclick={() => store.toggle(partner.id)}>
-					{store.isFolded(partner) ? "Unfold" : "Fold"} partner
+				<pre class="digest-text mono">{gDigest}</pre>
+			</div>
+		</div>
+	</aside>
+{:else if block}
+	<!-- ── BLOCK MODE ──────────────────────────────────────────── -->
+	<aside class="insp" transition:fly={{ x: 24, duration: 200, easing: cubicOut, opacity: 0 }}>
+		<!-- ── Header ─────────────────────────────────────────────── -->
+		<header class="insp-header">
+			<span class="kind-dot k-{block.kind}"></span>
+			<span class="kind-label k-{block.kind}">{KIND_LABEL[block.kind]}</span>
+			{#if block.toolName}
+				<span class="tool-name mono">{block.toolName}</span>
+			{/if}
+			{#if inGroup}
+				<button class="group-link" onclick={() => onselect(inGroup.id)} title="Go to group">
+					<Icon name="layers" size={11} />
+					part of a group
 				</button>
-				<pre class="content sub mono">{body(partner).text}</pre>
+			{/if}
+			<span class="grow"></span>
+			<span class="turn-badge tnum">turn {block.turn}</span>
+			<button class="close-btn" onclick={onclose} aria-label="Close inspector" title="Close">
+				<Icon name="x" size={16} />
+			</button>
+		</header>
+
+		<!-- ── Meta row ───────────────────────────────────────────── -->
+		<div class="meta-row">
+			<div class="meta-pills">
+				{#if folded}
+					<span class="pill pill-warn">
+						<span class="pill-dot"></span>folded
+					</span>
+					{#if store.liveMode}
+						<span class="pill pill-level" title="Conductor fold level">
+							{FOLD_LEVEL_LABEL[foldLevel] ?? "digest"}
+						</span>
+					{/if}
+				{:else}
+					<span class="pill pill-ok">
+						<span class="pill-dot"></span>live
+					</span>
+				{/if}
+				{#if protect}
+					<span class="pill pill-accent" title="In the protected working tail — never folded">
+						<Icon name="lock" size={10} stroke={2} />
+						protected
+					</span>
+				{/if}
+				<span class="tok-count tnum">
+					{#if folded}
+						<s class="tok-orig">{fmt(block.tokens)}</s>
+						<span class="tok-sep">→</span>
+						<strong class="tok-eff">{fmt(store.effTokens(block))}</strong>
+						<span class="tok-unit">tok</span>
+					{:else}
+						{fmt(block.tokens)}<span class="tok-unit"> tok</span>
+					{/if}
+				</span>
+			</div>
+			<div class="meta-actions">
+				{#if folded}
+					<button
+						class="action-btn"
+						class:action-active={peeking}
+						onclick={() => (peeking = !peeking)}
+						title="Peek — read full content without changing agent's context"
+					>
+						<Icon name="eye" size={14} />
+						{peeking ? "Peeking" : "Peek"}
+					</button>
+				{/if}
+				<button
+					class="action-btn"
+					class:action-disabled={protect}
+					disabled={protect}
+					title={protect ? "Protected working tail — never folded" : folded ? "Unfold to context" : "Fold block"}
+					onclick={() => doToggle(block!)}
+				>
+					<Icon name={folded ? "chevrons-up-down" : "chevrons-down-up"} size={14} />
+					{folded ? "Unfold" : "Fold"}
+				</button>
+				<button
+					class="action-btn"
+					class:action-active={pinned}
+					onclick={() => (pinned ? doUnpin(block!) : doPin(block!))}
+					title={pinned ? "Unpin block" : "Pin block (keeps it live)"}
+				>
+					<Icon name={pinned ? "pin-off" : "pin"} size={14} />
+					{pinned ? "Unpin" : "Pin"}
+				</button>
+			</div>
+		</div>
+
+		<!-- ── Body ───────────────────────────────────────────────── -->
+		<div class="body-wrap">
+			{#if folded && peeking}
+				<!-- Peek mode: show full content with a clear "not changing context" banner -->
+				<div class="peek-callout">
+					<div class="peek-label">
+						<Icon name="eye" size={12} stroke={2} />
+						Peek — agent still sees the digest below
+					</div>
+					<pre class="digest-text mono">{store.digestOf(block)}</pre>
+				</div>
+				<div class="body-divider">
+					<span class="body-divider-label">Full content (not sent to agent)</span>
+				</div>
+			{:else if folded}
+				<div class="digest-callout">
+					<div class="digest-label">
+						<Icon name="chevrons-down-up" size={12} stroke={2} />
+						Folded — agent sees digest · click Peek to read full content
+					</div>
+					<pre class="digest-text mono">{store.digestOf(block)}</pre>
+				</div>
+				<div class="body-divider">
+					<span class="body-divider-label">Full content</span>
+				</div>
+			{/if}
+
+			<pre
+				class="content"
+				class:content-mono={isMono}
+			>{bd.text}</pre>
+
+			{#if bd.clipped}
+				<p class="clip-note tnum">
+					showing first {fmt(CAP)} of {fmt(bd.clipped)} chars
+				</p>
+			{/if}
+		</div>
+
+		<!-- ── Partner ────────────────────────────────────────────── -->
+		{#if partner}
+			<div class="partner-section">
+				<div class="partner-header">
+					<span class="partner-label">
+						{partner.kind === "tool_result" ? "Result it produced" : "Call that produced this"}
+					</span>
+					<span class="partner-meta tnum">
+						{store.isFolded(partner) ? "folded" : "live"} · {fmt(store.effTokens(partner))} tok
+					</span>
+				</div>
+
+				<button
+					class="action-btn partner-toggle"
+					class:action-disabled={partnerProtected}
+					disabled={partnerProtected}
+					title={partnerProtected ? "Protected — never folded" : store.isFolded(partner) ? "Unfold partner" : "Fold partner"}
+					onclick={() => store.toggle(partner!.id)}
+				>
+					<Icon name="corner-down-right" size={14} />
+					{partnerProtected ? "Protected" : store.isFolded(partner) ? "Unfold" : "Fold"} partner
+				</button>
+
+				<pre class="partner-preview mono">{body(partner).text}</pre>
 			</div>
 		{/if}
 	</aside>
 {/if}
 
 <style>
+	/* ── Panel shell ─────────────────────────────────────────── */
 	.insp {
 		display: flex;
 		flex-direction: column;
 		height: 100%;
 		min-height: 0;
 		background: var(--panel);
-		border-left: 1px solid var(--line);
+		border-left: 1px solid var(--line-soft);
 		overflow-y: auto;
-		box-shadow: var(--elev-3);
 	}
-	header {
+
+	/* ── Header ─────────────────────────────────────────────── */
+	.insp-header {
 		display: flex;
 		align-items: center;
-		gap: 8px;
-		padding: 12px 14px;
-		border-bottom: 1px solid var(--line);
+		gap: var(--sp-2);
+		padding: var(--sp-3) var(--sp-4);
+		border-bottom: 1px solid var(--line-soft);
 		position: sticky;
 		top: 0;
 		background: var(--panel);
 		z-index: 2;
+		box-shadow: var(--shadow-1);
 	}
-	.kind {
-		font-weight: 700;
-		font-size: 14px;
+
+	.kind-dot {
+		width: 8px;
+		height: 8px;
+		border-radius: var(--radius-pill);
+		background: var(--kc);
+		flex: 0 0 auto;
+	}
+
+	.kind-label {
+		font-size: var(--fs-sm);
+		font-weight: 600;
 		color: var(--kc);
+		letter-spacing: .01em;
 	}
-	.tool {
-		font-size: 11px;
+
+	.tool-name {
+		font-size: var(--fs-xs);
+		color: var(--muted);
 		background: var(--panel-3);
-		padding: 1px 6px;
-		border-radius: 4px;
-		color: var(--text);
+		padding: 2px var(--sp-2);
+		border-radius: var(--radius-sm);
+		max-width: 160px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
 	}
-	.turn {
-		font-size: 11px;
-		color: var(--faint);
-	}
+
 	.grow {
 		flex: 1;
 	}
-	.x {
+
+	.turn-badge {
+		font-size: var(--fs-xs);
+		color: var(--faint);
+	}
+
+	.close-btn {
+		display: flex;
+		align-items: center;
+		justify-content: center;
 		background: transparent;
 		border: none;
 		color: var(--muted);
-		font-size: 14px;
-		padding: 2px 6px;
-		border-radius: 5px;
+		padding: var(--sp-1);
+		border-radius: var(--radius-sm);
+		transition: background var(--dur-fast) var(--ease-out),
+		            color var(--dur-fast) var(--ease-out);
 	}
-	.x:hover {
-		color: var(--text);
+	.close-btn:hover {
 		background: var(--panel-3);
+		color: var(--text);
 	}
 
-	.meta {
+	/* kind color variables */
+	.k-user       { --kc: var(--k-user); }
+	.k-text        { --kc: var(--k-text); }
+	.k-thinking    { --kc: var(--k-thinking); }
+	.k-tool_call   { --kc: var(--k-tool_call); }
+	.k-tool_result { --kc: var(--k-tool_result); }
+
+	/* ── Meta row ────────────────────────────────────────────── */
+	.meta-row {
 		display: flex;
 		align-items: center;
-		gap: 8px;
-		padding: 10px 14px;
-		font-size: 12px;
-		color: var(--muted);
+		justify-content: space-between;
+		gap: var(--sp-3);
+		padding: var(--sp-2) var(--sp-4);
 		border-bottom: 1px solid var(--line-soft);
 	}
-	.state {
-		font-size: 10px;
-		text-transform: uppercase;
-		letter-spacing: 0.04em;
-		padding: 1px 7px;
-		border-radius: 999px;
-		font-weight: 600;
+
+	.meta-pills {
+		display: flex;
+		align-items: center;
+		gap: var(--sp-2);
+		flex-wrap: wrap;
 	}
-	.state.live {
+
+	.pill {
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+		font-size: var(--fs-xs);
+		font-weight: 500;
+		padding: 2px var(--sp-2);
+		border-radius: var(--radius-pill);
+		letter-spacing: .01em;
+	}
+
+	.pill-dot {
+		width: 6px;
+		height: 6px;
+		border-radius: var(--radius-pill);
+		background: currentColor;
+		flex: 0 0 auto;
+	}
+
+	.pill-ok {
 		color: var(--ok);
-		background: color-mix(in srgb, var(--ok) 16%, transparent);
+		background: color-mix(in srgb, var(--ok) 14%, transparent);
 	}
-	.state.folded {
+
+	.pill-warn {
 		color: var(--warn);
-		background: color-mix(in srgb, var(--warn) 16%, transparent);
+		background: color-mix(in srgb, var(--warn) 14%, transparent);
 	}
-	.meta s {
+
+	.pill-level {
+		color: var(--muted);
+		background: var(--panel-3);
+		font-size: 10px;
+		letter-spacing: .04em;
+	}
+
+	.pill-accent {
+		color: var(--accent);
+		background: var(--accent-soft);
+		gap: 5px;
+	}
+
+	.tok-count {
+		font-size: var(--fs-xs);
+		color: var(--muted);
+		display: inline-flex;
+		align-items: baseline;
+		gap: 3px;
+	}
+
+	.tok-orig {
+		color: var(--faint);
+		text-decoration: line-through;
+	}
+
+	.tok-sep {
 		color: var(--faint);
 	}
-	.meta b {
+
+	.tok-eff {
 		color: var(--text);
+		font-weight: 600;
 	}
-	.btn {
+
+	.tok-unit {
+		color: var(--faint);
+	}
+
+	.meta-actions {
+		display: flex;
+		align-items: center;
+		gap: var(--sp-2);
+		flex-shrink: 0;
+	}
+
+	/* ── Shared action button ───────────────────────────────── */
+	.action-btn {
+		display: inline-flex;
+		align-items: center;
+		gap: var(--sp-1);
 		background: var(--panel-3);
 		border: 1px solid var(--line);
 		color: var(--text);
-		padding: 4px 11px;
+		padding: 4px var(--sp-2);
 		border-radius: var(--radius-sm);
-		font-size: 12px;
-		font-weight: 600;
-	}
-	.btn:hover {
-		background: var(--line);
-	}
-	.btn.on {
-		color: var(--accent);
-		border-color: var(--accent-dim);
+		font-size: var(--fs-xs);
+		font-weight: 500;
+		transition: background var(--dur-fast) var(--ease-out),
+		            border-color var(--dur-fast) var(--ease-out),
+		            color var(--dur-fast) var(--ease-out);
 	}
 
-	.digestlbl {
-		font-size: 10px;
-		text-transform: uppercase;
-		letter-spacing: 0.06em;
-		color: var(--faint);
-		font-weight: 600;
-		padding: 12px 14px 4px;
+	.action-btn:hover {
+		background: var(--panel-4);
+		border-color: var(--line-strong);
 	}
-	.digest {
-		margin: 0 14px;
-		padding: 9px 11px;
+
+	.action-btn.action-active {
+		background: var(--accent-soft);
+		border-color: var(--accent-dim);
+		color: var(--accent);
+	}
+
+	.action-btn.action-active:hover {
+		background: color-mix(in srgb, var(--accent) 22%, transparent);
+		border-color: var(--accent);
+	}
+
+	.action-btn.action-disabled,
+	.action-btn:disabled {
+		opacity: 0.45;
+		cursor: not-allowed;
+	}
+
+	.action-btn.action-disabled:hover,
+	.action-btn:disabled:hover {
+		background: var(--panel-3);
+		border-color: var(--line);
+		color: var(--text);
+	}
+
+	/* ── Body ────────────────────────────────────────────────── */
+	.body-wrap {
+		padding: var(--sp-4);
+		display: flex;
+		flex-direction: column;
+		gap: var(--sp-3);
+	}
+
+	/* Folded digest callout */
+	.digest-callout {
 		background: var(--panel-2);
-		border: 1px dashed var(--line);
+		border-left: 3px solid var(--warn);
 		border-radius: var(--radius-sm);
-		font-size: 12px;
+		padding: var(--sp-3);
+		display: flex;
+		flex-direction: column;
+		gap: var(--sp-2);
+	}
+
+	/* Peek callout — teal/accent instead of warn, signals read-only */
+	.peek-callout {
+		background: var(--panel-2);
+		border-left: 3px solid var(--accent);
+		border-radius: var(--radius-sm);
+		padding: var(--sp-3);
+		display: flex;
+		flex-direction: column;
+		gap: var(--sp-2);
+	}
+
+	.peek-label {
+		display: flex;
+		align-items: center;
+		gap: var(--sp-1);
+		font-size: var(--fs-xs);
+		font-weight: 600;
+		color: var(--accent);
+		text-transform: uppercase;
+		letter-spacing: .05em;
+	}
+
+	.digest-label {
+		display: flex;
+		align-items: center;
+		gap: var(--sp-1);
+		font-size: var(--fs-xs);
+		font-weight: 600;
 		color: var(--warn);
+		text-transform: uppercase;
+		letter-spacing: .05em;
+	}
+
+	.digest-text {
+		margin: 0;
+		font-size: var(--fs-sm);
+		color: var(--muted);
 		white-space: pre-wrap;
 		word-break: break-word;
-	}
-	.digest.llm {
-		color: var(--ok);
-		border-style: solid;
-		border-color: color-mix(in srgb, var(--ok) 35%, var(--line));
-	}
-	.content {
-		margin: 8px 14px 0;
-		padding: 0;
-		font-size: 13px;
 		line-height: 1.5;
+	}
+
+	.body-divider {
+		display: flex;
+		align-items: center;
+		gap: var(--sp-2);
+	}
+
+	.body-divider::before,
+	.body-divider::after {
+		content: '';
+		flex: 1;
+		height: 1px;
+		background: var(--line-soft);
+	}
+
+	.body-divider-label {
+		font-size: var(--fs-xs);
+		color: var(--faint);
+		text-transform: uppercase;
+		letter-spacing: .05em;
+		font-weight: 500;
+		white-space: nowrap;
+	}
+
+	.content {
+		margin: 0;
+		padding: 0;
+		font-size: var(--fs-base);
+		line-height: 1.6;
 		color: var(--text);
 		white-space: pre-wrap;
 		word-break: break-word;
 		font-family: var(--sans);
 	}
-	.content.mono {
+
+	.content-mono {
 		font-family: var(--mono);
-		font-size: 12px;
+		font-size: var(--fs-sm);
 		color: var(--muted);
-	}
-	.clip {
-		padding: 6px 14px 0;
-		font-size: 10px;
-		color: var(--faint);
+		line-height: 1.55;
 	}
 
-	.partner {
-		margin: 16px 0 18px;
-		border-top: 1px solid var(--line);
-		padding-top: 12px;
+	.clip-note {
+		margin: 0;
+		font-size: var(--fs-xs);
+		color: var(--faint);
+		font-family: var(--mono);
 	}
-	.plbl {
+
+	/* ── Partner section ────────────────────────────────────── */
+	.partner-section {
+		border-top: 1px solid var(--line-soft);
+		padding: var(--sp-4);
+		display: flex;
+		flex-direction: column;
+		gap: var(--sp-3);
+	}
+
+	.partner-header {
 		display: flex;
 		align-items: baseline;
-		gap: 8px;
-		padding: 0 14px;
-		font-size: 12px;
-		font-weight: 600;
-		color: var(--text);
+		gap: var(--sp-2);
 	}
-	.plbl .dim {
+
+	.partner-label {
+		font-size: var(--fs-xs);
+		font-weight: 600;
+		color: var(--faint);
+		text-transform: uppercase;
+		letter-spacing: .05em;
+	}
+
+	.partner-meta {
+		font-size: var(--fs-xs);
 		color: var(--faint);
 		font-weight: 400;
-		font-size: 11px;
 	}
-	.jump {
-		margin: 6px 14px 0;
-		background: var(--panel-3);
-		border: 1px solid var(--line);
-		color: var(--muted);
-		padding: 3px 9px;
+
+	.partner-toggle {
+		align-self: flex-start;
+	}
+
+	.partner-preview {
+		margin: 0;
+		padding: var(--sp-3);
+		background: var(--panel-2);
 		border-radius: var(--radius-sm);
-		font-size: 11px;
-	}
-	.jump:hover {
-		color: var(--text);
-	}
-	.content.sub {
+		font-size: var(--fs-sm);
 		color: var(--faint);
+		white-space: pre-wrap;
+		word-break: break-word;
 		max-height: 180px;
 		overflow-y: auto;
+		line-height: 1.5;
 	}
-	.k-user { --kc: var(--k-user); }
-	.k-text { --kc: var(--k-text); }
-	.k-thinking { --kc: var(--k-thinking); }
-	.k-tool_call { --kc: var(--k-tool_call); }
-	.k-tool_result { --kc: var(--k-tool_result); }
+
+	/* ── Group mode ─────────────────────────────────────────────── */
+	.group-dot {
+		width: 8px;
+		height: 8px;
+		border-radius: var(--radius-pill);
+		background: var(--group-accent);
+		flex: 0 0 auto;
+	}
+
+	.group-label {
+		font-size: var(--fs-sm);
+		font-weight: 600;
+		color: var(--group-accent);
+		letter-spacing: .01em;
+	}
+
+	.tok-saved {
+		color: var(--ok);
+		font-size: var(--fs-xs);
+	}
+
+	/* Primary group action — warm amber (same family as the group accent) */
+	.action-btn.action-primary-group {
+		background: color-mix(in srgb, var(--group-accent) 22%, var(--panel-3));
+		border-color: color-mix(in srgb, var(--group-accent) 55%, transparent);
+		color: var(--group-accent);
+		font-weight: 600;
+	}
+	.action-btn.action-primary-group:hover {
+		background: color-mix(in srgb, var(--group-accent) 32%, var(--panel-3));
+		border-color: var(--group-accent);
+	}
+
+	/* Danger action button (Delete) */
+	.action-btn.action-danger {
+		opacity: 0.65;
+	}
+	.action-btn.action-danger:hover {
+		opacity: 1;
+		color: var(--danger);
+		border-color: color-mix(in srgb, var(--danger) 55%, transparent);
+		background: color-mix(in srgb, var(--danger) 10%, var(--panel-3));
+	}
+
+	/* "Part of a group" chip in block mode header */
+	.group-link {
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+		background: color-mix(in srgb, var(--group-accent) 12%, var(--panel-2));
+		border: 1px solid color-mix(in srgb, var(--group-accent) 40%, transparent);
+		color: var(--group-accent);
+		font-size: var(--fs-xs);
+		font-weight: 500;
+		border-radius: var(--radius-pill);
+		padding: 2px 8px;
+		cursor: pointer;
+		white-space: nowrap;
+		transition: background var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out);
+	}
+	.group-link:hover {
+		background: color-mix(in srgb, var(--group-accent) 22%, var(--panel-2));
+		border-color: color-mix(in srgb, var(--group-accent) 70%, transparent);
+	}
 </style>
+

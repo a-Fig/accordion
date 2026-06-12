@@ -174,54 +174,6 @@ export function agentUnfold(messages: AgentMessage[], state: AccordionState, sel
 	};
 }
 
-/** Fold turns the agent no longer needs down to digests. Write-close path. */
-export function agentFold(messages: AgentMessage[], state: AccordionState, selector: string): AgentToolOutcome {
-	const parsed = parseMessages(messages);
-	const maxTurn = parsed.turns.at(-1)?.index ?? 0;
-	const turns = parseTurnSelector(selector, maxTurn).filter((t) => t !== maxTurn);
-	if (turns.length === 0) {
-		return {
-			ok: false,
-			message: parseTurnSelector(selector, maxTurn).includes(maxTurn)
-				? "The current turn can't be folded \u2014 it's your working context."
-				: badSelector(selector, maxTurn),
-			turns: [],
-			changes: [],
-		};
-	}
-
-	const pinnedTurns = new Set(state.pinnedTurnIndexes);
-	const pinnedBlocks = new Set(state.pinnedBlockIds);
-	const changes: FoldDecision[] = [];
-	let pinnedSkipped = 0;
-	for (const block of blocksForTurns(parsed.blocks, turns)) {
-		if (pinnedTurns.has(block.turn) || pinnedBlocks.has(block.id)) {
-			pinnedSkipped++;
-			continue;
-		}
-		const fromLevel = (state.foldLevels[block.id] ?? 0) as FoldLevel;
-		if (fromLevel >= 2) continue;
-		state.foldLevels[block.id] = 2;
-		changes.push(changeRecord(block, "fold", 2, fromLevel, maxTurn, "agent freed budget"));
-	}
-	state.foldedBlockIds = Object.keys(state.foldLevels);
-	state.manualChanges.push(
-		...changes.map((c) => ({ blockId: c.blockId, action: c.action, actor: c.actor as "agent", turn: c.turn })),
-	);
-	state.manualChanges = state.manualChanges.slice(-200);
-
-	const note = pinnedSkipped > 0 ? ` (${pinnedSkipped} pinned block${pinnedSkipped === 1 ? "" : "s"} left open)` : "";
-	if (changes.length === 0) {
-		return { ok: true, message: `Nothing new to fold in turn${turns.length === 1 ? "" : "s"} ${turns.join(", ")}${note}.`, turns, changes };
-	}
-	return {
-		ok: true,
-		message: `Folded ${changes.length} block${changes.length === 1 ? "" : "s"} across turn${turns.length === 1 ? "" : "s"} ${turns.join(", ")} to digests${note}. Recall or unfold them anytime \u2014 nothing is deleted.`,
-		turns,
-		changes,
-	};
-}
-
 export function foldBlocks(
 	messages: AgentMessage[],
 	state: AccordionState,
@@ -231,11 +183,12 @@ export function foldBlocks(
 	const parsed = parseMessages(messages);
 	const maxTurn = parsed.turns.at(-1)?.index ?? 0;
 	const pinnedBlocks = new Set(state.pinnedBlockIds);
+	const pinnedTurns = new Set(state.pinnedTurnIndexes);
 	const changes: FoldDecision[] = [];
 	for (const id of blockIds) {
 		const unit = expandToPair(parsed.blocks, id);
 		for (const b of unit) {
-			if (pinnedBlocks.has(b.id) || b.turn === maxTurn) continue;
+			if (pinnedBlocks.has(b.id) || pinnedTurns.has(b.turn) || b.turn === maxTurn) continue;
 			const fromLevel = (state.foldLevels[b.id] ?? 0) as FoldLevel;
 			if (fromLevel >= 2) continue;
 			state.foldLevels[b.id] = 2;
@@ -371,18 +324,6 @@ export const AGENT_TOOL_DEFS = [
 			type: "object",
 			properties: {
 				turns: { type: "string", description: 'Turn numbers to restore: "7", "3-5", or "2,7".' },
-			},
-			required: ["turns"],
-		},
-	},
-	{
-		name: "accordion_fold",
-		description:
-			"Fold earlier turns you are finished with down to one-line digests to free context budget for upcoming work. Reversible at any time via accordion_recall / accordion_unfold; pinned turns stay open and the current turn can't be folded.",
-		parameters: {
-			type: "object",
-			properties: {
-				turns: { type: "string", description: 'Turn numbers to fold: "7", "3-5", or "2,7".' },
 			},
 			required: ["turns"],
 		},

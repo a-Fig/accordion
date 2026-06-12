@@ -1,60 +1,59 @@
 /*
- * digest.ts — what a folded block collapses to.
+ * digest.ts — what a folded block collapses to in the local/file view.
  *
- * Deterministic, per-kind. The point of typed blocks is that each kind keeps a
- * different essence when folded: a tool_call keeps WHAT it did, a tool_result
- * keeps only its shape and a taste of WHAT it saw. No LLM here yet — these are
- * structured digests so behaviour is reproducible and debuggable.
+ * Deterministic, per-kind. In live sessions the Conductor's own digest format
+ * (⟦tN⟧ …) is authoritative — `store.digestOf` returns the Conductor text when
+ * `liveMode` is true. These functions are used for the static JSONL demo view
+ * and for the local auto-folder.
  */
-import type { Block } from "./types";
+import type { Block, BlockKind, Group } from "./types";
 import { estTokens, clip, firstLine, BLOCK_OVERHEAD } from "./tokens";
 
-const _KV_STOPWORDS = new Set(["a","an","and","are","as","at","be","but","by","for","from","has","have","i","in","is","it","me","of","on","or","our","that","the","this","to","we","with","you","your"]);
+/** Kinds the local folder may fold. `tool_call` and `user` are never folded. */
+export const FOLDABLE_KINDS: ReadonlySet<BlockKind> = new Set<BlockKind>(["text", "thinking", "tool_result"]);
 
-function salienceTokens(text: string, maxItems = 5, maxChars = 120): string {
-	const seen = new Set<string>();
-	const result: string[] = [];
-	let totalChars = 0;
-	const add = (s: string) => {
-		const t = s.trim();
-		if (!t || seen.has(t) || result.length >= maxItems || totalChars + t.length > maxChars) return;
-		seen.add(t); result.push(t); totalChars += t.length;
-	};
-	for (const m of text.matchAll(/[A-Z]{2,}(?:-[A-Z0-9]+)+/g)) add(m[0]);
-	for (const m of text.matchAll(/\b(\w[\w.-]*)[ \t]*[:=][ \t]*(\S+)/g)) {
-		const key = m[1], val = m[2];
-		if (!_KV_STOPWORDS.has(key.toLowerCase()) && val.length > 2) add(`${key}=${val}`);
+/**
+ * Short, stable handle for a block, derived purely from its durable id (FNV-1a → base36,
+ * 6 chars). Stateless and deterministic so the engine, the live link, and the
+ * `accordion-context-folding` skill never drift. Not collision-free by construction, but
+ * a 6-char base36 space (~2.2B) makes a collision vanishingly rare even across a
+ * thousand-block session (~0.02%); the rare collision is handled by `resolveUnfold`
+ * restoring ALL folded blocks that carry the code.
+ */
+export function foldCode(id: string): string {
+	let h = 0x811c9dc5; // FNV-1a 32-bit
+	for (let i = 0; i < id.length; i++) {
+		h ^= id.charCodeAt(i);
+		h = Math.imul(h, 0x01000193);
 	}
-	for (const m of text.matchAll(/\b[\w.-]+\.\w{1,6}\b/g)) add(m[0]);
-	for (const m of text.matchAll(/\bv?\d+\.\d+[\d.]*\b|\b0x[0-9a-fA-F]+\b/g)) add(m[0]);
-	for (const m of text.matchAll(/\b(?:error|exception|failed|panic)[: ]+\S+/gi)) add(m[0].slice(0, 30));
-	for (const m of text.matchAll(/\b(?:DELETE|GET|PATCH|POST|PUT)\s+\/[A-Za-z0-9_./:*-]+/g)) add(m[0]);
-	for (const m of text.matchAll(/\b(?:bun|cargo|deno|docker|gh|git|go|kubectl|make|node|npm|npx|pnpm|pytest|python3?|uv|yarn)\b[^\n.!?;]*/g)) add(m[0]);
-	return result.join(" · ");
+	return (h >>> 0).toString(36).padStart(6, "0").slice(-6);
 }
 
-function decisionSentence(text: string, maxChars = 180): string {
-	const sentences = text
-		.replace(/\s+/g, " ")
-		.split(/(?<=[.!?])\s+/)
-		.map((sentence) => sentence.trim())
-		.filter(Boolean);
-	const selected = sentences.find((sentence) =>
-		/\b(?:actual|belongs to|blamed|came from|command we kept|decision|decided|exact command|favou?rite|favou?red|final|liked|preferred|selected|chosen|wanted|we chose|we will)\b/i.test(sentence),
-	);
-	return selected ? clip(selected, maxChars) : "";
+/** The folded-block marker the agent sees and passes back to `unfold`, e.g. `{#3f9a2c FOLDED}`. */
+export function foldTag(id: string): string {
+	return `{#${foldCode(id)} FOLDED}`;
 }
 
+const digestCache = new WeakMap<Block, string>();
+const digestTokenCache = new WeakMap<Block, number>();
+
+/** The folded representation used by the local/static view. In live mode `store.digestOf` returns the Conductor's actual text instead. */
 export function digest(b: Block): string {
+	const cached = digestCache.get(b);
+	if (cached !== undefined) return cached;
+	const body = digestBody(b);
+	const out = FOLDABLE_KINDS.has(b.kind) ? `${foldTag(b.id)} ${body}` : body;
+	digestCache.set(b, out);
+	return out;
+}
+
+/** The per-kind essence kept when a block is folded (without the tag). */
+function digestBody(b: Block): string {
 	switch (b.kind) {
 		case "user":
 			return "“" + clip(b.text, 100) + "”";
-		case "text": {
-			const decision = decisionSentence(b.text);
-			const salience = salienceTokens(b.text);
-			if (decision && salience && !decision.includes(salience)) return `${decision} | ${salience}`;
-			return decision || salience || clip(b.text, 120);
-		}
+		case "text":
+			return clip(b.text, 120);
 		case "thinking": {
 			const tok = estTokens(b.text);
 			const gist = firstLine(b.text, 80);
@@ -68,7 +67,7 @@ export function digest(b: Block): string {
 			if (!b.text.trim()) return `${name} → ${b.isError ? "error" : "empty"}`;
 			const lines = b.text.split("\n").filter((l) => l.trim()).length;
 			const tag = b.isError ? "error" : `${lines} line${lines === 1 ? "" : "s"}`;
-			const peek = salienceTokens(b.text) || firstLine(b.text, 60);
+			const peek = firstLine(b.text, 60);
 			return `${name} → ${tag}, ~${b.tokens} tok${peek ? " · " + peek : ""}`;
 		}
 		default:
@@ -77,5 +76,77 @@ export function digest(b: Block): string {
 }
 
 export function digestTokens(b: Block): number {
-	return estTokens(digest(b)) + BLOCK_OVERHEAD;
+	const cached = digestTokenCache.get(b);
+	if (cached !== undefined) return cached;
+	const out = estTokens(digest(b)) + BLOCK_OVERHEAD;
+	digestTokenCache.set(b, out);
+	return out;
 }
+
+// ── multiblock folds (ADR 0006) ──────────────────────────────────────────────
+// A GROUP collapses a contiguous run of blocks into ONE entry. Its summary is the
+// single source of truth for both what the GUI's parent tile renders and what the
+// agent receives in place of the range. Like a per-block digest it carries a leading
+// `{#<code> FOLDED}` tag, where the code is `foldCode(group.id)` — ONE handle for the
+// whole group, so `unfold({codes:[code]})` restores the entire range (ADR 0006 §6).
+
+/** Order kinds appear in a group recap, with singular/plural nouns. */
+const GROUP_KIND_NOUN: Record<BlockKind, [string, string]> = {
+	user: ["ask", "asks"],
+	text: ["reply", "replies"],
+	thinking: ["thought", "thoughts"],
+	tool_call: ["call", "calls"],
+	tool_result: ["result", "results"],
+};
+const GROUP_KIND_ORDER: BlockKind[] = ["tool_result", "thinking", "text", "tool_call", "user"];
+
+/** Compact "turn 3" / "turns 3–5" / "preamble" label for a group's span. */
+function turnSpan(members: Block[]): string {
+	let lo = Infinity;
+	let hi = -Infinity;
+	for (const b of members) {
+		if (b.turn < lo) lo = b.turn;
+		if (b.turn > hi) hi = b.turn;
+	}
+	if (!isFinite(lo)) return "";
+	const name = (t: number) => (t > 0 ? `turn ${t}` : "preamble");
+	if (lo === hi) return name(lo);
+	return lo > 0 ? `turns ${lo}–${hi}` : `preamble–turn ${hi}`;
+}
+
+/**
+ * The deterministic recap a folded group collapses to (ADR 0006 §4 — "rules now, LLM
+ * later"). Pure function of the group id + its member blocks; folding never changes it.
+ * Always names that a user instruction is inside (a group may legally summarize a `user`
+ * turn), so the agent is never silently deprived of the human's ask. `members` must be the
+ * group's blocks in conversation order.
+ */
+export function groupDigest(group: Group, members: Block[]): string {
+	const tag = foldTag(group.id);
+	if (!members.length) return `${tag} group · empty`;
+	const counts = new Map<BlockKind, number>();
+	let tokens = 0;
+	let ask = "";
+	for (const b of members) {
+		counts.set(b.kind, (counts.get(b.kind) ?? 0) + 1);
+		tokens += b.tokens;
+		if (b.kind === "user" && !ask) ask = firstLine(b.text, 70);
+	}
+	const breakdown = GROUP_KIND_ORDER.filter((k) => counts.get(k))
+		.map((k) => {
+			const n = counts.get(k)!;
+			const [one, many] = GROUP_KIND_NOUN[k];
+			return `${n} ${n === 1 ? one : many}`;
+		})
+		.join(", ");
+	const span = turnSpan(members);
+	const head = `${tag} group · ${members.length} block${members.length === 1 ? "" : "s"}${span ? " · " + span : ""} · ~${tokens} tok`;
+	const body = breakdown ? ` · ${breakdown}` : "";
+	const quote = ask ? ` · “${ask}”` : "";
+	return head + body + quote;
+}
+
+export function groupDigestTokens(group: Group, members: Block[]): number {
+	return estTokens(groupDigest(group, members)) + BLOCK_OVERHEAD;
+}
+

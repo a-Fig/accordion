@@ -110,8 +110,22 @@ export interface AccordionState {
 	/** Temporary conductor-managed pins. Expire after CONDUCTOR_PIN_LIFETIME turns; never
 	 *  prevent manual human/agent fold. Keyed by block id. */
 	conductorPins: Record<string, { turn: number; reason: string }>;
+	/**
+	 * Human-created multiblock folds (groups). Each group references a contiguous run of
+	 * member block ids and carries its own `folded` flag. While a group is folded the
+	 * Conductor must SKIP its members (the group's summary is what reaches the model,
+	 * not the per-block digest). User-only for now; the Conductor never creates groups.
+	 */
+	groups: AccordionGroup[];
 	/** Runtime Conductor settings overlay; defaults from compile-time constants. */
 	config: ConductorConfig;
+}
+
+/** A human-created multiblock fold, mirroring the GUI's `Group` and the wire's `WireGroup`. */
+export interface AccordionGroup {
+	id: string;
+	memberIds: string[];
+	folded: boolean;
 }
 
 export interface ConductorInput {
@@ -347,6 +361,7 @@ export function createAccordionState(seed: Partial<AccordionState> = {}): Accord
 		lastRunWithinBudget: seed.lastRunWithinBudget ?? false,
 		calibrationEvents: [...(seed.calibrationEvents ?? [])].slice(-MAX_CALIBRATION_EVENTS),
 		conductorPins: { ...(seed.conductorPins ?? {}) },
+		groups: (seed.groups ?? []).map((g: AccordionGroup) => ({ ...g, memberIds: [...g.memberIds] })),
 		config,
 	};
 }
@@ -1023,6 +1038,19 @@ function isPinned(block: ContextBlock, state: AccordionState): boolean {
 	return state.pinnedBlockIds.includes(block.id) || state.pinnedTurnIndexes.includes(block.turn);
 }
 
+/**
+ * True if the block belongs to a FOLDED group. While a group is folded the agent
+ * sees the group's summary in place of all its members, so per-block fold decisions
+ * for those members are meaningless — skip them in candidate selection so the
+ * Conductor never double-folds something the group has already absorbed.
+ */
+function isInFoldedGroup(block: ContextBlock, state: AccordionState): boolean {
+	for (const g of state.groups) {
+		if (g.folded && g.memberIds.includes(block.id)) return true;
+	}
+	return false;
+}
+
 function isGraceProtected(block: ContextBlock, state: AccordionState, currentTurn: number): boolean {
 	return state.manualChanges.some(
 		(change) =>
@@ -1288,7 +1316,8 @@ export function runConductor(input: ConductorInput, deps: ConductorDependencies 
 				isPinned(block, input.state) ||
 				isConductorPinned(block, input.state, currentTurn) ||
 				protectedIds.has(block.id) ||
-				isGraceProtected(block, input.state, currentTurn),
+				isGraceProtected(block, input.state, currentTurn) ||
+				isInFoldedGroup(block, input.state),
 		);
 	const unitLevel = (unit: FoldUnit): FoldLevel =>
 		unit.blocks.reduce((min: number, block) => Math.min(min, levels.get(block.id) ?? 0), 3) as FoldLevel;

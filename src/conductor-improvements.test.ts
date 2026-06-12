@@ -9,7 +9,7 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { agentFold } from "./agent-tools.ts";
+import { foldBlocks } from "./agent-tools.ts";
 import {
 	CALIBRATION_UP_STEP,
 	CONDUCTOR_PIN_LIFETIME,
@@ -339,11 +339,11 @@ test("conductor pins: human /fold overrides conductor pin", () => {
 		conductorPins: { [target.id]: { turn: 2, reason: "active_pin" } },
 	});
 
-	// Human explicitly folds via agentFold (which bypasses canFoldUnit entirely)
-	const out = agentFold(messages, state, String(target.turn));
+	// Human explicitly folds via foldBlocks (bypasses canFoldUnit entirely)
+	const changes = foldBlocks(messages, state, [target.id], "you");
 	assert.ok(
-		out.changes.some((c) => c.action === "fold" && c.blockId === target.id),
-		"agentFold should succeed even on a conductor-pinned block",
+		changes.some((c) => c.action === "fold" && c.blockId === target.id),
+		"foldBlocks should succeed even on a conductor-pinned block",
 	);
 });
 

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { registerAgentTools } from "./accordion.ts";
-import { agentFold, agentPin, agentRecall, agentUnfold, foldBlocks, parseTurnSelector, pinBlocks, unfoldBlocks } from "./agent-tools.ts";
+import { agentPin, agentRecall, agentUnfold, foldBlocks, parseTurnSelector, pinBlocks, unfoldBlocks } from "./agent-tools.ts";
 import {
 	CALIBRATION_UP_STEP,
 	FOLD_TARGET_INITIAL,
@@ -127,23 +127,26 @@ test("claim 2 \u00b7 learning: the agent reaching back teaches the Conductor to 
 	);
 });
 
-test("claim 2 \u00b7 fold: the agent frees its own budget, with guardrails", () => {
+test("claim 2 \u00b7 fold: foldBlocks frees budget, respects pins and current turn", () => {
 	const { messages } = fixture();
 	const state = createAccordionState({ pinnedTurnIndexes: [3] });
-	const maxTurn = parseMessages(messages).turns.at(-1)!.index;
+	const parsed = parseMessages(messages);
+	const maxTurn = parsed.turns.at(-1)!.index;
 
-	const refused = agentFold(messages, state, String(maxTurn));
-	assert.equal(refused.ok, false, "current turn is the working context and can't be folded");
+	// Current turn blocks must not fold
+	const currentIds = parsed.blocks.filter((b) => b.turn === maxTurn).map((b) => b.id);
+	const refused = foldBlocks(messages, state, currentIds, "you");
+	assert.equal(refused.length, 0, "current turn is the working context and can't be folded");
 
-	const result = agentFold(messages, state, "2-4");
-	assert.ok(result.ok);
-	assert.ok(result.changes.every((c) => c.actor === "agent" && c.level === 2));
+	// Turns 2 and 4: fold succeeds; turn 3 is pinned and stays open
+	const ids = parsed.blocks.filter((b) => b.turn >= 2 && b.turn <= 4).map((b) => b.id);
+	const changes = foldBlocks(messages, state, ids, "you");
+	assert.ok(changes.length > 0);
 	const foldedTurns = new Set(
-		parseMessages(messages).blocks.filter((b) => state.foldLevels[b.id] === 2).map((b) => b.turn),
+		parsed.blocks.filter((b) => state.foldLevels[b.id] === 2).map((b) => b.turn),
 	);
 	assert.ok(foldedTurns.has(2) && foldedTurns.has(4));
 	assert.ok(!foldedTurns.has(3), "pinned turn stays open");
-	assert.ok(result.message.includes("nothing is deleted"), "the tool teaches reversibility");
 });
 
 test("every fold level is addressable: digests, trims, and group members carry \u27e6t\u2026\u27e7 turn addresses", () => {
@@ -189,7 +192,7 @@ test("pi registration returns AgentToolResult content, not a bare string", async
 		registerTool: (tool: any) => captured.push(tool),
 	} as any);
 
-	assert.equal(captured.length, 4);
+	assert.equal(captured.length, 3); // recall, unfold, pin (fold removed per VISION.md)
 	const result = await captured[0].execute("call-1", { turns: "1" }, undefined, undefined, ctx);
 	assert.deepEqual(result.details, {});
 	assert.deepEqual(result.content.map((part: any) => part.type), ["text"]);

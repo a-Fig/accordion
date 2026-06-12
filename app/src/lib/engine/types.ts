@@ -3,9 +3,9 @@
  *
  * The atomic unit is a BLOCK: a typed slice of a single message. One assistant
  * message explodes into several blocks (its thinking, its reply text, each tool
- * call). A tool call and the tool result that answers it are SEPARATE blocks
- * sharing a callId. Valid pairs are folded or unfolded together so the assembled
- * context never exposes a structurally broken provider transcript. See VISION.md.
+ * call). A tool call and the tool result that answers it are SEPARATE blocks —
+ * they are shown together but fold independently, because their value to the
+ * agent decays at very different rates. See VISION.md.
  */
 
 export type BlockKind =
@@ -17,14 +17,6 @@ export type BlockKind =
 
 /** Who last changed a block's fold state. */
 export type Actor = "you" | "agent" | "auto" | "conductor";
-
-/** A bundle of consecutive leading folded turns (display grouping only). */
-export interface TurnGroup {
-	id: string;
-	turns: number[];
-	collapsed: boolean;
-	by: Actor;
-}
 
 /**
  * A manual override that the automatic folder must respect:
@@ -64,10 +56,24 @@ export interface Block {
 	override: Override;
 	/** Set by the automatic folder; only meaningful when override is null. */
 	autoFolded: boolean;
-	/** Graduated fold depth: 0=full, 1=trim, 2=digest, 3=group member. */
-	foldLevel: 0 | 1 | 2 | 3;
 	/** Who last touched this block's fold state. */
 	by: Actor | null;
+}
+
+/**
+ * A multiblock fold (ADR 0006). A group is an ENGINE OVERLAY, never a `Block`: it
+ * references a CONTIGUOUS, non-overlapping run of member blocks (by id) that the human
+ * collapses into a single tile. `folded` is the group's own state, orthogonal to each
+ * member's per-block override — folding the group collapses the range; unfolding it
+ * returns the members to their own fold state. The id is `g:<firstMemberDurableId>`; its
+ * agent-unfold handle is `foldCode(id)`. Invariants (enforced at creation, store.createGroup):
+ * contiguous · non-overlapping · flat (members are blocks, never groups) · ≥2 members ·
+ * entirely older than the protected tail. `memberIds` is in conversation (block) order.
+ */
+export interface Group {
+	id: string;
+	memberIds: string[];
+	folded: boolean;
 }
 
 export interface SessionMeta {
@@ -77,23 +83,9 @@ export interface SessionMeta {
 	model: string;
 }
 
-export interface ConductorSnapshot {
-	config: import("./conductor-config").ConductorConfig;
-	foldTargetCalibrated: number;
-	missingApiKeyLogged?: boolean;
-	providerError?: string;
-	foldedBlockIds?: string[];
-	foldLevels?: Record<string, 0 | 1 | 2 | 3>;
-	/** blockId → LLM summary text (only for currently-folded blocks) */
-	foldedSummaries?: Record<string, string>;
-	calibrationEvents?: Array<{ turn: number; from: number; to: number; reason: string }>;
-}
-
 export interface ParsedSession {
 	meta: SessionMeta;
 	blocks: Block[];
-	/** Latest accordion-conductor-state from the transcript, if any. */
-	conductor?: ConductorSnapshot;
 	/** Diagnostics. */
 	lineCount: number;
 	skipped: number;

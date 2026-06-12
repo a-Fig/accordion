@@ -1,17 +1,36 @@
 /**
  * Accordion Context Extension
  * ===========================
- * Rewrites the outgoing pi context with the Accordion Conductor. Originals stay
- * in the session log; the Conductor only changes the assembled view sent to the
- * model for this call.
+ * The Conductor decides what to fold each turn and rewrites the outgoing pi
+ * context. Originals stay in the session log; folding only changes the assembled
+ * view sent to the model for THIS call.
+ *
+ * The Accordion desktop GUI attaches over a per-session WebSocket (ephemeral
+ * loopback port, advertised in ~/.accordion/sessions/<id>.json) and MIRRORS the
+ * Conductor's decisions — it does not compute its own fold plan. User actions in
+ * the GUI flow back as `userAction` messages and mutate AccordionState
+ * immediately; the Conductor sees them on its next context hook.
+ *
+ * Four actors with VISION.md permissions: user (you, GUI + cmd) can fold /
+ * unfold / pin / peek; agent can unfold / pin / recall; Conductor can fold /
+ * unfold (never pin). Peek is GUI-only (purely UI; never touches state).
+ *
+ * Register in ~/.pi/agent/settings.json:
+ *   { "extensions": ["<repo>/src/accordion.ts"] }
  */
 
 import { writeFile } from "node:fs";
-import { readFile as readFileAsync, unlink as unlinkAsync } from "node:fs/promises";
 import { homedir } from "node:os";
+import * as http from "node:http";
+import * as os from "node:os";
+import * as path from "node:path";
+import * as fs from "node:fs";
+import { fileURLToPath } from "node:url";
+import { spawn } from "node:child_process";
+import { WebSocketServer, type WebSocket } from "ws";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { AGENT_TOOL_DEFS, agentFold, agentPin, agentRecall, agentUnfold, foldBlocks, pinBlocks, unfoldBlocks, unpinBlocks } from "./agent-tools.ts";
+import { AGENT_TOOL_DEFS, agentPin, agentRecall, agentUnfold, foldBlocks, pinBlocks, unfoldBlocks, unpinBlocks } from "./agent-tools.ts";
 import { ACCORDION_AGENT_SKILL } from "./accordion-skill.ts";
 import {
 	applyDecisionsToState,
@@ -21,24 +40,47 @@ import {
 	createHaikuSummaryProvider,
 	createOllamaSummaryProvider,
 	createTransformersEmbeddingProvider,
-	defaultConductorConfig,
 	mergeConductorConfig,
 	pruneEmbeddingCache,
 	warmEmbeddings,
 	blockTokensAtLevel,
+	deterministicDigest,
+	foldAddress,
+	trimmedText,
+	groupMemberText,
 	extractIncomingPrompt,
 	lastCompletedTurnFromMessages,
 	parseMessages,
 	runConductor,
+	type AccordionGroup,
 	type AccordionState,
 	type ConductorConfig,
 	type ContextBlock,
 	type FoldDecision,
+	type FoldLevel,
 	type SummaryProvider,
 } from "./conductor.ts";
+import { linearize, blockId, type PiMessage } from "../app/src/lib/live/mapping.ts";
+import {
+	DISCOVERY_PORT,
+	PROTOCOL_VERSION,
+	type ServerMessage,
+	type StreamMessage,
+	type UserActionMessage,
+	type WireGroup,
+} from "../app/src/lib/live/protocol.ts";
+import {
+	REGISTRY_DIR,
+	SESSIONS_SUBDIR,
+	FOCUS_FILE,
+	HEARTBEAT_INTERVAL_MS,
+	type SessionEntry,
+	type FocusRequest,
+} from "../app/src/lib/live/registry.ts";
+
+// ── Constants ────────────────────────────────────────────────────────────────
 
 const LIVE_SNAPSHOT_PATH = `${homedir()}/.pi/agent/accordion-live-session.jsonl`;
-const COMMANDS_PATH = `${homedir()}/.pi/agent/accordion-commands.jsonl`;
 
 const LEGACY_STATE_TYPE = "accordion-state";
 const CONDUCTOR_STATE_TYPE = "accordion-conductor-state";
@@ -51,10 +93,20 @@ const ENV_SUMMARIES_ENABLED =
 	process.env.ACCORDION_SUMMARIES === "true" ||
 	(!IS_NODE_TEST && process.env.ACCORDION_SUMMARIES !== "0");
 
+// Registry layout — the GUI desktop discovery contract.
+const HOME = process.env.ACCORDION_HOME || os.homedir();
+const REGISTRY_ROOT = path.join(HOME, REGISTRY_DIR);
+const SESSIONS_DIR = path.join(REGISTRY_ROOT, SESSIONS_SUBDIR);
+const FOCUS_PATH = path.join(REGISTRY_ROOT, FOCUS_FILE);
+const ACCORDION_APP_FLAG = "accordion-app";
+const ACCORDION_APP_ENV = "ACCORDION_APP_PATH";
+
 type TextToolResult = {
 	content: Array<{ type: "text"; text: string }>;
 	details: Record<string, never>;
 };
+
+// ── Summary / embedding providers ────────────────────────────────────────────
 
 function effectiveSummariesEnabled(config: ConductorConfig): boolean {
 	return config.summariesEnabled && ENV_SUMMARIES_ENABLED;
@@ -64,13 +116,11 @@ function effectiveEmbeddingsEnabled(config: ConductorConfig): boolean {
 	return config.embeddingsEnabled || ENV_EMBEDDINGS_ENABLED;
 }
 
-/** Default Ollama; prefer Gemini when GOOGLE_API_KEY is set (faster, no local timeout risk).
- *  Force Ollama with ACCORDION_OLLAMA=1; force cloud with ACCORDION_OLLAMA=0. */
+/** Default Ollama; prefer Gemini when GOOGLE_API_KEY is set. */
 function useOllamaSummary(config: ConductorConfig): boolean {
 	const env = process.env.ACCORDION_OLLAMA;
 	if (env === "0" || env === "false") return false;
 	if (env === "1" || env === "true") return true;
-	// Auto-prefer Gemini when key is available and no explicit model override
 	if (process.env.GOOGLE_API_KEY && !config.summaryModel.trim()) return false;
 	const m = config.summaryModel.trim().toLowerCase();
 	if (!m || m === config.ollamaModel.trim().toLowerCase()) return true;
@@ -109,12 +159,16 @@ function syncProviderErrorFromState(): void {
 	}
 }
 
+// ── Module-level state ───────────────────────────────────────────────────────
+
 let state: AccordionState = createAccordionState();
 let lastKnownMessages: AgentMessage[] = [];
 let summaryProvider = buildSummaryProvider(state.config);
 let embeddingProvider: any = null;
 let embeddingProviderInitAttempted = false;
 let lastEmbeddingModel = state.config.embeddingModel;
+
+// ── JSONL live snapshot (for the old file-based desktop preview) ─────────────
 
 function writeLiveSnapshot(ctx: ExtensionContext): void {
 	try {
@@ -124,23 +178,17 @@ function writeLiveSnapshot(ctx: ExtensionContext): void {
 			(e.type === "custom" && e.customType === CONDUCTOR_DECISION_TYPE),
 		);
 		const relevant = allEntries.filter((e: any) => e.type !== "custom" || e.customType !== CONDUCTOR_DECISION_TYPE);
-		// include last 20 conductor decisions
 		const decisions = allEntries.filter((e: any) => e.type === "custom" && e.customType === CONDUCTOR_DECISION_TYPE).slice(-20);
 
 		if (!relevant.some((e: any) => e.type === "session")) {
 			relevant.unshift({ type: "session", version: 3, cwd: "", timestamp: new Date().toISOString() });
 		}
 
-		// Build blockId → LLM summary map for currently folded blocks only.
 		const foldedSet = new Set(state.foldedBlockIds);
 		const foldedSummaries: Record<string, string> = {};
 		if (foldedSet.size > 0 && Object.keys(state.summaryCache).length > 0) {
-			// We need blocks to map id → contentHash. Parse from messages in branch.
 			try {
-				const messages = branch
-					.filter((e: any) => e.type === "message")
-					.map((e: any) => e.message)
-					.filter(Boolean);
+				const messages = branch.filter((e: any) => e.type === "message").map((e: any) => e.message).filter(Boolean);
 				const parsed = parseMessages(messages);
 				for (const block of parsed.blocks) {
 					if (!foldedSet.has(block.id)) continue;
@@ -148,9 +196,7 @@ function writeLiveSnapshot(ctx: ExtensionContext): void {
 					const summary = state.summaryCache[hash];
 					if (summary) foldedSummaries[block.id] = summary;
 				}
-			} catch {
-				/* tolerate parse errors — snapshot degrades gracefully */
-			}
+			} catch { /* tolerate parse errors */ }
 		}
 
 		relevant.push({
@@ -171,7 +217,7 @@ function writeLiveSnapshot(ctx: ExtensionContext): void {
 		const all = [...relevant, ...decisions];
 		const lines = all.map((e: any) => JSON.stringify(e)).join("\n") + "\n";
 		writeFile(LIVE_SNAPSHOT_PATH, lines, "utf8", () => {});
-	} catch {}
+	} catch { /* best-effort */ }
 }
 
 function resetProviders(): void {
@@ -179,126 +225,6 @@ function resetProviders(): void {
 	embeddingProvider = null;
 	embeddingProviderInitAttempted = false;
 	lastEmbeddingModel = state.config.embeddingModel;
-}
-
-/**
- * Drain app-side commands queued in COMMANDS_PATH (written by the 1420 app's
- * command bridge). Each line is a JSON command; commands older than 60 s are
- * skipped. Returns { changed, decisions } where changed is true if any command
- * mutated state and decisions collects FoldDecision records for persistence.
- */
-async function drainCommands(messages: AgentMessage[]): Promise<{ changed: boolean; decisions: FoldDecision[] }> {
-	let raw: string;
-	try {
-		raw = await readFileAsync(COMMANDS_PATH, "utf8");
-		await unlinkAsync(COMMANDS_PATH).catch(() => {});
-	} catch {
-		return { changed: false, decisions: [] }; // no commands file — nothing to drain
-	}
-
-	const now = Date.now();
-	const lines = raw.split("\n").filter(Boolean);
-	if (lines.length === 0) return { changed: false, decisions: [] };
-
-	let changed = false;
-	const decisions: FoldDecision[] = [];
-	for (const line of lines) {
-		try {
-			const cmd = JSON.parse(line) as Record<string, unknown>;
-			if (!cmd || typeof cmd.type !== "string") continue;
-			if (typeof cmd.ts === "number" && now - cmd.ts > 60_000) continue; // stale
-
-			switch (cmd.type) {
-				case "config": {
-					if (cmd.patch && typeof cmd.patch === "object") {
-						state.config = mergeConductorConfig({ ...state.config, ...(cmd.patch as Partial<ConductorConfig>) });
-						resetProviders();
-						changed = true;
-					}
-					break;
-				}
-				case "fold": {
-					if (messages.length === 0) break;
-					if (cmd.blockId) {
-						const r = foldBlocks(messages, state, [cmd.blockId as string], "you");
-						if (r.length) { changed = true; decisions.push(...r); }
-					} else {
-						if (!Number.isFinite(cmd.turnIndex)) break;
-						const r = agentFold(messages, state, String(cmd.turnIndex));
-						if (r.changes.length) {
-							for (const c of r.changes) c.actor = "you";
-							changed = true;
-							decisions.push(...r.changes);
-						}
-					}
-					break;
-				}
-				case "unfold": {
-					if (messages.length === 0) break;
-					if (cmd.blockId) {
-						const r = unfoldBlocks(messages, state, [cmd.blockId as string], "you");
-						if (r.length) { changed = true; decisions.push(...r); }
-					} else {
-						if (!Number.isFinite(cmd.turnIndex)) break;
-						const r = agentUnfold(messages, state, String(cmd.turnIndex));
-						if (r.changes.length) {
-							for (const c of r.changes) c.actor = "you";
-							changed = true;
-							decisions.push(...r.changes);
-						}
-					}
-					break;
-				}
-				case "pin": {
-					if (messages.length === 0) break;
-					if (cmd.blockId) {
-						const r = pinBlocks(messages, state, [cmd.blockId as string], "you");
-						if (r.length) { changed = true; decisions.push(...r); }
-					} else {
-						if (!Number.isFinite(cmd.turnIndex)) break;
-						const parsed = parseMessages(messages);
-						if (!parsed.turns.some((t) => t.index === cmd.turnIndex)) break;
-						if (!state.pinnedTurnIndexes.includes(cmd.turnIndex as number)) state.pinnedTurnIndexes.push(cmd.turnIndex as number);
-						const foldedSet = new Set(state.foldedBlockIds);
-						const maxTurn = parsed.turns.at(-1)?.index ?? 0;
-						for (const block of parsed.blocks) {
-							if (block.turn !== cmd.turnIndex) continue;
-							foldedSet.delete(block.id);
-							delete state.foldLevels[block.id];
-						}
-						state.foldedBlockIds = [...foldedSet];
-						changed = true;
-					}
-					break;
-				}
-				case "unpin": {
-					if (messages.length === 0) break;
-					if (cmd.blockId) {
-						const r = unpinBlocks(messages, state, [cmd.blockId as string], "you");
-						if (r.length) { changed = true; decisions.push(...r); }
-					} else {
-						if (!Number.isFinite(cmd.turnIndex)) break;
-						const before = state.pinnedTurnIndexes.length;
-						state.pinnedTurnIndexes = state.pinnedTurnIndexes.filter((n) => n !== cmd.turnIndex);
-						if (state.pinnedTurnIndexes.length !== before) changed = true;
-					}
-					break;
-				}
-				case "reset": {
-					state.foldedBlockIds = [];
-					state.foldLevels = {};
-					state.manualChanges = [];
-					state.pinnedTurnIndexes = [];
-					state.pinnedBlockIds = [];
-					changed = true;
-					break;
-				}
-			}
-		} catch {
-			/* skip malformed lines */
-		}
-	}
-	return { changed, decisions };
 }
 
 function restoreState(ctx: ExtensionContext): void {
@@ -346,6 +272,8 @@ function persist(pi: ExtensionAPI, blocks: ContextBlock[] = [], incomingPrompt =
 		lastRunHadPressure: state.lastRunHadPressure,
 		lastRunWithinBudget: state.lastRunWithinBudget,
 		calibrationEvents: state.calibrationEvents,
+		conductorPins: state.conductorPins,
+		groups: state.groups,
 		config: state.config,
 	});
 }
@@ -415,24 +343,550 @@ function unpinTurn(turn: number, ctx: ExtensionCommandContext): boolean {
 	return state.pinnedTurnIndexes.length + state.pinnedBlockIds.length !== before;
 }
 
+// ── App launch helpers (focus/open the GUI desktop window) ───────────────────
+
+type LaunchSource = "cli" | "env" | "default";
+type LaunchResult =
+	| { ok: true; path: string; source: LaunchSource }
+	| { ok: false; reason: "explicit-invalid"; path: string; source: Extract<LaunchSource, "cli" | "env"> }
+	| { ok: false; reason: "not-found" }
+	| { ok: false; reason: "spawn-failed"; path: string; source: LaunchSource; error: unknown };
+
+function cleanExplicitPath(value: unknown): string | null {
+	if (typeof value !== "string") return null;
+	let s = value.trim();
+	if (!s) return null;
+	if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) s = s.slice(1, -1).trim();
+	if (s === "~") return os.homedir();
+	if (s.startsWith("~/") || s.startsWith("~\\")) return path.join(os.homedir(), s.slice(2));
+	return s;
+}
+
+function isLaunchableFile(p: string): boolean {
+	try { return fs.statSync(p).isFile(); } catch { return false; }
+}
+
+function windowsInstallCandidates(): string[] {
+	if (process.platform !== "win32") return [];
+	const roots = [
+		process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, "Programs", "Accordion"),
+		process.env.ProgramFiles && path.join(process.env.ProgramFiles, "Accordion"),
+		process.env["ProgramFiles(x86)"] && path.join(process.env["ProgramFiles(x86)"], "Accordion"),
+		process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, "Accordion"),
+	].filter((s): s is string => !!s);
+	const out: string[] = [];
+	for (const root of roots) for (const name of ["Accordion.exe", "app.exe"]) out.push(path.join(root, name));
+	return out;
+}
+
+function repoAppCandidates(): string[] {
+	try {
+		const here = path.dirname(fileURLToPath(import.meta.url));
+		const repo = path.resolve(here, "..");
+		const ext = process.platform === "win32" ? ".exe" : "";
+		return [
+			path.join(repo, "app", "src-tauri", "target", "release", `app${ext}`),
+			path.join(repo, "app", "src-tauri", "target", "debug", `app${ext}`),
+		];
+	} catch { return []; }
+}
+
+function resolveAccordionApp(pi: ExtensionAPI): LaunchResult {
+	const flagPath = cleanExplicitPath(pi.getFlag(ACCORDION_APP_FLAG));
+	if (flagPath) {
+		if (isLaunchableFile(flagPath)) return { ok: true, path: flagPath, source: "cli" };
+		return { ok: false, reason: "explicit-invalid", path: flagPath, source: "cli" };
+	}
+	const envPath = cleanExplicitPath(process.env[ACCORDION_APP_ENV]);
+	if (envPath) {
+		if (isLaunchableFile(envPath)) return { ok: true, path: envPath, source: "env" };
+		return { ok: false, reason: "explicit-invalid", path: envPath, source: "env" };
+	}
+	for (const candidate of [...windowsInstallCandidates(), ...repoAppCandidates()]) {
+		if (isLaunchableFile(candidate)) return { ok: true, path: candidate, source: "default" };
+	}
+	return { ok: false, reason: "not-found" };
+}
+
+async function launchAccordionApp(pi: ExtensionAPI): Promise<LaunchResult> {
+	const resolved = resolveAccordionApp(pi);
+	if (!resolved.ok) return resolved;
+	try {
+		const child = spawn(resolved.path, [], { detached: true, stdio: "ignore", shell: false });
+		return await new Promise<LaunchResult>((resolve) => {
+			let settled = false;
+			const ok: LaunchResult = { ok: true, path: resolved.path, source: resolved.source };
+			const timer = setTimeout(() => finish(ok), 150);
+			const finish = (result: LaunchResult) => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				child.off("spawn", onSpawn);
+				child.unref();
+				resolve(result);
+			};
+			const onSpawn = () => finish(ok);
+			const onError = (error: unknown) => finish({ ok: false, reason: "spawn-failed", path: resolved.path, source: resolved.source, error });
+			child.once("spawn", onSpawn);
+			child.once("error", onError);
+		});
+	} catch (error) {
+		return { ok: false, reason: "spawn-failed", path: resolved.path, source: resolved.source, error };
+	}
+}
+
+function launchResultLine(result: LaunchResult | null): { text: string; type: "info" | "warning" } {
+	if (!result) return { text: "Accordion focus requested for this session.", type: "info" };
+	if (result.ok) return { text: "Launching/focusing Accordion for this session…", type: "info" };
+	if (result.reason === "explicit-invalid") {
+		const source = result.source === "cli" ? `--${ACCORDION_APP_FLAG}` : ACCORDION_APP_ENV;
+		return { text: `Accordion focus request written, but ${source} does not point to an executable: ${result.path}`, type: "warning" };
+	}
+	if (result.reason === "spawn-failed") {
+		return { text: `Accordion focus request written, but launching failed for ${result.path}. Set ${ACCORDION_APP_ENV} or --${ACCORDION_APP_FLAG} to the Accordion executable.`, type: "warning" };
+	}
+	return { text: `Accordion focus request written, but I couldn't find the desktop app. Open Accordion manually, or set ${ACCORDION_APP_ENV} / --${ACCORDION_APP_FLAG}.`, type: "warning" };
+}
+
+// ── HTTP discovery server ────────────────────────────────────────────────────
+// One per process on a fixed loopback port. First pi process wins; others skip.
+{
+	const srv = http.createServer((req, res) => {
+		res.setHeader("Access-Control-Allow-Origin", "*");
+		if (req.method === "GET" && req.url === "/sessions") {
+			try {
+				const files = fs.readdirSync(SESSIONS_DIR).filter(f => f.endsWith(".json") && !f.includes(".tmp"));
+				const entries = files.flatMap(f => {
+					try { return [JSON.parse(fs.readFileSync(path.join(SESSIONS_DIR, f), "utf8"))]; }
+					catch { return []; }
+				});
+				res.writeHead(200, { "Content-Type": "application/json" });
+				res.end(JSON.stringify(entries));
+			} catch {
+				res.writeHead(200, { "Content-Type": "application/json" });
+				res.end("[]");
+			}
+		} else {
+			res.writeHead(404);
+			res.end();
+		}
+	});
+	srv.on("error", () => {}); // port busy — another pi instance already holds it
+	srv.listen(DISCOVERY_PORT, "127.0.0.1");
+	srv.unref();
+}
+
+// ── Main extension ───────────────────────────────────────────────────────────
+
 export default function accordionExtension(pi: ExtensionAPI): void {
+	pi.registerFlag(ACCORDION_APP_FLAG, {
+		description: "Path to the Accordion desktop app executable for /accordion launch/focus",
+		type: "string",
+	});
+
+	// ── WebSocket server state ───────────────────────────────────────────────
+	let wss: WebSocketServer | null = null;
+	let client: WebSocket | null = null;
+	let sessionId = "";
+	let meta = { title: "pi session", cwd: "", model: "", contextWindow: null as number | null, format: "pi" as const };
+
+	let sentCount = 0;
+	let reqSeq = 0;
+	// Last messages snapshot seen at `context` or `agent_end`.
+	let lastMessages: PiMessage[] = [];
+	// Last parsed ContextBlocks — kept in sync with lastMessages so buildSnapshot
+	// can always translate Conductor block ids → live-link ids even in view-only syncs.
+	let lastParsedBlocks: ContextBlock[] = [];
+	// Messages finished since the last `context`/`agent_end` snapshot.
+	let pendingSince: PiMessage[] = [];
+	// Most recent ctx captured from hooks (for flush on attach).
+	let latestCtx: ExtensionContext | null = null;
+
+	// Registry fields
+	let port = 0;
+	let startedAt = 0;
+	let model = "";
+	let tokens: number | null = null;
+	let contextWindow: number | null = null;
+	let heartbeat: ReturnType<typeof setInterval> | null = null;
+
+	const attached = (): boolean => !!client && client.readyState === 1;
+
+	function send(ws: WebSocket, m: ServerMessage): void {
+		try { ws.send(JSON.stringify(m)); } catch { /* socket gone */ }
+	}
+
+	function sendStream(frame: StreamMessage): void {
+		const ws = client;
+		if (!ws || ws.readyState !== 1) return;
+		send(ws, frame);
+	}
+
+	// ── Registry ─────────────────────────────────────────────────────────────
+
+	function buildEntry(): SessionEntry {
+		return {
+			registryProtocol: 1,
+			protocolVersion: PROTOCOL_VERSION,
+			sessionId,
+			port,
+			pid: process.pid,
+			cwd: meta.cwd,
+			title: meta.title,
+			model,
+			tokens,
+			contextWindow,
+			startedAt,
+			heartbeatAt: Date.now(),
+		};
+	}
+
+	function writeEntry(): void {
+		if (!port || !sessionId) return;
+		try {
+			fs.mkdirSync(SESSIONS_DIR, { recursive: true });
+			const target = path.join(SESSIONS_DIR, `${sessionId}.json`);
+			const tmp = `${target}.${process.pid}.tmp`;
+			fs.writeFileSync(tmp, JSON.stringify(buildEntry()));
+			fs.renameSync(tmp, target);
+		} catch { /* best-effort */ }
+	}
+
+	function deleteEntry(): void {
+		if (!sessionId) return;
+		try { fs.unlinkSync(path.join(SESSIONS_DIR, `${sessionId}.json`)); } catch { /* already gone */ }
+	}
+
+	function writeFocusRequest(): void {
+		if (!sessionId) return;
+		try {
+			fs.mkdirSync(REGISTRY_ROOT, { recursive: true });
+			const req: FocusRequest = { sessionId, ts: Date.now() };
+			const tmp = `${FOCUS_PATH}.${process.pid}.tmp`;
+			fs.writeFileSync(tmp, JSON.stringify(req));
+			fs.renameSync(tmp, FOCUS_PATH);
+		} catch { /* best-effort */ }
+	}
+
+	function applyModel(m: { id?: string; contextWindow?: number } | undefined): void {
+		if (!m) return;
+		if (m.id) { model = m.id; meta.model = m.id; }
+		if (typeof m.contextWindow === "number" && m.contextWindow > 0) {
+			contextWindow = m.contextWindow;
+			meta.contextWindow = m.contextWindow;
+		}
+	}
+
+	function refreshFromCtx(ctx: ExtensionContext): void {
+		try {
+			applyModel(ctx.model as { id?: string; contextWindow?: number } | undefined);
+			const u = ctx.getContextUsage?.();
+			if (u) {
+				tokens = u.tokens;
+				if (typeof u.contextWindow === "number") { contextWindow = u.contextWindow; meta.contextWindow = u.contextWindow; }
+			}
+		} catch { /* optional APIs */ }
+	}
+
+	// ── Build the authoritative sync snapshot ─────────────────────────────────
+
+	/**
+	 * The Conductor's block ids (e.g. `${messageId}:u`, `${messageId}:${ci}`) differ
+	 * from the live-link's durable ids (`u:${timestamp}`, `a:${responseId}:p${j}`,
+	 * `r:${toolCallId}`). Translate Conductor ids → live-link ids using each
+	 * ContextBlock's `source` field (which records messageIndex and contentIndex) to
+	 * call the same `blockId()` function the live-link uses. Unmapped ids are dropped.
+	 */
+	function conductorToLiveIds(conductorIds: string[], conductorBlocks: ContextBlock[]): string[] {
+		const lookup = new Map<string, ContextBlock>();
+		for (const b of conductorBlocks) lookup.set(b.id, b);
+		const out: string[] = [];
+		for (const cid of conductorIds) {
+			const cb = lookup.get(cid);
+			if (!cb) continue;
+			const m = lastMessages[cb.source.messageIndex] as PiMessage | undefined;
+			if (!m) continue;
+			const liveId = blockId(m, cb.source.messageIndex, cb.source.contentIndex);
+			out.push(liveId);
+		}
+		return out;
+	}
+
+	function buildSnapshot(conductorBlocks?: ContextBlock[]) {
+		const blocks = conductorBlocks ?? lastParsedBlocks;
+		const lookup = new Map<string, ContextBlock>();
+		for (const b of blocks) lookup.set(b.id, b);
+
+		const foldedBlockIds = blocks.length
+			? conductorToLiveIds(state.foldedBlockIds, blocks)
+			: state.foldedBlockIds;
+		const pinnedBlockIds = blocks.length
+			? conductorToLiveIds(state.pinnedBlockIds, blocks)
+			: state.pinnedBlockIds;
+
+		// Fold levels and digest texts — keyed by live-link id.
+		const foldLevels: Record<string, 0 | 1 | 2 | 3> = {};
+		const foldedDigests: Record<string, string> = {};
+
+		for (const cid of state.foldedBlockIds) {
+			const cb = lookup.get(cid);
+			if (!cb) continue;
+			const liveId = conductorToLiveIds([cid], blocks)[0];
+			if (!liveId) continue;
+
+			const level = (state.foldLevels[cid] ?? 2) as FoldLevel;
+			foldLevels[liveId] = level;
+
+			// Compute the exact text the agent sees. Use cached LLM summary if available.
+			const hash = contentHash(cb);
+			const cached = state.summaryCache[hash];
+			let digestText: string;
+			if (level === 1) {
+				digestText = trimmedText(cb);
+			} else if (level === 3) {
+				digestText = groupMemberText(cb);
+			} else {
+				const body = cached || deterministicDigest(cb);
+				digestText = foldAddress(cb) + body;
+			}
+			foldedDigests[liveId] = digestText;
+		}
+
+		return {
+			foldedBlockIds,
+			pinnedBlockIds,
+			groups: state.groups as WireGroup[],
+			foldLevels,
+			foldedDigests,
+		};
+	}
+
+	// ── Read session history directly from session manager ────────────────────
+
+	function readSessionMessages(c: ExtensionContext | null): PiMessage[] {
+		if (!c) return [];
+		const sm = c.sessionManager as unknown as {
+			buildSessionContext?: () => { messages?: unknown };
+			getBranch?: (fromId?: string) => Array<{ type: string; message?: unknown }>;
+		} | undefined;
+		if (!sm) return [];
+		try {
+			const sc = sm.buildSessionContext?.();
+			if (sc && Array.isArray(sc.messages)) return sc.messages as PiMessage[];
+		} catch { /* fall through */ }
+		try {
+			const branch = sm.getBranch?.() ?? [];
+			const msgs = branch.filter((e) => e.type === "message" && e.message).map((e) => e.message as PiMessage);
+			msgs.reverse();
+			return msgs;
+		} catch { return []; }
+	}
+
+	// ── Handle inbound user actions from the GUI ──────────────────────────────
+
+	function handleUserAction(msg: UserActionMessage): void {
+		const messages = lastKnownMessages;
+		const decisions: FoldDecision[] = [];
+
+		switch (msg.action) {
+			case "fold":
+				if (msg.blockId && messages.length) {
+					const r = foldBlocks(messages, state, [msg.blockId], "you");
+					decisions.push(...r);
+				}
+				break;
+			case "unfold":
+				if (msg.blockId && messages.length) {
+					const r = unfoldBlocks(messages, state, [msg.blockId], "you");
+					decisions.push(...r);
+				}
+				break;
+			case "pin":
+				if (msg.blockId && messages.length) {
+					const r = pinBlocks(messages, state, [msg.blockId], "you");
+					decisions.push(...r);
+				}
+				break;
+			case "unpin":
+				if (msg.blockId && messages.length) {
+					const r = unpinBlocks(messages, state, [msg.blockId], "you");
+					decisions.push(...r);
+				}
+				break;
+			case "groupCreate": {
+				if (!msg.startId || !msg.endId) break;
+				const existingIds = new Set(state.groups.flatMap((g) => g.memberIds));
+				// Resolve indices from linearized blocks
+				const all = linearize(messages as PiMessage[]);
+				const startIdx = all.findIndex((b) => b.id === msg.startId);
+				const endIdx = all.findIndex((b) => b.id === msg.endId);
+				if (startIdx < 0 || endIdx < 0) break;
+				const lo = Math.min(startIdx, endIdx);
+				const hi = Math.max(startIdx, endIdx);
+				const memberIds = all.slice(lo, hi + 1).map((b) => b.id).filter((id) => !existingIds.has(id));
+				if (memberIds.length < 2) break;
+				const g: AccordionGroup = { id: `g:${memberIds[0]}`, memberIds, folded: true };
+				state.groups = [...state.groups, g];
+				break;
+			}
+			case "groupDelete": {
+				if (!msg.groupId) break;
+				state.groups = state.groups.filter((g) => g.id !== msg.groupId);
+				break;
+			}
+			case "groupFold": {
+				const g = state.groups.find((g) => g.id === msg.groupId);
+				if (g) { g.folded = true; state.groups = [...state.groups]; }
+				break;
+			}
+			case "groupUnfold": {
+				const g = state.groups.find((g) => g.id === msg.groupId);
+				if (g) { g.folded = false; state.groups = [...state.groups]; }
+				break;
+			}
+		}
+
+		if (decisions.length) persistDecisions(pi, decisions);
+		persist(pi);
+	}
+
+	// ── WebSocket server ──────────────────────────────────────────────────────
+
+	function startServer(): void {
+		if (wss) return;
+		try {
+			wss = new WebSocketServer({ host: "127.0.0.1", port: 0 }, () => {
+				const addr = wss?.address();
+				if (addr && typeof addr === "object") {
+					port = addr.port;
+					writeEntry();
+					if (!heartbeat) {
+						heartbeat = setInterval(writeEntry, HEARTBEAT_INTERVAL_MS);
+						heartbeat.unref?.();
+					}
+				}
+			});
+		} catch {
+			wss = null;
+			return;
+		}
+
+		wss.on("connection", (ws: WebSocket) => {
+			client = ws;
+			sentCount = 0;
+			reqSeq = 0;
+			send(ws, { type: "hello", protocolVersion: PROTOCOL_VERSION, sessionId, meta });
+
+			// Flush existing history on attach — critical for resumed/loaded sessions.
+			const live = readSessionMessages(latestCtx);
+			if (live.length) lastMessages = live;
+			const backlog = linearize(lastMessages);
+			const snap = buildSnapshot();
+			if (backlog.length) {
+				send(ws, {
+					type: "sync",
+					reqId: ++reqSeq,
+					full: true,
+					blocks: backlog,
+					contextWindow,
+					...snap,
+					decisions: [],
+				});
+				sentCount = backlog.length;
+			}
+
+			ws.on("message", (data: Buffer) => {
+				if (ws !== client) return;
+				let msg: any;
+				try { msg = JSON.parse(data.toString()); } catch { return; }
+				if (msg?.type === "userAction") {
+					handleUserAction(msg as UserActionMessage);
+					// Push updated snapshot back so the GUI sees the result immediately.
+					const updatedSnap = buildSnapshot();
+					send(ws, {
+						type: "sync",
+						reqId: ++reqSeq,
+						full: false,
+						blocks: [],
+						contextWindow,
+						...updatedSnap,
+						decisions: [],
+					});
+				}
+			});
+
+			const drop = () => { if (client === ws) client = null; };
+			ws.on("close", drop);
+			ws.on("error", drop);
+		});
+
+		wss.on("error", () => { wss = null; });
+	}
+
+	// Send a view-only sync (no decisions, just block deltas + current snapshot).
+	function pushViewSync(): void {
+		const ws = client;
+		if (!ws || ws.readyState !== 1) return;
+		const all = linearize([...lastMessages, ...pendingSince]);
+		if (all.length <= sentCount) return;
+		const snap = buildSnapshot();
+		send(ws, {
+			type: "sync",
+			reqId: ++reqSeq,
+			full: sentCount === 0,
+			blocks: all.slice(sentCount),
+			contextWindow,
+			...snap,
+			decisions: [],
+		});
+		sentCount = all.length;
+	}
+
+	// ── Lifecycle hooks ───────────────────────────────────────────────────────
+
 	pi.on("session_start", (_event, ctx) => {
+		latestCtx = ctx;
 		restoreState(ctx);
-		ctx.ui.setStatus("accordion", ctx.ui.theme.fg("accent", "\u{1FA97} accordion"));
+		sessionId = `s-${process.pid}-${Date.now()}`;
+		sentCount = 0;
+		pendingSince = [];
+		lastMessages = readSessionMessages(ctx);
+		startedAt = Date.now();
+		try { meta = { title: "pi session", cwd: process?.cwd?.() ?? "", model: "", contextWindow: null, format: "pi" }; }
+		catch { /* keep defaults */ }
+		refreshFromCtx(ctx);
+		startServer();
+		try { ctx.ui.setStatus("accordion", ctx.ui.theme.fg("accent", "\u{1FA97} accordion")); }
+		catch { /* status API optional */ }
 		writeLiveSnapshot(ctx);
 	});
 
+	pi.on("message_update", (event: any) => {
+		const ws = client;
+		if (!ws || ws.readyState !== 1) return;
+		const ev = event?.assistantMessageEvent;
+		if (!ev || typeof ev.type !== "string") return;
+		const t = ev.type as string;
+		const ci: number = typeof ev.contentIndex === "number" ? ev.contentIndex : 0;
+		if (t === "text_start") sendStream({ type: "stream", phase: "start", kind: "text", contentIndex: ci });
+		else if (t === "thinking_start") sendStream({ type: "stream", phase: "start", kind: "thinking", contentIndex: ci });
+		else if (t === "toolcall_start") sendStream({ type: "stream", phase: "start", kind: "tool_call", contentIndex: ci });
+		else if (t === "text_end") sendStream({ type: "stream", phase: "end", kind: "text", contentIndex: ci });
+		else if (t === "thinking_end") sendStream({ type: "stream", phase: "end", kind: "thinking", contentIndex: ci });
+		else if (t === "toolcall_end") sendStream({ type: "stream", phase: "end", kind: "tool_call", contentIndex: ci });
+		else if (t === "error" || t === "aborted") sendStream({ type: "stream", phase: "abort", kind: "text", contentIndex: -1 });
+	});
+
 	pi.on("context", async (event, ctx) => {
-		// Drain any commands queued by the 1420 app before running the Conductor.
-		const { changed: cmdChanged, decisions: cmdDecisions } = await drainCommands(event.messages as AgentMessage[]);
-		if (cmdChanged) {
-			if (cmdDecisions.length) persistDecisions(pi, cmdDecisions);
-			persist(pi);
-		}
+		latestCtx = ctx;
+		refreshFromCtx(ctx);
+		lastMessages = event.messages as unknown as PiMessage[];
+		pendingSince = [];
 
 		const before = JSON.stringify(state);
 		const incomingPrompt = extractIncomingPrompt(event.messages);
 		const parsed = parseMessages(event.messages);
+		lastParsedBlocks = parsed.blocks; // keep translation map current
 
 		try {
 			await ensureEmbeddingProvider(state.config);
@@ -471,12 +925,47 @@ export default function accordionExtension(pi: ExtensionAPI): void {
 			applyDecisionsToState(state, output.decisions);
 			persistDecisions(pi, output.decisions);
 		}
-		for (const warning of output.warnings) ctx.ui.notify(warning, "warning");
+		for (const warning of output.warnings) {
+			// Embedding-missing is a routine degradation (warm-up not complete yet) — show
+			// as info rather than warning to avoid alarming the user every turn.
+			const level = warning.includes("prompt vector") ? "info" : "warning";
+			ctx.ui.notify(warning, level);
+		}
 		syncProviderErrorFromState();
 		if (before !== JSON.stringify(state)) persist(pi, parsed.blocks, incomingPrompt);
 		writeLiveSnapshot(ctx);
 
-		// Inject skill when any blocks are folded so the model knows how to reach back.
+		// Push authoritative sync to the GUI — new blocks + full Conductor snapshot.
+		// Pass parsed.blocks so foldedBlockIds/pinnedBlockIds are translated from
+		// Conductor ids (${messageId}:${ci}) to live-link ids (u:…/a:…/r:…).
+		if (attached()) {
+			const all = linearize(lastMessages);
+			const fresh = all.slice(sentCount);
+			const snap = buildSnapshot(parsed.blocks);
+			const wireDecs = output.decisions.map((d): import("../app/src/lib/live/protocol.ts").WireFoldDecision => ({
+				blockId: d.blockId,
+				action: d.action as any,
+				actor: d.actor as any,
+				reason: d.reason,
+				turn: d.turn,
+				kind: d.kind as any,
+				callId: d.callId,
+				level: d.level,
+				fromLevel: d.fromLevel,
+			}));
+			send(client!, {
+				type: "sync",
+				reqId: ++reqSeq,
+				full: sentCount === 0,
+				blocks: fresh,
+				contextWindow,
+				...snap,
+				decisions: wireDecs,
+			});
+			sentCount = all.length;
+		}
+
+		// Inject skill when blocks are folded so the agent knows how to reach back.
 		let finalMessages = output.messages;
 		if (state.foldedBlockIds.length > 0) {
 			if (finalMessages === (event.messages as any)) {
@@ -502,18 +991,53 @@ export default function accordionExtension(pi: ExtensionAPI): void {
 		if (output.decisions.length || finalMessages !== (event.messages as any)) return { messages: finalMessages };
 	});
 
-	pi.on("session_before_compact", async (_event, ctx) => {
-		const messages = liveMessages(ctx);
+	pi.on("model_select", (event) => {
+		applyModel(event?.model as { id?: string; contextWindow?: number } | undefined);
+		if (attached()) {
+			const snap = buildSnapshot();
+			send(client!, { type: "sync", reqId: ++reqSeq, full: false, blocks: [], contextWindow, ...snap, decisions: [] });
+		}
+	});
+
+	pi.on("message_end", (event) => {
+		const ws = client;
+		if (!ws || ws.readyState !== 1) return;
+
+		sendStream({ type: "stream", phase: "abort", kind: "text", contentIndex: -1 });
+
+		const msg = event.message as unknown as PiMessage;
+		const msgIds = new Set(linearize([msg]).map((b) => b.id));
+		const baseIds = new Set(linearize(lastMessages).map((b) => b.id));
+		const pendIds = new Set(linearize(pendingSince).map((b) => b.id));
+		const alreadySeen = [...msgIds].some((id) => baseIds.has(id) || pendIds.has(id));
+		if (msgIds.size > 0 && !alreadySeen) pendingSince.push(msg);
+
+		pushViewSync();
+	});
+
+	pi.on("agent_end", (event, ctx: ExtensionContext) => {
+		latestCtx = ctx;
+		lastMessages = event.messages as unknown as PiMessage[];
+		pendingSince = [];
+
+		const ws = client;
+		if (!ws || ws.readyState !== 1) return;
+
+		sendStream({ type: "stream", phase: "abort", kind: "text", contentIndex: -1 });
+		pushViewSync();
+	});
+
+	/** Run the Conductor fold pass directly, used by both session_before_compact and /accordion. */
+	async function runCompact(messages: AgentMessage[], ctx: ExtensionContext | ExtensionCommandContext): Promise<void> {
 		const parsed = parseMessages(messages);
+		lastParsedBlocks = parsed.blocks; // keep translation map current
 		const incomingPrompt = extractIncomingPrompt(messages);
 		const beforeCount = state.foldedBlockIds.length;
 
 		if (effectiveEmbeddingsEnabled(state.config) && embeddingProvider) {
 			try {
 				await warmEmbeddings(parsed.blocks, incomingPrompt, embeddingProvider, state);
-			} catch {
-				/* embedding warm-up failure is non-fatal — fall back to keyword scoring */
-			}
+			} catch { /* non-fatal */ }
 		}
 
 		const output = runConductor(
@@ -527,7 +1051,7 @@ export default function accordionExtension(pi: ExtensionAPI): void {
 			},
 			{
 				summaryProvider,
-				log: (msg) => ctx.ui.notify(msg, "info"),
+				log: (msg) => (ctx as ExtensionContext).ui?.notify(msg, "info"),
 			},
 		);
 
@@ -540,19 +1064,51 @@ export default function accordionExtension(pi: ExtensionAPI): void {
 		const folded = new Set(state.foldedBlockIds);
 		const liveTok = parsed.blocks.reduce((sum, b) => sum + (folded.has(b.id) ? blockTokensAtLevel(b, state.foldLevels[b.id] ?? 2) : b.tokens), 0);
 		const newFolds = state.foldedBlockIds.length - beforeCount;
-		ctx.ui.notify(
+		(ctx as ExtensionContext).ui?.notify(
 			`Accordion: ${state.foldedBlockIds.length} blocks folded${newFolds > 0 ? ` (+${newFolds} new)` : ""} · live ~${liveTok.toLocaleString()} tok`,
 			"info",
 		);
 
-		writeLiveSnapshot(ctx);
+		writeLiveSnapshot(ctx as ExtensionContext);
+
+		// Push the updated fold state to the GUI immediately — otherwise the tiles
+		// only update at the next `context` hook (the next model call).
+		if (attached()) {
+			const all = linearize(lastMessages);
+			const snap = buildSnapshot(parsed.blocks);
+			send(client!, {
+				type: "sync",
+				reqId: ++reqSeq,
+				full: false,
+				blocks: [], // no new blocks — just a state update
+				contextWindow,
+				...snap,
+				decisions: [],
+			});
+		}
+	}
+
+	pi.on("session_before_compact", async (_event, ctx) => {
+		await runCompact(liveMessages(ctx), ctx);
 		return { cancel: true };
 	});
 
+	pi.on("session_shutdown", () => {
+		if (heartbeat) { clearInterval(heartbeat); heartbeat = null; }
+		deleteEntry();
+		try { client?.close(); } catch { /* ignore */ }
+		try { wss?.close(); } catch { /* ignore */ }
+		wss = null;
+		client = null;
+	});
+
+	// ── Commands ──────────────────────────────────────────────────────────────
+
 	pi.registerCommand("accordion", {
-		description: "Trigger Accordion context folding (like /compact); use /accordion status for a turn-by-turn report",
+		description: "Trigger Accordion context folding; /accordion status for a turn-by-turn report; /accordion focus to open the GUI",
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
-			if (args.trim() === "status") {
+			const arg = args.trim();
+			if (arg === "status") {
 				const messages = liveMessages(ctx);
 				const parsed = parseMessages(messages);
 				const folded = new Set(state.foldedBlockIds);
@@ -570,7 +1126,20 @@ export default function accordionExtension(pi: ExtensionAPI): void {
 				ctx.ui.notify(lines.join("\n"), "info");
 				return;
 			}
-			ctx.compact();
+			if (arg === "focus") {
+				writeFocusRequest();
+				const wasAttached = attached();
+				const launch = wasAttached ? null : await launchAccordionApp(pi);
+				const action = launchResultLine(launch);
+				ctx.ui.notify(
+					`${action.text}\nLive link: ${wasAttached ? "attached" : "detached"} · port ${port || "starting"} · streamed ${sentCount} blocks`,
+					action.type,
+				);
+				return;
+			}
+			// Default: run the Conductor fold pass directly (no pi compact flow →
+			// no "Compaction cancelled" error; Accordion owns the folding entirely).
+			await runCompact(liveMessages(ctx), ctx);
 		},
 	});
 
@@ -590,7 +1159,7 @@ export default function accordionExtension(pi: ExtensionAPI): void {
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
 			const n = parseInt(args.trim(), 10);
 			if (!Number.isFinite(n) || n < 1 || n > currentTurnCount(ctx) || !pinTurn(n, ctx)) {
-				ctx.ui.notify("Usage: /expand <turn#>  (see /accordion for numbers)", "warning");
+				ctx.ui.notify("Usage: /expand <turn#>  (see /accordion status for numbers)", "warning");
 				return;
 			}
 			persist(pi, parseMessages(liveMessages(ctx)).blocks);
@@ -624,20 +1193,26 @@ export default function accordionExtension(pi: ExtensionAPI): void {
 		description: "Fold a turn to digests right now: /fold <turn#> (reversible; /expand or /peek to get it back)",
 		getArgumentCompletions: turnCompletions,
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
-			const result = agentFold(liveMessages(ctx), state, args.trim());
-			// Human-invoked: re-attribute the change records to "you".
-			for (const change of result.changes) change.actor = "you";
-			for (let i = state.manualChanges.length - result.changes.length; i < state.manualChanges.length; i++) {
-				if (i >= 0) state.manualChanges[i].actor = "you";
-			}
-			if (!result.ok) {
-				ctx.ui.notify(`Usage: /fold <turn#>  \u2014 ${result.message}`, "warning");
+			// Human-invoked fold via command — uses foldBlocks directly.
+			const messages = liveMessages(ctx);
+			const parsed = parseMessages(messages);
+			const turns = args.trim().split(/[\s,]+/).filter(Boolean).map(Number).filter(Number.isFinite);
+			if (!turns.length) {
+				ctx.ui.notify("Usage: /fold <turn#>  — e.g. /fold 7", "warning");
 				return;
 			}
-			if (result.changes.length) persistDecisions(pi, result.changes);
-			persist(pi, parseMessages(liveMessages(ctx)).blocks);
+			const maxTurn = parsed.turns.at(-1)?.index ?? 0;
+			const validTurns = turns.filter((t) => t >= 1 && t < maxTurn && parsed.turns.some((pt) => pt.index === t));
+			if (!validTurns.length) {
+				ctx.ui.notify(`No foldable turns in "${args.trim()}". Current turn (${maxTurn}) can't be folded.`, "warning");
+				return;
+			}
+			const blockIds = parsed.blocks.filter((b) => validTurns.includes(b.turn)).map((b) => b.id);
+			const changes = foldBlocks(messages, state, blockIds, "you");
+			if (changes.length) persistDecisions(pi, changes);
+			persist(pi, parsed.blocks);
 			writeLiveSnapshot(ctx);
-			ctx.ui.notify(result.message, "info");
+			ctx.ui.notify(`Folded ${changes.length} block${changes.length === 1 ? "" : "s"} across turn${validTurns.length === 1 ? "" : "s"} ${validTurns.join(", ")}.`, "info");
 		},
 	});
 
@@ -647,7 +1222,7 @@ export default function accordionExtension(pi: ExtensionAPI): void {
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
 			const result = agentRecall(liveMessages(ctx), state, args.trim(), 4_000);
 			if (!result.ok) {
-				ctx.ui.notify(`Usage: /peek <turn#>  \u2014 ${result.message}`, "warning");
+				ctx.ui.notify(`Usage: /peek <turn#>  — ${result.message}`, "warning");
 				return;
 			}
 			ctx.ui.notify(result.content, "info");
@@ -656,20 +1231,13 @@ export default function accordionExtension(pi: ExtensionAPI): void {
 
 	pi.registerCommand("conductor-config", {
 		description: "Show or update Conductor runtime config (debug): /conductor-config [json]",
-		handler: async (args: string, ctx: ExtensionCommandContext) => {
-			// Drain any pending app commands first so the display/update is current.
-			await drainCommands(lastKnownMessages);
-
+		handler: async (args: string, _ctx: ExtensionCommandContext) => {
 			let raw = args.trim();
 			if (!raw) {
-				ctx.ui.notify(JSON.stringify(state.config, null, 2), "info");
+				pi.notify?.(JSON.stringify(state.config, null, 2), "info");
 				return;
 			}
-			// Tolerate shell-style wrapping quotes: '/conductor-config '{"a":1}''
-			if (
-				(raw.startsWith("'") && raw.endsWith("'")) ||
-				(raw.startsWith('"') && raw.endsWith('"'))
-			) {
+			if ((raw.startsWith("'") && raw.endsWith("'")) || (raw.startsWith('"') && raw.endsWith('"'))) {
 				raw = raw.slice(1, -1);
 			}
 			try {
@@ -677,15 +1245,28 @@ export default function accordionExtension(pi: ExtensionAPI): void {
 				state.config = mergeConductorConfig({ ...state.config, ...patch });
 				resetProviders();
 				persist(pi);
-				ctx.ui.notify("Conductor config updated — takes effect on the next message.", "info");
+				pi.notify?.("Conductor config updated — takes effect on the next message.", "info");
 			} catch (error) {
-				ctx.ui.notify(`Invalid config JSON: ${String(error)}`, "warning");
+				pi.notify?.(`Invalid config JSON: ${String(error)}`, "warning");
 			}
 		},
 	});
 
+	// ── Skill discovery ───────────────────────────────────────────────────────
+
+	pi.on("resources_discover", () => {
+		try {
+			const here = path.dirname(fileURLToPath(import.meta.url));
+			const skillDir = path.join(here, "..", "skills", "accordion");
+			if (fs.existsSync(skillDir)) return { skillPaths: [skillDir] };
+		} catch { /* best-effort */ }
+		return {};
+	});
+
 	registerAgentTools(pi);
 }
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 function formatTurnList(turns: number[]): string {
 	if (turns.length === 0) return "none";
@@ -717,23 +1298,20 @@ function textToolResult(text: string): TextToolResult {
 }
 
 /**
- * Bidirectional memory: register model-callable tools when the host pi build
- * supports extension tools. Feature-detected so the extension stays compatible
- * with older pi versions (where /peek, /fold, /expand cover the human side).
+ * Register model-callable tools when the host pi build supports extension tools.
+ * Permissions: agent can recall (read-only), unfold (restore), pin (protect).
+ * Agent CANNOT fold — only you and the Conductor fold (VISION.md table).
  */
 export function registerAgentTools(pi: ExtensionAPI): void {
 	const register = (pi as any).registerTool;
 	if (typeof register !== "function") return;
 
-	// Tool handlers may run without a command context in some hosts; cache the
-	// latest branch ctx from event handlers as a fallback message source.
 	const messagesFrom = (ctx: any): AgentMessage[] => {
 		try {
 			if (ctx?.sessionManager?.getBranch) return liveMessages(ctx);
 		} catch {}
 		return lastKnownMessages;
 	};
-	// Tolerate (args, ctx), (toolCallId, args, ctx), or ({turns}, ctx) signatures.
 	const pickArgs = (xs: any[]) => xs.find((x) => x && typeof x === "object" && "turns" in x) ?? {};
 	const pickCtx = (xs: any[]) => xs.find((x) => x && typeof x === "object" && x.sessionManager) ?? null;
 
@@ -774,15 +1352,6 @@ export function registerAgentTools(pi: ExtensionAPI): void {
 		return result.message;
 	});
 	wire(AGENT_TOOL_DEFS[2], (messages, turns, ctx) => {
-		const result = agentFold(messages, state, turns);
-		if (result.changes.length) {
-			persistDecisions(pi, result.changes);
-			persist(pi, parseMessages(messages).blocks);
-			if (ctx) writeLiveSnapshot(ctx);
-		}
-		return result.message;
-	});
-	wire(AGENT_TOOL_DEFS[3], (messages, turns, ctx) => {
 		const result = agentPin(messages, state, turns);
 		if (result.changes.length) {
 			persistDecisions(pi, result.changes);
