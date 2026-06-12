@@ -3,9 +3,9 @@
 	import { cubicOut } from "svelte/easing";
 	import type { AccordionStore } from "../../engine/store.svelte";
 	import type { Block, Group } from "../../engine/types";
-	import { groupDigest } from "$lib/engine/digest";
 	import Icon from "$lib/ui/Icon.svelte";
 	import { sendUserAction } from "$lib/live/liveClient.svelte";
+	import { BLOCK_KIND_LABEL, blockPreview, groupTurnRange, turnLabel } from "./groupSummary";
 
 	let {
 		store,
@@ -20,14 +20,6 @@
 		onselect: (id: string) => void;
 		onclose: () => void;
 	} = $props();
-
-	const KIND_LABEL: Record<Block["kind"], string> = {
-		user: "User",
-		text: "Reply",
-		thinking: "Thinking",
-		tool_call: "Tool call",
-		tool_result: "Tool result",
-	};
 
 	const CAP = 6000;
 	const fmt = (n: number) => n.toLocaleString();
@@ -57,24 +49,17 @@
 	const isMono = $derived(block?.kind === "tool_call" || block?.kind === "tool_result");
 
 	// Block mode: is this block part of a group? Used to render the "part of group" link.
-	const inGroup = $derived(block ? store.groupOf(block) : null);
+	const inGroup = $derived(block ? store.displayGroupOf(block) : null);
 
 	// Group mode derived values
 	const gMembers = $derived(group ? store.groupMembers(group) : []);
+	const gPersisted = $derived(group ? !!store.groupById(group.id) : false);
 	const gFullTok = $derived(group ? store.groupFullTokens(group) : 0);
 	const gLiveTok = $derived(group ? store.groupLiveTokens(group) : 0);
 	const gSavedTok = $derived(group ? store.groupSavedTokens(group) : 0);
 	const gStrag = $derived(group ? store.groupStragglerCount(group) : 0);
-	const gDigest = $derived(group ? groupDigest(group, store.groupMembers(group)) : "");
-	const gTurnFirst = $derived(gMembers.length > 0 ? gMembers[0].turn : 0);
-	const gTurnLast = $derived(gMembers.length > 0 ? gMembers[gMembers.length - 1].turn : 0);
-
-	function gTurnLabel(): string {
-		if (gMembers.length === 0) return "";
-		if (gTurnFirst === gTurnLast) return gTurnFirst === 0 ? "preamble" : `turn ${gTurnFirst}`;
-		if (gTurnFirst === 0) return `preamble–turn ${gTurnLast}`;
-		return `turns ${gTurnFirst}–${gTurnLast}`;
-	}
+	const gDigest = $derived(group ? store.groupSummary(group) : "");
+	const gTurnLabel = $derived(groupTurnRange(gMembers));
 
 	// ── Peek state — pure UI, never touches store or WebSocket ──────────────
 	// When peeking on a folded block the user reads the full content; the agent
@@ -119,7 +104,7 @@
 			<span class="group-dot"></span>
 			<span class="group-label">group · {gMembers.length} blocks</span>
 			<span class="grow"></span>
-			<span class="turn-badge tnum">{gTurnLabel()}</span>
+			<span class="turn-badge tnum">{gTurnLabel}</span>
 			<button class="close-btn" onclick={onclose} aria-label="Close inspector" title="Close">
 				<Icon name="x" size={16} />
 			</button>
@@ -156,20 +141,25 @@
 				{#if group.folded}
 					<button
 						class="action-btn action-primary-group"
-						onclick={() => store.unfoldGroup(group!.id)}
+						onclick={() => {
+							if (gPersisted) store.unfoldGroup(group!.id);
+							else for (const member of gMembers) if (store.isFolded(member)) doToggle(member);
+						}}
 						title="Unfold group to context"
 					>
 						<Icon name="chevrons-up-down" size={14} />
 						Unfold to context
 					</button>
-					<button
-						class="action-btn action-danger"
-						onclick={() => { store.deleteGroup(group!.id); onclose(); }}
-						title="Delete group"
-					>
-						<Icon name="trash-2" size={14} />
-						Delete
-					</button>
+					{#if gPersisted}
+						<button
+							class="action-btn action-danger"
+							onclick={() => { store.deleteGroup(group!.id); onclose(); }}
+							title="Delete group"
+						>
+							<Icon name="trash-2" size={14} />
+							Delete
+						</button>
+					{/if}
 				{:else}
 					<button
 						class="action-btn"
@@ -200,6 +190,35 @@
 				</div>
 				<pre class="digest-text mono">{gDigest}</pre>
 			</div>
+
+			<section class="group-members">
+				<header class="group-members-head">
+					<span class="group-members-title">Blocks in this group</span>
+					<span class="group-members-count tnum">{gMembers.length}</span>
+				</header>
+				<div class="group-member-list">
+					{#each gMembers as member (member.id)}
+						{@const memberFolded = store.isFolded(member)}
+						<button
+							type="button"
+							class="group-member-row k-{member.kind}"
+							onclick={() => onselect(member.id)}
+							title="Inspect block"
+						>
+							<span class="member-kind">
+								<span class="member-dot"></span>
+								{BLOCK_KIND_LABEL[member.kind]}
+							</span>
+							<span class="member-turn tnum">{turnLabel(member.turn)}</span>
+							<span class="member-tokens tnum">{fmt(member.tokens)} tok</span>
+							<span class="member-state" class:folded={memberFolded} class:live={!memberFolded}>
+								{memberFolded ? "folded" : "live"}
+							</span>
+							<span class="member-preview">{blockPreview(member)}</span>
+						</button>
+					{/each}
+				</div>
+			</section>
 		</div>
 	</aside>
 {:else if block}
@@ -208,14 +227,14 @@
 		<!-- ── Header ─────────────────────────────────────────────── -->
 		<header class="insp-header">
 			<span class="kind-dot k-{block.kind}"></span>
-			<span class="kind-label k-{block.kind}">{KIND_LABEL[block.kind]}</span>
+			<span class="kind-label k-{block.kind}">{BLOCK_KIND_LABEL[block.kind]}</span>
 			{#if block.toolName}
 				<span class="tool-name mono">{block.toolName}</span>
 			{/if}
 			{#if inGroup}
-				<button class="group-link" onclick={() => onselect(inGroup.id)} title="Go to group">
+				<button class="group-link" onclick={() => onselect(inGroup.id)} title="Back to group">
 					<Icon name="layers" size={11} />
-					part of a group
+					Back to group
 				</button>
 			{/if}
 			<span class="grow"></span>
@@ -762,6 +781,130 @@
 		font-size: var(--fs-xs);
 	}
 
+	.group-members {
+		display: flex;
+		flex-direction: column;
+		gap: var(--sp-2);
+	}
+
+	.group-members-head {
+		display: flex;
+		align-items: center;
+		gap: var(--sp-2);
+	}
+
+	.group-members-title {
+		font-size: var(--fs-xs);
+		font-weight: 700;
+		color: var(--faint);
+		text-transform: uppercase;
+		letter-spacing: .05em;
+	}
+
+	.group-members-count {
+		color: var(--group-accent);
+		background: color-mix(in srgb, var(--group-accent) 13%, transparent);
+		border: 1px solid color-mix(in srgb, var(--group-accent) 30%, transparent);
+		border-radius: var(--radius-pill);
+		padding: 1px 7px;
+		font-size: var(--fs-xs);
+		font-weight: 700;
+	}
+
+	.group-member-list {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+	}
+
+	.group-member-row {
+		--member-kc: var(--muted);
+		width: 100%;
+		display: grid;
+		grid-template-columns: minmax(92px, 1fr) auto auto auto;
+		align-items: center;
+		gap: var(--sp-2);
+		text-align: left;
+		background: var(--panel-2);
+		border: 1px solid var(--line-soft);
+		border-left: 3px solid var(--member-kc);
+		border-radius: var(--radius-sm);
+		padding: 8px 10px;
+		color: var(--text);
+		transition:
+			background var(--dur-fast) var(--ease-out),
+			border-color var(--dur-fast) var(--ease-out);
+	}
+
+	.group-member-row:hover {
+		background: var(--panel-3);
+		border-color: var(--line-strong);
+		border-left-color: var(--member-kc);
+	}
+
+	.group-member-row.k-user { --member-kc: var(--k-user); }
+	.group-member-row.k-text { --member-kc: var(--k-text); }
+	.group-member-row.k-thinking { --member-kc: var(--k-thinking); }
+	.group-member-row.k-tool_call { --member-kc: var(--k-tool_call); }
+	.group-member-row.k-tool_result { --member-kc: var(--k-tool_result); }
+
+	.member-kind,
+	.member-turn,
+	.member-tokens,
+	.member-state {
+		font-size: var(--fs-xs);
+		white-space: nowrap;
+	}
+
+	.member-kind {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		min-width: 0;
+		color: var(--member-kc);
+		font-weight: 700;
+	}
+
+	.member-dot {
+		width: 7px;
+		height: 7px;
+		border-radius: var(--radius-pill);
+		background: var(--member-kc);
+		flex: 0 0 auto;
+	}
+
+	.member-turn,
+	.member-tokens {
+		color: var(--faint);
+	}
+
+	.member-state {
+		border-radius: var(--radius-pill);
+		padding: 2px 7px;
+		font-weight: 700;
+	}
+
+	.member-state.folded {
+		color: var(--warn);
+		background: color-mix(in srgb, var(--warn) 12%, transparent);
+	}
+
+	.member-state.live {
+		color: var(--ok);
+		background: color-mix(in srgb, var(--ok) 10%, transparent);
+	}
+
+	.member-preview {
+		grid-column: 1 / -1;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		color: var(--muted);
+		font-size: var(--fs-xs);
+		line-height: 1.35;
+	}
+
 	/* Primary group action — warm amber (same family as the group accent) */
 	.action-btn.action-primary-group {
 		background: color-mix(in srgb, var(--group-accent) 22%, var(--panel-3));
@@ -806,4 +949,3 @@
 		border-color: color-mix(in srgb, var(--group-accent) 70%, transparent);
 	}
 </style>
-

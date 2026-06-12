@@ -171,6 +171,60 @@ export class AccordionStore {
 		return m;
 	});
 	/**
+	 * GUI-only groups inferred from live Conductor level-3 runs. The Conductor's graduated
+	 * compression keeps the first unit as a group digest and marks following units with
+	 * "folded into the group digest above", but it does not persist those as WireGroup
+	 * records. These derived groups let the map render that live shape as one readable
+	 * summary row without changing the wire protocol or token accounting.
+	 */
+	private conductorDisplayGroups = $derived.by<Group[]>(() => {
+		if (!this.liveMode) return [];
+		if (!Object.values(this.liveFoldLevels).some((level) => level === 3)) return [];
+
+		const explicitMembers = new Set<string>();
+		for (const g of this.groups) for (const id of g.memberIds) explicitMembers.add(id);
+
+		const groups: Group[] = [];
+		let i = 0;
+		while (i < this.blocks.length) {
+			const block = this.blocks[i];
+			if (this.liveFoldLevels[block.id] !== 3 || explicitMembers.has(block.id)) {
+				i++;
+				continue;
+			}
+
+			let head = i - 1;
+			if (head < 0 || this.liveFoldLevels[this.blocks[head].id] !== 2 || explicitMembers.has(this.blocks[head].id)) {
+				i++;
+				continue;
+			}
+			while (
+				head > 0 &&
+				this.liveFoldLevels[this.blocks[head - 1].id] === 2 &&
+				sameFoldUnit(this.blocks[head - 1], this.blocks[head]) &&
+				!explicitMembers.has(this.blocks[head - 1].id)
+			) {
+				head--;
+			}
+
+			let end = i;
+			while (
+				end < this.blocks.length &&
+				this.liveFoldLevels[this.blocks[end].id] === 3 &&
+				!explicitMembers.has(this.blocks[end].id)
+			) {
+				end++;
+			}
+
+			const memberIds = this.blocks.slice(head, end).map((member) => member.id);
+			if (memberIds.length >= 3) groups.push({ id: `cg:${memberIds[0]}`, memberIds, folded: true });
+			i = end;
+		}
+		return groups;
+	});
+	/** Real user groups plus GUI-only live Conductor display groups. */
+	displayGroups = $derived.by<Group[]>(() => [...this.groups, ...this.conductorDisplayGroups]);
+	/**
 	 * For every block inside a FOLDED group, its effective live contribution + folded
 	 * state — so `effTokens`/`isFolded` mirror exactly what the wire does (ADR 0006 §5):
 	 * the carrier holds the one summary's tokens, other collapsed members hold 0, and a
@@ -483,8 +537,15 @@ export class AccordionStore {
 	groupOf(b: Block): Group | undefined {
 		return this.groupAt.get(b.id);
 	}
+	/** Display group a block belongs to, including GUI-only live Conductor groups. */
+	displayGroupOf(b: Block): Group | undefined {
+		return this.displayGroups.find((g) => g.memberIds.includes(b.id));
+	}
 	groupById(id: string): Group | undefined {
 		return this.groups.find((g) => g.id === id);
+	}
+	displayGroupById(id: string): Group | undefined {
+		return this.groupById(id) ?? this.conductorDisplayGroups.find((g) => g.id === id);
 	}
 	groupMembers(g: Group): Block[] {
 		const out: Block[] = [];
@@ -669,3 +730,9 @@ function label(b: Block): string {
 	return b.toolName ? `${b.kind} ${b.toolName} · ${where}` : `${b.kind} · ${where}`;
 }
 
+function sameFoldUnit(a: Block, b: Block): boolean {
+	return !!a.callId && a.callId === b.callId && (
+		(a.kind === "tool_call" && b.kind === "tool_result") ||
+		(a.kind === "tool_result" && b.kind === "tool_call")
+	);
+}

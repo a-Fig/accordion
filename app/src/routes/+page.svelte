@@ -38,7 +38,7 @@
 		session.store && selectedId ? session.store.blocks.find((b) => b.id === selectedId) ?? null : null,
 	);
 	const selectedGroup = $derived(
-		session.store && selectedId ? session.store.groupById(selectedId) ?? null : null,
+		session.store && selectedId ? session.store.displayGroupById(selectedId) ?? null : null,
 	);
 	const demoSelected = $derived(discovery.selected === DEMO_ID);
 

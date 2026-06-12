@@ -88,27 +88,30 @@ export function buildDisplay(
 	return rows;
 }
 
-/** A run of plain/collapsed tiles that lays out as ONE uniform CSS grid. */
-export type TilesSegment = { kind: "tiles"; rows: DisplayRow[] };
+export type BlockDisplayRow = Extract<DisplayRow, { type: "block" }>;
+/** A run of plain block tiles that lays out as ONE uniform CSS grid. */
+export type TilesSegment = { kind: "tiles"; rows: BlockDisplayRow[] };
+/** One COLLAPSED group, rendered as a full-width summary band between grids. */
+export type GroupSummarySegment = { kind: "groupSummary"; row: Extract<DisplayRow, { type: "group" }> };
 /** One OPEN group, rendered as a full-width band of natural height between grids. */
 export type BandSegment = { kind: "band"; row: Extract<DisplayRow, { type: "groupOpen" }> };
-export type DisplaySegment = TilesSegment | BandSegment;
+export type DisplaySegment = TilesSegment | GroupSummarySegment | BandSegment;
 
 /**
- * Split a display-row list into stacked segments so an OPEN group (`groupOpen`) never lives
- * inside the dense tile grid. An open group's band is multi-line (parent tile + member tiles
- * + actions) and a fixed-row CSS grid (`grid-auto-rows: var(--cell)`) would pin it to one
- * cell-height track — its content then overflows and overlaps the next row, tearing the grid.
+ * Split a display-row list into stacked segments so group rows never live inside the dense
+ * tile grid. An open group's band is multi-line (parent tile + member tiles + actions) and a
+ * fixed-row CSS grid (`grid-auto-rows: var(--cell)`) would pin it to one cell-height track —
+ * its content then overflows and overlaps the next row, tearing the grid.
  *
- * Instead each maximal run of `block` + COLLAPSED-`group` rows becomes a `tiles` segment (one
- * uniform grid), and every `groupOpen` row becomes its own `band` segment. The component
- * renders the segments as a vertical stack: grid · band · grid · …, so each band gets its
- * natural height and the surrounding tile grids stay perfectly uniform. A COLLAPSED group is a
- * single square, so it stays INSIDE the tile grid — only open groups break the flow. Pure.
+ * Instead each maximal run of plain `block` rows becomes a `tiles` segment (one uniform grid),
+ * each COLLAPSED `group` becomes a readable summary segment, and every `groupOpen` row becomes
+ * its own `band` segment. The component renders the segments as a vertical stack: grid · group
+ * summary · band · grid · …, so group text gets natural height and the surrounding tile grids
+ * stay perfectly uniform. Pure.
  */
 export function segmentDisplay(rows: DisplayRow[]): DisplaySegment[] {
 	const segs: DisplaySegment[] = [];
-	let cur: DisplayRow[] | null = null;
+	let cur: BlockDisplayRow[] | null = null;
 	for (const r of rows) {
 		if (r.type === "groupOpen") {
 			if (cur) {
@@ -116,6 +119,12 @@ export function segmentDisplay(rows: DisplayRow[]): DisplaySegment[] {
 				cur = null;
 			}
 			segs.push({ kind: "band", row: r });
+		} else if (r.type === "group") {
+			if (cur) {
+				segs.push({ kind: "tiles", rows: cur });
+				cur = null;
+			}
+			segs.push({ kind: "groupSummary", row: r });
 		} else {
 			(cur ??= []).push(r);
 		}

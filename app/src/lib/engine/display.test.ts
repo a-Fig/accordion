@@ -78,7 +78,7 @@ describe("buildDisplay", () => {
 	});
 });
 
-// ---- segmentDisplay: open groups break the grid into stacked segments -----------
+// ---- segmentDisplay: groups break the grid into stacked segments ----------------
 describe("segmentDisplay", () => {
 	const blocks = ["a", "b", "c", "d", "e"].map(blk);
 	const kinds = (segs: ReturnType<typeof segmentDisplay>) => segs.map((s) => s.kind);
@@ -89,23 +89,34 @@ describe("segmentDisplay", () => {
 		expect(segs[0].kind === "tiles" && segs[0].rows.length).toBe(5);
 	});
 
-	it("a COLLAPSED group stays INSIDE the tile grid (one square, no band)", () => {
+	it("a folded group emits one collapsed group summary segment", () => {
 		const g: Group = { id: "g:b", memberIds: ["b", "c", "d"], folded: true };
 		const segs = segmentDisplay(buildDisplay(blocks, [g]));
-		expect(kinds(segs)).toEqual(["tiles"]); // a:tile, group:tile, e:tile — all one grid
+		expect(kinds(segs)).toEqual(["tiles", "groupSummary", "tiles"]);
+		expect(segs[1].kind === "groupSummary" && segs[1].row.group.id).toBe("g:b");
+		expect(segs[1].kind === "groupSummary" && segs[1].row.members.map((m) => m.id)).toEqual(["b", "c", "d"]);
 	});
 
-	it("an OPEN group splits the run into grid · band · grid", () => {
+	it("a folded + peeked group emits an open preview row", () => {
+		const g: Group = { id: "g:b", memberIds: ["b", "c", "d"], folded: true };
+		const segs = segmentDisplay(buildDisplay(blocks, [g], new Set(["g:b"])));
+		expect(kinds(segs)).toEqual(["tiles", "band", "tiles"]);
+		expect(segs[1].kind === "band" && segs[1].row.live).toBe(false);
+	});
+
+	it("an unfolded group emits a live open row", () => {
 		const g: Group = { id: "g:b", memberIds: ["b", "c", "d"], folded: false };
 		const segs = segmentDisplay(buildDisplay(blocks, [g]));
 		expect(kinds(segs)).toEqual(["tiles", "band", "tiles"]);
 		expect(segs[1].kind === "band" && segs[1].row.group.id).toBe("g:b");
+		expect(segs[1].kind === "band" && segs[1].row.live).toBe(true);
 	});
 
-	it("a PEEKED group also splits into a band (it renders open)", () => {
+	it("ordinary blocks before and after a folded group remain in order", () => {
 		const g: Group = { id: "g:b", memberIds: ["b", "c", "d"], folded: true };
-		const segs = segmentDisplay(buildDisplay(blocks, [g], new Set(["g:b"])));
-		expect(kinds(segs)).toEqual(["tiles", "band", "tiles"]);
+		const segs = segmentDisplay(buildDisplay(blocks, [g]));
+		expect(segs[0].kind === "tiles" && ids(segs[0].rows)).toEqual(["b:a"]);
+		expect(segs[2].kind === "tiles" && ids(segs[2].rows)).toEqual(["b:e"]);
 	});
 
 	it("an open group at the very start emits no leading empty tiles segment", () => {
@@ -122,4 +133,3 @@ describe("segmentDisplay", () => {
 		expect(kinds(segs)).toEqual(["band", "band", "tiles"]);
 	});
 });
-
