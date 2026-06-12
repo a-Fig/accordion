@@ -317,3 +317,30 @@ describe("group fold/unfold/delete lifecycle", () => {
 	});
 });
 
+describe("live Conductor display groups", () => {
+	it("infers a collapsed display group from a level-2 head followed by level-3 members", () => {
+		const s = makeStore();
+		s.setLiveMode(true);
+		s.applyLiveSnapshot(
+			["u:1", "a:r1:p0", "a:r1:p1"],
+			[],
+			[],
+			{ "u:1": 2, "a:r1:p0": 3, "a:r1:p1": 3 },
+			{},
+		);
+
+		const g = s.displayGroups.find((group) => group.id === "cg:u:1");
+		expect(g).toBeTruthy();
+		expect(g!.memberIds).toEqual(["u:1", "a:r1:p0", "a:r1:p1"]);
+		expect(s.displayGroupById(g!.id)).toEqual(g);
+		expect(s.displayGroupOf(s.get("a:r1:p0")!)?.id).toBe(g!.id);
+		expect(s.groups).toEqual([]);
+	});
+
+	it("does not infer live display groups when no level-3 members are present", () => {
+		const s = makeStore();
+		s.setLiveMode(true);
+		s.applyLiveSnapshot(["u:1", "a:r1:p0"], [], [], { "u:1": 2, "a:r1:p0": 2 }, {});
+		expect(s.displayGroups).toEqual([]);
+	});
+});

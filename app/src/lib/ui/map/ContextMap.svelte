@@ -9,6 +9,7 @@
 	import { buildDisplay, segmentDisplay, type DisplayRow } from "$lib/engine/display";
 	import Icon from "$lib/ui/Icon.svelte";
 	import SegControl from "$lib/ui/SegControl.svelte";
+	import { BLOCK_KIND_LABEL, groupSummaryMeta } from "./groupSummary";
 	import TileCanvas from "./TileCanvas.svelte";
 	import type { TileSpec } from "./tileDraw";
 	import { faceFor as faceForLib } from "./tileDraw";
@@ -72,64 +73,41 @@
 	// A group id in `peeked` renders its members OPEN-but-DULL while the group stays
 	// `folded` → the wire is byte-for-byte unchanged (computeGroupOps still emits the
 	// group's op). CARDINAL INVARIANT: entering/leaving peek NEVER calls a store group
-	// mutator and NEVER touches `group.folded`. Only the explicit "Unfold to context"
-	// button changes the wire. Mutated immutably (reassign a new Set) so `displayRows`
-	// re-derives.
+	// mutator and NEVER touches `group.folded`. Ordinary group clicks inspect the group;
+	// double-clicking any open/preview group collapses it back to the summary row.
 	let peeked = $state(new Set<string>());
-	function enterPeek(gid: string) {
-		const next = new Set(peeked);
-		next.add(gid);
-		peeked = next;
-	}
 	function leavePeek(gid: string) {
 		if (!peeked.has(gid)) return;
 		const next = new Set(peeked);
 		next.delete(gid);
 		peeked = next;
 	}
-	function togglePeek(gid: string) {
-		peeked.has(gid) ? leavePeek(gid) : enterPeek(gid);
-	}
 
 	// ---- display list for the older box: groups + plain blocks via buildDisplay ----
 	const olderBlocks = $derived(store.blocks.slice(0, protectedFrom));
-	const displayRows = $derived(buildDisplay(olderBlocks, store.groups, peeked));
-	// An OPEN group breaks the dense grid into stacked segments (grid · band · grid · …) so its
-	// multi-line band gets natural height instead of overflowing one fixed-height grid track.
+	const displayRows = $derived(buildDisplay(olderBlocks, store.displayGroups, peeked));
+	// Groups break the dense grid into stacked segments so collapsed summaries and open
+	// previews get natural DOM height while plain blocks stay in fast canvas grids.
 	const segments = $derived(segmentDisplay(displayRows));
 
 	// ---- TileSpec arrays for each canvas segment (reactive, $derived) -----------
 	// Each change to selectedId / rangeSet / fold state / blocks produces new spec
 	// arrays → the canvases redraw once. This is the performance win.
 
-	/** Build specs for a "tiles" segment (collapsed groups + plain blocks). */
-	function buildTilesSpecs(rows: DisplayRow[]): TileSpec[] {
+	/** Build specs for a "tiles" segment (plain blocks only). */
+	function buildTilesSpecs(rows: Extract<DisplayRow, { type: "block" }>[]): TileSpec[] {
 		const out: TileSpec[] = [];
 		for (const row of rows) {
-			if (row.type === "block") {
-				const b = row.block;
-				out.push({
-					id: b.id,
-					kind: b.kind,
-					face: faceFor(b.tokens),
-					folded: store.isFolded(b),
-					pinned: b.override === "pinned",
-					selected: b.id === selectedId,
-					inrange: rangeSet.has(b.id),
-				});
-			} else {
-				// collapsed group tile
-				const g = row.group;
-				out.push({
-					id: g.id,
-					kind: "group",
-					face: faceFor(store.groupLiveTokens(g)),
-					folded: false,
-					pinned: false,
-					selected: selectedId === g.id,
-					inrange: false,
-				});
-			}
+			const b = row.block;
+			out.push({
+				id: b.id,
+				kind: b.kind,
+				face: faceFor(b.tokens),
+				folded: store.isFolded(b),
+				pinned: b.override === "pinned",
+				selected: b.id === selectedId,
+				inrange: rangeSet.has(b.id),
+			});
 		}
 		return out;
 	}
@@ -324,7 +302,7 @@
 			: "";
 		const savedStr = saved > 0 ? ` · saves ${k(saved)} tok` : "";
 		const stragStr = strag > 0 ? ` · ${strag} kept live` : "";
-		return `group · ${members.length} blocks · ${k(full)} tok full${savedStr}${stragStr}\n${turns}\nclick to peek · double-click to collapse`;
+		return `folded group · ${members.length} blocks · ${k(full)} tok full${savedStr}${stragStr}\n${turns}\nclick to inspect blocks · double-click to collapse/close preview`;
 	}
 
 	// ---- range selection state (local — for creating groups) ----------------
@@ -386,10 +364,10 @@
 	// group go live or vanish. Drop stale peek entries so the band doesn't persist after
 	// the group is no longer folded (unfolded → live) or no longer exists (deleted).
 	$effect(() => {
-		const live = store.groups; // re-run when groups change
+		const live = store.displayGroups; // re-run when real or inferred display groups change
 		void live;
 		untrack(() => {
-			const next = new Set([...peeked].filter((gid) => store.groupById(gid)?.folded));
+			const next = new Set([...peeked].filter((gid) => store.displayGroupById(gid)?.folded));
 			if (next.size !== peeked.size) peeked = next;
 		});
 	});
@@ -421,7 +399,7 @@
 	// to a stale dull-preview row. The ONLY store mutation here is foldGroup (re-fold) —
 	// peek itself is never a wire op.
 	function collapseGroup(gid: string) {
-		const g = store.groupById(gid);
+		const g = store.displayGroupById(gid);
 		if (g && !g.folded) store.foldGroup(gid);
 		leavePeek(gid);
 	}
@@ -432,9 +410,8 @@
 		// During an active range-select, a group tile is not a valid range target — ignore.
 		if (shiftKey && rangeAnchorId) return;
 		deferClick(() => {
-			const grp = store.groupById(gid);
+			const grp = store.displayGroupById(gid);
 			if (grp && grp.memberIds.length > 0) onselect(gid);
-			if (grp?.folded) togglePeek(gid);
 		});
 	}
 
@@ -443,7 +420,7 @@
 		// Range-select is a map-only gesture.
 		if (view === "map" && shiftKey && rangeAnchorId) {
 			clearPendingClick();
-			if (!bl || store.isProtected(bl) || store.groupOf(bl)) {
+			if (!bl || store.isProtected(bl) || store.displayGroupOf(bl)) {
 				groupErr = true;
 				return;
 			}
@@ -453,7 +430,7 @@
 		}
 		deferClick(() => {
 			onselect(id);
-			rangeAnchorId = view === "map" && bl && !store.isProtected(bl) && !store.groupOf(bl) ? id : null;
+			rangeAnchorId = view === "map" && bl && !store.isProtected(bl) && !store.displayGroupOf(bl) ? id : null;
 			rangeEndId = null;
 			groupErr = false;
 		});
@@ -496,7 +473,7 @@
 		}
 		let text: string;
 		if (spec.kind === "group") {
-			const g = store.groupById(spec.id);
+			const g = store.displayGroupById(spec.id);
 			text = g ? groupTip(g) : spec.id;
 		} else {
 			const b = store.get(spec.id);
@@ -557,7 +534,7 @@
 	// GRID collapses; Turns/Chains render every member as its own ribbon tile.
 	const collapsedGroupOf = (b: Block): Group | undefined => {
 		if (view !== "map") return undefined;
-		const g = store.groupOf(b);
+		const g = store.displayGroupOf(b);
 		return g?.folded && !peeked.has(g.id) ? g : undefined;
 	};
 	const navOrder = $derived.by<number[]>(() => {
@@ -628,16 +605,15 @@
 		for (const ref of Object.values(canvasRefs)) {
 			if (ref) centers.push(...ref.allTileCenters());
 		}
-		// Also include the DOM tiles of OPEN groups (canvas tiles have no data-* attrs, so
-		// there is no overlap): the band MEMBER tiles (`.group-band [data-id]` = block id)
-		// AND the visible open-group PARENT tile (`.group-tile-open[data-group]` = group id,
-		// a selectable stop when selectedId is the group id). We target `.group-tile-open`
-		// specifically, NOT plain `[data-group]`, so we don't grab the outer `.group-band`
-		// wrapper (its rect is the whole band, not the parent tile). getBoundingClientRect()
-		// returns client coords, the same space allTileCenters() uses (canvasRect.left + x).
+		// Also include DOM group rows (canvas tiles have no data-* attrs, so there is no
+		// overlap): collapsed summaries, open-group member tiles, and the visible open-group
+		// parent tile. We target `.group-tile-open` specifically, NOT plain `[data-group]`, so
+		// we don't grab the outer `.group-band` wrapper (its rect is the whole band, not the
+		// parent tile). getBoundingClientRect() returns client coords, the same space
+		// allTileCenters() uses (canvasRect.left + x).
 		if (stage) {
 			for (const el of stage.querySelectorAll<HTMLElement>(
-				".group-band [data-id], .group-tile-open[data-group]",
+				".group-summary[data-group], .group-band [data-id], .group-tile-open[data-group]",
 			)) {
 				const id = el.dataset.id ?? el.dataset.group;
 				if (!id) continue;
@@ -691,7 +667,7 @@
 		let pos = -1;
 		if (selectedId) {
 			// If selectedId is a group id, use its first member as the representative block.
-			const grpSel = store.groupById(selectedId);
+			const grpSel = store.displayGroupById(selectedId);
 			const repBlockId = grpSel ? grpSel.memberIds[0] : selectedId;
 			const sel = store.blocks.findIndex((b) => b.id === repBlockId);
 			if (sel !== -1) {
@@ -847,7 +823,7 @@
 							<span class="tok"><AnimatedNumber value={olderTok} format={k} /></span>
 						</div>
 						<div class="stack">
-							{#each segments as seg, segIdx (seg.kind === "band" ? "band-" + seg.row.group.id : "tiles-" + (seg.rows[0].type === "block" ? seg.rows[0].block.id : seg.rows[0].group.id))}
+							{#each segments as seg, segIdx (seg.kind === "tiles" ? "tiles-" + segIdx + "-" + (seg.rows[0]?.block.id ?? "empty") : seg.kind + "-" + seg.row.group.id)}
 								{#if seg.kind === "tiles"}
 									<!-- Canvas replaces the DOM .grid for tile segments -->
 									<TileCanvas
@@ -860,6 +836,49 @@
 										ondbl={onCanvasDbl}
 										onhover={onCanvasHover}
 									/>
+								{:else if seg.kind === "groupSummary"}
+									{@const g = seg.row.group}
+									{@const members = seg.row.members}
+									{@const meta = groupSummaryMeta(g, members, store.groupSummary(g), store.groupSavedTokens(g))}
+									<!-- COLLAPSED GROUP — one readable summary replaces the hidden member run. -->
+									<article
+										class="group-summary"
+										class:sel={selectedId === g.id}
+										data-group={g.id}
+										title={groupTip(g)}
+										aria-label="{meta.status}, {meta.memberCount} blocks, {meta.turnRange}, saved {k(meta.savedTokens)} tokens"
+									>
+										<div class="group-summary-strip" aria-hidden="true">
+											{#each members as mb (mb.id)}
+												<span
+													class="summary-strip-seg k-{mb.kind}"
+													style:flex-grow={Math.max(1, Math.min(6, faceFor(mb.tokens)))}
+												></span>
+											{/each}
+										</div>
+										<div class="group-summary-body">
+											<header class="group-summary-head">
+												<span class="summary-status">
+													<Icon name="layers" size={12} />
+													{meta.status}
+												</span>
+												<span class="summary-metric">{meta.memberCount} blocks</span>
+												{#if meta.turnRange}
+													<span class="summary-metric">{meta.turnRange}</span>
+												{/if}
+												<span class="summary-metric summary-saved">saved {k(meta.savedTokens)} tok</span>
+											</header>
+											<pre class="group-summary-digest mono">{meta.digest}</pre>
+											<div class="group-summary-kinds" aria-label="Block kinds in this group">
+												{#each members.slice(0, 8) as mb (mb.id)}
+													<span class="summary-kind k-{mb.kind}">{BLOCK_KIND_LABEL[mb.kind]}</span>
+												{/each}
+												{#if members.length > 8}
+													<span class="summary-kind more">+{members.length - 8}</span>
+												{/if}
+											</div>
+										</div>
+									</article>
 								{:else}
 									{@const g = seg.row.group}
 									{@const live = seg.row.live}
@@ -871,7 +890,7 @@
 											class="cell face f{faceFor(store.groupLiveTokens(g))} group-tile group-tile-open"
 											class:sel={selectedId === g.id}
 											data-group={g.id}
-											title="{live ? 'group (unfolded — live)' : 'group (peek — preview only)'} · {seg.row.members.length} blocks · double-click to collapse"
+											title="{live ? 'group (unfolded — live)' : 'group (peek — preview only)'} · {seg.row.members.length} blocks · click to inspect blocks · double-click to collapse/close preview"
 										></div>
 										<div class="band-members">
 											{#each seg.row.members as mb (mb.id)}
@@ -1413,8 +1432,8 @@
 	}
 
 	/* ---- group tile styles — for .group-tile-open in the open-group band ---- */
-	/* The collapsed group tile in tile grids is now drawn on canvas (no DOM .group-tile
-	   needed there). Only .group-tile-open (the dull parent inside the band) remains DOM. */
+	/* Collapsed groups render as full-width summaries; only the dull open-row parent
+	   remains a DOM square tile. */
 	.group-tile {
 		/* Kept for .group-tile-open which also uses this base. */
 		background: var(--group);
@@ -1456,6 +1475,134 @@
 		box-shadow:
 			inset 0 0 0 2px var(--group-accent),
 			inset 0 0 0 3px rgba(0, 0, 0, 0.55);
+	}
+
+	/* ---- collapsed group summary: one full-width readable row replacing the hidden run ---- */
+	.group-summary {
+		position: relative;
+		display: grid;
+		grid-template-columns: 7px minmax(0, 1fr);
+		min-height: calc(var(--cell) * 3);
+		background:
+			linear-gradient(90deg, color-mix(in srgb, var(--group-accent) 11%, transparent), transparent 42%),
+			var(--panel);
+		border: 1px solid color-mix(in srgb, var(--group-accent) 38%, var(--line));
+		border-radius: 8px;
+		box-shadow: inset 0 1px 0 color-mix(in srgb, #fff 6%, transparent), var(--shadow-1);
+		cursor: pointer;
+		overflow: hidden;
+		transition:
+			border-color var(--dur-fast) var(--ease-out),
+			background var(--dur-fast) var(--ease-out),
+			box-shadow var(--dur-fast) var(--ease-out);
+	}
+	.group-summary:hover {
+		background:
+			linear-gradient(90deg, color-mix(in srgb, var(--group-accent) 17%, transparent), transparent 48%),
+			var(--panel-2);
+		border-color: color-mix(in srgb, var(--group-accent) 62%, var(--line-strong));
+	}
+	.group-summary.sel {
+		border-color: var(--group-accent);
+		box-shadow:
+			0 0 0 1px color-mix(in srgb, var(--group-accent) 60%, transparent),
+			0 0 0 4px color-mix(in srgb, var(--group-accent) 14%, transparent),
+			var(--shadow-2);
+	}
+	.group-summary-strip {
+		display: flex;
+		flex-direction: column;
+		min-height: 100%;
+		background: var(--group-edge);
+	}
+	.summary-strip-seg {
+		min-height: 6px;
+	}
+	.summary-strip-seg.k-user { background: var(--k-user); }
+	.summary-strip-seg.k-text { background: var(--k-text); }
+	.summary-strip-seg.k-thinking { background: var(--k-thinking); }
+	.summary-strip-seg.k-tool_call { background: var(--k-tool_call); }
+	.summary-strip-seg.k-tool_result { background: var(--k-tool_result); }
+	.group-summary-body {
+		min-width: 0;
+		padding: 10px 12px 11px;
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+	}
+	.group-summary-head {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		flex-wrap: wrap;
+	}
+	.summary-status,
+	.summary-metric,
+	.summary-kind {
+		display: inline-flex;
+		align-items: center;
+		min-width: 0;
+		border-radius: var(--radius-pill);
+		font-size: var(--fs-xs);
+		line-height: 1;
+		white-space: nowrap;
+	}
+	.summary-status {
+		gap: 5px;
+		color: var(--group-accent);
+		background: color-mix(in srgb, var(--group-accent) 15%, transparent);
+		border: 1px solid color-mix(in srgb, var(--group-accent) 38%, transparent);
+		font-weight: 700;
+		padding: 4px 8px;
+	}
+	.summary-metric {
+		color: var(--muted);
+		background: var(--panel-3);
+		border: 1px solid var(--line-soft);
+		font-variant-numeric: tabular-nums;
+		padding: 4px 8px;
+	}
+	.summary-saved {
+		color: var(--ok);
+		background: color-mix(in srgb, var(--ok) 10%, transparent);
+		border-color: color-mix(in srgb, var(--ok) 26%, transparent);
+	}
+	.group-summary-digest {
+		margin: 0;
+		color: var(--text);
+		font-size: var(--fs-sm);
+		line-height: 1.45;
+		white-space: pre-wrap;
+		overflow: hidden;
+		display: -webkit-box;
+		line-clamp: 3;
+		-webkit-line-clamp: 3;
+		-webkit-box-orient: vertical;
+		overflow-wrap: anywhere;
+	}
+	.group-summary-kinds {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 5px;
+		min-width: 0;
+	}
+	.summary-kind {
+		--kind-chip: var(--muted);
+		color: var(--kind-chip);
+		background: color-mix(in srgb, var(--kind-chip) 13%, transparent);
+		border: 1px solid color-mix(in srgb, var(--kind-chip) 30%, transparent);
+		padding: 3px 7px;
+		max-width: 120px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.summary-kind.k-user { --kind-chip: var(--k-user); }
+	.summary-kind.k-text { --kind-chip: var(--k-text); }
+	.summary-kind.k-thinking { --kind-chip: var(--k-thinking); }
+	.summary-kind.k-tool_call { --kind-chip: var(--k-tool_call); }
+	.summary-kind.k-tool_result { --kind-chip: var(--k-tool_result); }
+	.summary-kind.more {
+		--kind-chip: var(--faint);
 	}
 
 	/* ---- open group row: its own full-width band between tile grids (a flex child of .stack,
@@ -1625,4 +1772,3 @@
 		box-shadow: var(--focus-ring);
 	}
 </style>
-
