@@ -100,7 +100,7 @@ Conductor pins are stored in `state.conductorPins` and are checked by `canFoldUn
 
 - They expire automatically after `CONDUCTOR_PIN_LIFETIME` turns without renewal.
 - Expiry does NOT count as a calibration correction event (it's expected lifecycle, not Conductor error).
-- A human `/fold` or agent `accordion_fold` command overrides them (manual actions bypass `canFoldUnit`).
+- A human `/fold` command overrides them (manual actions bypass `canFoldUnit`).
 - They are recorded in the decision stream with `actor: "conductor"` and `action: "pin"`.
 
 ## Improved group formation
@@ -186,8 +186,8 @@ Useful proof runs:
 - `npm run proof:judge` — answer-scored semantic grid over multiple scenarios and budgets; requires at least six cells, 100% Accordion score, at least a 50pp advantage, zero compact wins, and zero Accordion budget violations.
 - `npm run proof:judge:llm` — same answer-scored semantic grid, but with a local Ollama-generated compact summary as the compact baseline instead of the deterministic digest/drop baseline.
 - `npm run proof:judge:all` — runs both judge grids.
-- `npm run proof:report` — validates the latest JSON proof outputs against the same headline gates and expected benchmark configuration, then writes `JUDGE_PROOF.md`; exits nonzero if required reports are missing, older than 24 hours, misconfigured, or weak.
-- `npm run proof:refresh` — reruns all proof outputs required by `proof:report`, then regenerates `JUDGE_PROOF.md`.
+- `npm run proof:report` — validates the latest JSON proof outputs against the same headline gates and expected benchmark configuration, then writes the ignored local artifact `docs/JUDGE_PROOF.md`; exits nonzero if required reports are missing, older than 24 hours, misconfigured, or weak.
+- `npm run proof:refresh` — reruns all proof outputs required by `proof:report`, then regenerates `docs/JUDGE_PROOF.md`.
 - `npm run compact:external-template` — writes `compact-captures.template.json` plus `compact-captures.guide.md`, containing the semantic setup transcripts, budgets, final prompts, expected keys, and empty `summary` fields for real `/compact` output.
 - `npm run proof:judge:external` — scores `compact-captures.json` as a captured real-compact baseline against the same judge grid. Fill it from the template before running this command; blank summaries are rejected.
 - `npm run compare:compact -- --budgets=1500,2500,4000 --out=compact-comparison-broad.json` — broad deterministic context check over exact decisions, file paths, endpoint choices, UI policy, and command recall.
