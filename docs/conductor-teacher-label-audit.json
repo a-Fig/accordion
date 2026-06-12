@@ -1,0 +1,26 @@
+{
+  "rubricVersion": "conductor-labeling-rubric-v1",
+  "records": 983,
+  "duplicateRecords": 980,
+  "checkedRecords": 980,
+  "agreements": 980,
+  "agreement": 1,
+  "byTask": {
+    "budget_oracle": {
+      "checked": 16,
+      "agreements": 16,
+      "agreement": 1
+    },
+    "fold_policy": {
+      "checked": 482,
+      "agreements": 482,
+      "agreement": 1
+    },
+    "compression": {
+      "checked": 482,
+      "agreements": 482,
+      "agreement": 1
+    }
+  },
+  "disagreements": []
+}

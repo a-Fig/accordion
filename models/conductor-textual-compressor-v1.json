@@ -1,0 +1,87 @@
+{
+  "version": 1,
+  "createdAt": "2026-06-12T00:00:00.000Z",
+  "source": "teacher-distilled textual compressor candidate",
+  "training": {
+    "examples": 468,
+    "oracleExamples": 16,
+    "foldPolicyExamples": 452,
+    "compressionExamples": 483,
+    "holdoutExamples": 63,
+    "datasetRecords": 983,
+    "datasetHash": "0eb3fc9f35a7a05aa6315b8de32c098e4b07cf279df85751b134878141dbe4eb",
+    "datasetSource": "data/conductor-training-teacher.jsonl",
+    "rubricVersion": "conductor-labeling-rubric-v1",
+    "rubricPath": "CONDUCTOR_MODEL_LABELING_RUBRIC.md",
+    "distillation": {
+      "teacherRecords": 3,
+      "localRecords": 980,
+      "labelers": [
+        "local-replay-rubric",
+        "teacher:minimax-m3-cloud"
+      ],
+      "readyForLiveAuthority": true,
+      "missing": []
+    }
+  },
+  "budgetOracle": {
+    "intercept": 1,
+    "weights": {
+      "log_blocks": 0,
+      "log_max_block_tokens": 0,
+      "log_total_tokens": 0,
+      "log_turns": 0,
+      "prompt_risk": 0,
+      "tool_ratio": 0
+    },
+    "confidence": 0.72,
+    "min": 0.88,
+    "max": 1.12
+  },
+  "foldPolicy": {
+    "intercept": 0.128704,
+    "weights": {
+      "agent_attention": 0.575565,
+      "keyword_overlap": 0.143911,
+      "kind_rank": -0.067957,
+      "log_tokens": -0.005198,
+      "recency": -0.100407,
+      "recent_unfold": 0
+    },
+    "confidence": 0.73,
+    "architecture": "linear_replay",
+    "reuseHorizonTurns": 12
+  },
+  "compression": {
+    "mode": "teacher_textual_digest_table",
+    "confidence": 0.78,
+    "fidelityGate": true,
+    "baseModel": {
+      "modelFamily": "Qwen2.5",
+      "modelId": "Qwen/Qwen2.5-0.5B-Instruct"
+    },
+    "adapter": {
+      "type": "digest_table",
+      "path": "data/conductor-training-teacher.jsonl"
+    },
+    "promptTemplate": "Compress this block into a grounded textual digest. Preserve exact paths, commands, marker values, errors, and decisions. Block: {block}",
+    "distillation": {
+      "teacherRecords": 3,
+      "compressionRecords": 1,
+      "source": "data/conductor-training-teacher.jsonl"
+    },
+    "digestTable": {
+      "3a8efbccbe60b53b36a85f9364cffd062daf97e7e7c155bc6cd0b1871f47609a": {
+        "digest": "Let's decide on the cache architecture.",
+        "fidelityLabels": {
+          "paths": [],
+          "commands": [],
+          "errors": [],
+          "exactValues": [],
+          "decisions": []
+        },
+        "labeler": "teacher:minimax-m3-cloud"
+      }
+    }
+  }
+}

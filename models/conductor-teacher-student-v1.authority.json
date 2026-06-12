@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "generatedAt": "2026-06-12T12:34:50.206Z",
+  "artifact": "models/conductor-teacher-student-v1.json",
+  "artifactDatasetHash": "0eb3fc9f35a7a05aa6315b8de32c098e4b07cf279df85751b134878141dbe4eb",
+  "evidence": {
+    "labelAudit": "conductor-teacher-label-audit.json",
+    "modelEvaluation": "conductor-teacher-student-evaluation.json"
+  },
+  "authority": {
+    "budgetOracle": {
+      "mode": "cost_guarded",
+      "maxTargetMultiplier": 1
+    },
+    "foldPolicy": {
+      "mode": "shadow_only"
+    },
+    "compression": {
+      "mode": "digest_only"
+    }
+  }
+}

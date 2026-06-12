@@ -1,21 +1,28 @@
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
+import { loadConductorModelAuthority } from "./conductor-model-authority.ts";
 import {
 	DEFAULT_OLLAMA_BASE_URL,
 	DEFAULT_OLLAMA_MODEL,
 	CHARS_PER_TOKEN,
 	UNFOLD_KEYWORD_THRESHOLD,
 	createAccordionState,
+	createArtifactConductorModelProviders,
+	createLocalConductorModelProviders,
 	createOllamaSummaryProvider,
 	createTransformersEmbeddingProvider,
 	estTokens,
 	keywordOverlap,
 	parseMessages,
+	parseConductorModelArtifact,
 	runConductor,
 	textHash,
 	tokenizeForRelevance,
 	warmEmbeddings,
+	warmConductorModel,
 	type AgentMessage,
 	type ConductorDependencies,
+	type ConductorModelAuthority,
+	type ConductorModelArtifact,
 } from "./conductor.ts";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
@@ -30,6 +37,13 @@ interface Config {
 	runs: number;
 	summary: boolean;
 	embeddings: boolean;
+	localModel: boolean;
+	modelArtifactFile?: string;
+	modelAuthorityFile?: string;
+	modelAuthority?: ConductorModelAuthority;
+	modelAuthorityImplicit?: boolean;
+	offlineAnswer: boolean;
+	workingTailTokens?: number;
 	mode: "single" | "multi-key";
 	probe: "direct" | "indirect" | "realistic";
 	filler: "repeat" | "varied";
@@ -78,6 +92,9 @@ interface BenchmarkResults {
 		probe: string;
 		runs: number;
 		embeddings: boolean;
+		modelArtifact?: string;
+		modelAuthority?: string;
+		modelAuthorityImplicit?: boolean;
 		notes: string[];
 	};
 	cells: CellResult[];
@@ -192,11 +209,14 @@ function parseCli(argv: string[]): Config {
 		runs: 1,
 		summary: false,
 		embeddings: false,
+		localModel: false,
+		offlineAnswer: false,
+		workingTailTokens: undefined,
 		mode: "single",
 		probe: "direct",
 		filler: "repeat",
 		verbose: false,
-		outFile: "benchmark-results.json",
+		outFile: "docs/benchmark-results.json",
 	};
 	for (let i = 0; i < argv.length; i++) {
 		const flag = argv[i];
@@ -210,6 +230,18 @@ function parseCli(argv: string[]): Config {
 		else if (flag === "--runs") { cfg.runs = parseInt(val, 10); i++; }
 		else if (flag === "--summary") { cfg.summary = true; }
 		else if (flag === "--embeddings") { cfg.embeddings = true; }
+		else if (flag === "--offline-answer") { cfg.offlineAnswer = true; }
+		else if (flag === "--working-tail-tokens") { cfg.workingTailTokens = parseInt(val, 10); i++; }
+		else if (flag === "--local-model") { cfg.localModel = true; }
+		else if (flag === "--model-artifact" || flag.startsWith("--model-artifact=")) {
+			cfg.modelArtifactFile = flag.includes("=") ? flag.split("=")[1] : val;
+			cfg.localModel = true;
+			if (!flag.includes("=")) i++;
+		}
+		else if (flag === "--model-authority" || flag.startsWith("--model-authority=")) {
+			cfg.modelAuthorityFile = flag.includes("=") ? flag.split("=")[1] : val;
+			if (!flag.includes("=")) i++;
+		}
 		else if (flag === "--mode") { cfg.mode = val as "single" | "multi-key"; i++; }
 		else if (flag === "--probe") { cfg.probe = val as "direct" | "indirect" | "realistic"; i++; }
 		else if (flag === "--filler") { cfg.filler = val as "repeat" | "varied"; i++; }
@@ -219,6 +251,10 @@ function parseCli(argv: string[]): Config {
 		else { process.stderr.write(`[WARN] unknown flag: ${flag}\n`); }
 	}
 	return cfg;
+}
+
+function loadModelArtifact(cfg: Config): ConductorModelArtifact | undefined {
+	return cfg.modelArtifactFile ? parseConductorModelArtifact(readFileSync(cfg.modelArtifactFile, "utf8")) : undefined;
 }
 
 // ── Haystack generation ───────────────────────────────────────────────────────
@@ -457,6 +493,15 @@ function scoreAnswer(answer: string, keys: string[]): number {
 	return hits / keys.length;
 }
 
+async function answerScore(messages: AgentMessage[], keys: string[], cfg: Config): Promise<{ answer: string; score: number }> {
+	if (cfg.offlineAnswer) {
+		const answer = parseMessages(messages).blocks.map((block) => block.text).join("\n");
+		return { answer, score: scoreAnswer(answer, keys) };
+	}
+	const answer = await callOllama(toOllamaMessages(messages), cfg.model, cfg.baseUrl, cfg.apiKey);
+	return { answer, score: scoreAnswer(answer, keys) };
+}
+
 // ── Benchmark runner ──────────────────────────────────────────────────────────
 
 async function runCell(cfg: Config, length: number, depth: number | null, budget: number, run: number): Promise<CellResult> {
@@ -474,9 +519,10 @@ async function runCell(cfg: Config, length: number, depth: number | null, budget
 	const inputTokens = tokensOfMessages(messages);
 	const t0 = Date.now();
 
-	// Baseline: raw messages → Ollama
-	const baselineAnswer = await callOllama(toOllamaMessages(messages), cfg.model, cfg.baseUrl, cfg.apiKey);
-	const baselineScore = scoreAnswer(baselineAnswer, needleKeys);
+	// Baseline: raw messages → answer scorer.
+	const baseline = await answerScore(messages, needleKeys, cfg);
+	const baselineAnswer = baseline.answer;
+	const baselineScore = baseline.score;
 
 	if (cfg.verbose) {
 		process.stderr.write(`    baseline answer: "${baselineAnswer.slice(0, 120)}"\n`);
@@ -494,12 +540,23 @@ async function runCell(cfg: Config, length: number, depth: number | null, budget
 		const deps: ConductorDependencies = cfg.summary
 			? { summaryProvider: createOllamaSummaryProvider({ model: cfg.model, baseUrl: cfg.baseUrl }) }
 			: {};
+		if (cfg.localModel) {
+			const artifact = loadModelArtifact(cfg);
+			Object.assign(
+				deps,
+				artifact ? createArtifactConductorModelProviders(artifact, cfg.modelAuthority) : createLocalConductorModelProviders(),
+				{ shadowMode: false },
+			);
+		}
 
 		const state = createAccordionState();
+		const { blocks } = parseMessages(messages);
 		if (cfg.embeddings) {
-			const { blocks } = parseMessages(messages);
 			const embProvider = await createTransformersEmbeddingProvider();
 			await warmEmbeddings(blocks, probe, embProvider, state);
+		}
+		if (cfg.localModel) {
+			await warmConductorModel({ blocks, prompt: probe, messages, state, targetModelId: cfg.model }, deps);
 		}
 
 		// ── Diagnostic (--verbose): embedding path verification ───────────────────
@@ -507,7 +564,7 @@ async function runCell(cfg: Config, length: number, depth: number | null, budget
 			const cacheSize = Object.keys(state.embeddingCache).length;
 			process.stderr.write(`  [embed] active=${cfg.embeddings}  cache_vectors=${cacheSize}\n`);
 
-			const { blocks: allBlocks } = parseMessages(messages);
+			const allBlocks = blocks;
 			const needleBlocks = allBlocks.filter(
 				(b) => b.id.startsWith(NEEDLE_RESULT_ID_PREFIX) && b.kind === "tool_result",
 			);
@@ -562,7 +619,7 @@ async function runCell(cfg: Config, length: number, depth: number | null, budget
 		// ─────────────────────────────────────────────────────────────────────────
 
 		const output = runConductor(
-			{ messages, incomingPrompt: probe, lastCompletedTurn: null, budgetTokens, state },
+			{ messages, incomingPrompt: probe, lastCompletedTurn: null, budgetTokens, state, workingTailTokens: cfg.workingTailTokens },
 			deps,
 		);
 
@@ -586,8 +643,9 @@ async function runCell(cfg: Config, length: number, depth: number | null, budget
 			process.stderr.write(`  [needle outcome]  ${outcome}\n`);
 		}
 
-		const accordionAnswer = await callOllama(toOllamaMessages(output.messages), cfg.model, cfg.baseUrl, cfg.apiKey);
-		accordionScore = scoreAnswer(accordionAnswer, needleKeys);
+		const accordion = await answerScore(output.messages, needleKeys, cfg);
+		const accordionAnswer = accordion.answer;
+		accordionScore = accordion.score;
 
 		if (cfg.verbose) {
 			process.stderr.write(`    accordion answer: "${accordionAnswer.slice(0, 120)}" (needle folded: ${needleFolded})\n`);
@@ -708,7 +766,19 @@ function writeResults(results: CellResult[], cfg: Config): void {
 	];
 
 	const out: BenchmarkResults = {
-		meta: { date: new Date().toISOString(), model: cfg.model, baseUrl: cfg.baseUrl, mode: cfg.mode, probe: cfg.probe, runs: cfg.runs, embeddings: cfg.embeddings, notes },
+		meta: {
+			date: new Date().toISOString(),
+			model: cfg.model,
+			baseUrl: cfg.baseUrl,
+			mode: cfg.mode,
+			probe: cfg.probe,
+			runs: cfg.runs,
+			embeddings: cfg.embeddings,
+			modelArtifact: cfg.modelArtifactFile,
+			modelAuthority: cfg.modelAuthorityFile,
+			modelAuthorityImplicit: cfg.modelAuthorityImplicit,
+			notes,
+		},
 		cells: results,
 		summary,
 	};
@@ -720,6 +790,13 @@ function writeResults(results: CellResult[], cfg: Config): void {
 
 async function main(): Promise<void> {
 	const cfg = parseCli(process.argv.slice(2));
+	const authority = loadConductorModelAuthority({
+		artifactFile: cfg.modelArtifactFile,
+		authorityFile: cfg.modelAuthorityFile,
+	});
+	cfg.modelAuthority = authority.authority;
+	cfg.modelAuthorityFile = authority.file;
+	cfg.modelAuthorityImplicit = authority.implicit;
 
 	// Lexical isolation assertion: runs at startup for "realistic" probe
 	if (cfg.probe === "realistic") {
@@ -737,9 +814,15 @@ async function main(): Promise<void> {
 	if (cfg.mode === "single") process.stderr.write(`  depths:    ${cfg.depths.join(", ")}\n`);
 	process.stderr.write(`  budgets:   ${cfg.budgets.join(", ")}\n`);
 	process.stderr.write(`  runs:      ${cfg.runs}\n`);
-	process.stderr.write(`  summaries: ${cfg.summary ? "ollama" : "deterministic"}\n\n`);
+	process.stderr.write(`  summaries: ${cfg.summary ? "ollama" : "deterministic"}\n`);
+	process.stderr.write(`  localModel: ${cfg.localModel ? "on" : "off"}\n`);
+	process.stderr.write(`  answer:    ${cfg.offlineAnswer ? "offline-key-presence" : "model"}\n`);
+	if (cfg.workingTailTokens !== undefined) process.stderr.write(`  tail:      ${cfg.workingTailTokens} tokens\n`);
+	if (cfg.modelArtifactFile) process.stderr.write(`  artifact:  ${cfg.modelArtifactFile}\n`);
+	if (cfg.modelAuthorityFile) process.stderr.write(`  authority: ${cfg.modelAuthorityFile}${cfg.modelAuthorityImplicit ? " (sidecar)" : ""}\n`);
+	process.stderr.write("\n");
 
-	await pingApi(cfg.baseUrl, cfg.apiKey);
+	if (!cfg.offlineAnswer) await pingApi(cfg.baseUrl, cfg.apiKey);
 
 	const cells: Array<[number, number | null, number, number]> = [];
 	if (cfg.mode === "multi-key") {

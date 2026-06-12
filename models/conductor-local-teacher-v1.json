@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "createdAt": "2026-06-12T00:00:00.000Z",
+  "source": "teacher-distilled compare-compact replay",
+  "training": {
+    "examples": 468,
+    "oracleExamples": 16,
+    "foldPolicyExamples": 452,
+    "compressionExamples": 483,
+    "holdoutExamples": 63,
+    "datasetRecords": 983,
+    "datasetHash": "0eb3fc9f35a7a05aa6315b8de32c098e4b07cf279df85751b134878141dbe4eb",
+    "datasetSource": "data/conductor-training-teacher.jsonl",
+    "rubricVersion": "conductor-labeling-rubric-v1",
+    "rubricPath": "CONDUCTOR_MODEL_LABELING_RUBRIC.md",
+    "distillation": {
+      "teacherRecords": 3,
+      "localRecords": 980,
+      "labelers": [
+        "local-replay-rubric",
+        "teacher:minimax-m3-cloud"
+      ],
+      "readyForLiveAuthority": true,
+      "missing": []
+    }
+  },
+  "budgetOracle": {
+    "intercept": 1,
+    "weights": {
+      "log_blocks": 0,
+      "log_max_block_tokens": 0,
+      "log_total_tokens": 0,
+      "log_turns": 0,
+      "prompt_risk": 0,
+      "tool_ratio": 0
+    },
+    "confidence": 0.72,
+    "min": 0.88,
+    "max": 1.12
+  },
+  "foldPolicy": {
+    "intercept": 0.128704,
+    "weights": {
+      "agent_attention": 0.575565,
+      "keyword_overlap": 0.143911,
+      "kind_rank": -0.067957,
+      "log_tokens": -0.005198,
+      "recency": -0.100407,
+      "recent_unfold": 0
+    },
+    "confidence": 0.73,
+    "architecture": "linear_replay",
+    "reuseHorizonTurns": 12
+  },
+  "compression": {
+    "mode": "deterministic_extract",
+    "confidence": 0.76,
+    "fidelityGate": true
+  }
+}

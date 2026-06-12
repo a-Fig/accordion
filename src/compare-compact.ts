@@ -1,14 +1,22 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { basename } from "node:path";
 import { pathToFileURL } from "node:url";
+import { loadConductorModelAuthority } from "./conductor-model-authority.ts";
 import {
 	createAccordionState,
+	createArtifactConductorModelProviders,
+	createLocalConductorModelProviders,
 	createTransformersEmbeddingProvider,
 	estTokens,
 	parseMessages,
+	parseConductorModelArtifact,
 	runConductor,
 	warmEmbeddings,
+	warmConductorModel,
 	type AgentMessage,
+	type ConductorDependencies,
+	type ConductorModelAuthority,
+	type ConductorModelArtifact,
 	type ContextBlock,
 	type EmbeddingProvider,
 } from "./conductor.ts";
@@ -76,7 +84,7 @@ interface ExternalCompactFixture {
 }
 
 const DEFAULT_BUDGETS = [1_500, 2_500, 4_000];
-const DEFAULT_OUT = "compact-comparison.json";
+const DEFAULT_OUT = "docs/compact-comparison.json";
 const SYSTEM_PROMPT =
 	"Answer using only the conversation context. If the exact requested value is present, quote it exactly. Be brief.";
 const COMPACT_SYSTEM_PROMPT =
@@ -600,18 +608,28 @@ async function llmCompactContext(
 	return compactSummaryContext(messages, summary, "llm-compact-summary");
 }
 
-async function accordionContext(
+export async function accordionContext(
 	messages: AgentMessage[],
 	probe: string,
 	budget: number,
 	embeddingProvider?: EmbeddingProvider,
+	useLocalModel = false,
+	modelArtifact?: ConductorModelArtifact,
+	modelAuthority?: ConductorModelAuthority,
 ): Promise<AgentMessage[]> {
 	const state = createAccordionState();
+	const modelDeps: ConductorDependencies = useLocalModel
+		? {
+				...(modelArtifact ? createArtifactConductorModelProviders(modelArtifact, modelAuthority) : createLocalConductorModelProviders()),
+				shadowMode: false,
+			}
+		: {};
 	for (let end = 1; end <= messages.length; end++) {
 		const prefix = messages.slice(0, end);
 		const prompt = (prefix.at(-1) as any)?.role === "user" ? textOf([prefix.at(-1)!]) : "continue";
 		const parsed = parseMessages(prefix);
 		if (embeddingProvider) await warmEmbeddings(parsed.blocks, prompt, embeddingProvider, state);
+		if (useLocalModel) await warmConductorModel({ blocks: parsed.blocks, prompt, messages: prefix, state }, modelDeps);
 		const output = runConductor({
 			messages: prefix,
 			incomingPrompt: prompt,
@@ -619,7 +637,7 @@ async function accordionContext(
 			budgetTokens: budget,
 			state,
 			workingTailTokens: 0,
-		});
+		}, modelDeps);
 		for (const decision of output.decisions) {
 			if (decision.action === "fold") {
 				state.foldLevels[decision.blockId] = decision.level && decision.level > 0 ? decision.level : 2;
@@ -642,6 +660,7 @@ async function accordionContext(
 	}
 	const parsed = parseMessages(messages);
 	if (embeddingProvider) await warmEmbeddings(parsed.blocks, probe, embeddingProvider, state);
+	if (useLocalModel) await warmConductorModel({ blocks: parsed.blocks, prompt: probe, messages, state }, modelDeps);
 	return runConductor({
 		messages,
 		incomingPrompt: probe,
@@ -649,7 +668,7 @@ async function accordionContext(
 		budgetTokens: budget,
 		state,
 		workingTailTokens: 0,
-	}, { embeddingProvider }).messages;
+	}, { ...modelDeps, embeddingProvider }).messages;
 }
 
 function scoreContext(messages: AgentMessage[], key: string, budget: number): StrategyResult {
@@ -868,6 +887,15 @@ function numericFlag(argv: string[], name: string): number | undefined {
 	return parsed;
 }
 
+function stringFlag(argv: string[], name: string): string | undefined {
+	const inline = argv.find((arg) => arg.startsWith(`--${name}=`))?.split("=")[1];
+	if (inline !== undefined) return inline;
+	const index = argv.indexOf(`--${name}`);
+	if (index < 0) return undefined;
+	const value = argv[index + 1];
+	return value && !value.startsWith("--") ? value : undefined;
+}
+
 function enforceProofGates(summary: ProofSummary, gates: {
 	minCells?: number;
 	minAdvantage?: number;
@@ -941,6 +969,9 @@ async function main() {
 	const markdownFile = argv.find((arg) => arg.startsWith("--markdown="))?.split("=")[1];
 	const withAnswers = argv.includes("--answers");
 	const withEmbeddings = argv.includes("--embeddings");
+	const useLocalModel = argv.includes("--local-model");
+	const modelArtifactFile = stringFlag(argv, "model-artifact");
+	const modelAuthorityFile = stringFlag(argv, "model-authority");
 	const compactMode = (argv.find((arg) => arg.startsWith("--compact="))?.split("=")[1] ?? "deterministic") as CompactMode;
 	if (!["deterministic", "external", "llm"].includes(compactMode)) {
 		throw new Error(`Invalid --compact mode: ${compactMode}`);
@@ -983,6 +1014,11 @@ async function main() {
 		)
 		: undefined;
 	const embeddingProvider = withEmbeddings ? await createTransformersEmbeddingProvider() : undefined;
+	const modelArtifact = modelArtifactFile ? parseConductorModelArtifact(readFileSync(modelArtifactFile, "utf8")) : undefined;
+	const modelAuthority = loadConductorModelAuthority({
+		artifactFile: modelArtifactFile,
+		authorityFile: modelAuthorityFile,
+	});
 
 	const cells: ComparisonCell[] = [];
 	for (const scenario of scenarios) {
@@ -998,7 +1034,15 @@ async function main() {
 						"external-compact-summary",
 					)
 					: compactContext(scenario.messages, budget);
-			const accordionMessages = await accordionContext(scenario.messages, scenario.probe, budget, embeddingProvider);
+			const accordionMessages = await accordionContext(
+				scenario.messages,
+				scenario.probe,
+				budget,
+				embeddingProvider,
+				useLocalModel,
+				modelArtifact,
+				modelAuthority.authority,
+			);
 			const recency = scoreContext(recencyMessages, scenario.key, budget);
 			const compact = scoreContext(compactMessages, scenario.key, budget);
 			const accordion = scoreContext(accordionMessages, scenario.key, budget);
@@ -1031,7 +1075,22 @@ async function main() {
 	const avg = (name: "recency" | "compact" | "accordion") =>
 		cells.reduce((sum, cell) => sum + (cell[name].score ?? 0), 0) / Math.max(1, cells.length);
 	const report = {
-		meta: { date: new Date().toISOString(), budgets, withAnswers, compactMode, embeddings: withEmbeddings, scenarioFilter, categoryFilter, outFile, model, baseUrl },
+		meta: {
+			date: new Date().toISOString(),
+			budgets,
+			withAnswers,
+			compactMode,
+			embeddings: withEmbeddings,
+			localModel: useLocalModel,
+			modelArtifact: modelArtifactFile,
+			modelAuthority: modelAuthority.file,
+			modelAuthorityImplicit: modelAuthority.implicit,
+			scenarioFilter,
+			categoryFilter,
+			outFile,
+			model,
+			baseUrl,
+		},
 		retrievability: {
 			"recency-truncation": avg("recency"),
 			[compactLabel]: avg("compact"),

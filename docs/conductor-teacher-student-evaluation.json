@@ -1,0 +1,1346 @@
+{
+  "meta": {
+    "date": "2026-06-12T12:34:27.345Z",
+    "budgets": [
+      1500,
+      2500,
+      4000
+    ],
+    "artifactFile": "models/conductor-teacher-student-v1.json",
+    "authorityFile": "models/conductor-teacher-student-v1.authority.json",
+    "authorityImplicit": false,
+    "embeddings": false,
+    "bootstrapUnit": "conversation",
+    "bootstrapIterations": 1000
+  },
+  "summary": {
+    "conversations": 16,
+    "cells": 48,
+    "heuristicScore": 1,
+    "learnedScore": 1,
+    "compactScore": 0.5,
+    "learnedQualityDelta": 0,
+    "learnedTokenDelta": 0,
+    "learnedWins": 0,
+    "heuristicWins": 0,
+    "ties": 16,
+    "tokenRegressionConversations": 0,
+    "learnedBudgetViolations": 0,
+    "heuristicBudgetViolations": 0,
+    "compactBudgetViolations": 0,
+    "bootstrapQualityDelta": {
+      "iterations": 1000,
+      "mean": 0,
+      "lower95": 0,
+      "upper95": 0,
+      "probabilityNonNegative": 1
+    },
+    "bootstrapTokenDelta": {
+      "iterations": 1000,
+      "mean": 0,
+      "lower95": 0,
+      "upper95": 0,
+      "probabilityNonNegative": 1
+    }
+  },
+  "conversations": [
+    {
+      "scenario": "distributed-cache-decision",
+      "category": "exact",
+      "cells": 3,
+      "heuristicScore": 1,
+      "learnedScore": 1,
+      "compactScore": 1,
+      "heuristicTokens": 1759.3333333333333,
+      "learnedTokens": 1759.3333333333333,
+      "learnedQualityDelta": 0,
+      "learnedTokenDelta": 0
+    },
+    {
+      "scenario": "release-marker",
+      "category": "exact",
+      "cells": 3,
+      "heuristicScore": 1,
+      "learnedScore": 1,
+      "compactScore": 1,
+      "heuristicTokens": 1607,
+      "learnedTokens": 1607,
+      "learnedQualityDelta": 0,
+      "learnedTokenDelta": 0
+    },
+    {
+      "scenario": "file-and-error",
+      "category": "exact",
+      "cells": 3,
+      "heuristicScore": 1,
+      "learnedScore": 1,
+      "compactScore": 0,
+      "heuristicTokens": 1684,
+      "learnedTokens": 1684,
+      "learnedQualityDelta": 0,
+      "learnedTokenDelta": 0
+    },
+    {
+      "scenario": "crowded-file-list",
+      "category": "exact",
+      "cells": 3,
+      "heuristicScore": 1,
+      "learnedScore": 1,
+      "compactScore": 1,
+      "heuristicTokens": 1708.6666666666667,
+      "learnedTokens": 1708.6666666666667,
+      "learnedQualityDelta": 0,
+      "learnedTokenDelta": 0
+    },
+    {
+      "scenario": "late-natural-language-decision",
+      "category": "exact",
+      "cells": 3,
+      "heuristicScore": 1,
+      "learnedScore": 1,
+      "compactScore": 1,
+      "heuristicTokens": 1754.3333333333333,
+      "learnedTokens": 1754.3333333333333,
+      "learnedQualityDelta": 0,
+      "learnedTokenDelta": 0
+    },
+    {
+      "scenario": "api-endpoint-choice",
+      "category": "exact",
+      "cells": 3,
+      "heuristicScore": 1,
+      "learnedScore": 1,
+      "compactScore": 1,
+      "heuristicTokens": 1780.6666666666667,
+      "learnedTokens": 1780.6666666666667,
+      "learnedQualityDelta": 0,
+      "learnedTokenDelta": 0
+    },
+    {
+      "scenario": "crowded-endpoint-list",
+      "category": "exact",
+      "cells": 3,
+      "heuristicScore": 1,
+      "learnedScore": 1,
+      "compactScore": 0,
+      "heuristicTokens": 1813.3333333333333,
+      "learnedTokens": 1813.3333333333333,
+      "learnedQualityDelta": 0,
+      "learnedTokenDelta": 0
+    },
+    {
+      "scenario": "ui-policy-choice",
+      "category": "exact",
+      "cells": 3,
+      "heuristicScore": 1,
+      "learnedScore": 1,
+      "compactScore": 1,
+      "heuristicTokens": 1668.6666666666667,
+      "learnedTokens": 1668.6666666666667,
+      "learnedQualityDelta": 0,
+      "learnedTokenDelta": 0
+    },
+    {
+      "scenario": "exact-command",
+      "category": "exact",
+      "cells": 3,
+      "heuristicScore": 1,
+      "learnedScore": 1,
+      "compactScore": 0,
+      "heuristicTokens": 1839,
+      "learnedTokens": 1839,
+      "learnedQualityDelta": 0,
+      "learnedTokenDelta": 0
+    },
+    {
+      "scenario": "semantic-cache-store",
+      "category": "semantic",
+      "cells": 3,
+      "heuristicScore": 1,
+      "learnedScore": 1,
+      "compactScore": 1,
+      "heuristicTokens": 1745,
+      "learnedTokens": 1745,
+      "learnedQualityDelta": 0,
+      "learnedTokenDelta": 0
+    },
+    {
+      "scenario": "semantic-offline-sync",
+      "category": "semantic",
+      "cells": 3,
+      "heuristicScore": 1,
+      "learnedScore": 1,
+      "compactScore": 1,
+      "heuristicTokens": 1714.6666666666667,
+      "learnedTokens": 1714.6666666666667,
+      "learnedQualityDelta": 0,
+      "learnedTokenDelta": 0
+    },
+    {
+      "scenario": "semantic-preference-late",
+      "category": "semantic",
+      "cells": 3,
+      "heuristicScore": 1,
+      "learnedScore": 1,
+      "compactScore": 0,
+      "heuristicTokens": 1765.6666666666667,
+      "learnedTokens": 1765.6666666666667,
+      "learnedQualityDelta": 0,
+      "learnedTokenDelta": 0
+    },
+    {
+      "scenario": "semantic-dashboard-preference",
+      "category": "semantic",
+      "cells": 3,
+      "heuristicScore": 1,
+      "learnedScore": 1,
+      "compactScore": 0,
+      "heuristicTokens": 1761.3333333333333,
+      "learnedTokens": 1761.3333333333333,
+      "learnedQualityDelta": 0,
+      "learnedTokenDelta": 0
+    },
+    {
+      "scenario": "semantic-accessibility-preference",
+      "category": "semantic",
+      "cells": 3,
+      "heuristicScore": 1,
+      "learnedScore": 1,
+      "compactScore": 0,
+      "heuristicTokens": 1731.3333333333333,
+      "learnedTokens": 1731.3333333333333,
+      "learnedQualityDelta": 0,
+      "learnedTokenDelta": 0
+    },
+    {
+      "scenario": "semantic-crash-owner",
+      "category": "semantic",
+      "cells": 3,
+      "heuristicScore": 1,
+      "learnedScore": 1,
+      "compactScore": 0,
+      "heuristicTokens": 1717.6666666666667,
+      "learnedTokens": 1717.6666666666667,
+      "learnedQualityDelta": 0,
+      "learnedTokenDelta": 0
+    },
+    {
+      "scenario": "semantic-launch-rehearsal",
+      "category": "semantic",
+      "cells": 3,
+      "heuristicScore": 1,
+      "learnedScore": 1,
+      "compactScore": 0,
+      "heuristicTokens": 1770,
+      "learnedTokens": 1770,
+      "learnedQualityDelta": 0,
+      "learnedTokenDelta": 0
+    }
+  ],
+  "cells": [
+    {
+      "scenario": "distributed-cache-decision",
+      "category": "exact",
+      "budget": 1500,
+      "heuristic": {
+        "score": 1,
+        "tokens": 1122,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "learned": {
+        "score": 1,
+        "tokens": 1122,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "compact": {
+        "score": 1,
+        "tokens": 631,
+        "withinBudget": true,
+        "hasAnswer": true
+      }
+    },
+    {
+      "scenario": "distributed-cache-decision",
+      "category": "exact",
+      "budget": 2500,
+      "heuristic": {
+        "score": 1,
+        "tokens": 1123,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "learned": {
+        "score": 1,
+        "tokens": 1123,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "compact": {
+        "score": 1,
+        "tokens": 631,
+        "withinBudget": true,
+        "hasAnswer": true
+      }
+    },
+    {
+      "scenario": "distributed-cache-decision",
+      "category": "exact",
+      "budget": 4000,
+      "heuristic": {
+        "score": 1,
+        "tokens": 3033,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "learned": {
+        "score": 1,
+        "tokens": 3033,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "compact": {
+        "score": 1,
+        "tokens": 631,
+        "withinBudget": true,
+        "hasAnswer": true
+      }
+    },
+    {
+      "scenario": "release-marker",
+      "category": "exact",
+      "budget": 1500,
+      "heuristic": {
+        "score": 1,
+        "tokens": 1078,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "learned": {
+        "score": 1,
+        "tokens": 1078,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "compact": {
+        "score": 1,
+        "tokens": 775,
+        "withinBudget": true,
+        "hasAnswer": true
+      }
+    },
+    {
+      "scenario": "release-marker",
+      "category": "exact",
+      "budget": 2500,
+      "heuristic": {
+        "score": 1,
+        "tokens": 1078,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "learned": {
+        "score": 1,
+        "tokens": 1078,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "compact": {
+        "score": 1,
+        "tokens": 775,
+        "withinBudget": true,
+        "hasAnswer": true
+      }
+    },
+    {
+      "scenario": "release-marker",
+      "category": "exact",
+      "budget": 4000,
+      "heuristic": {
+        "score": 1,
+        "tokens": 2665,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "learned": {
+        "score": 1,
+        "tokens": 2665,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "compact": {
+        "score": 1,
+        "tokens": 775,
+        "withinBudget": true,
+        "hasAnswer": true
+      }
+    },
+    {
+      "scenario": "file-and-error",
+      "category": "exact",
+      "budget": 1500,
+      "heuristic": {
+        "score": 1,
+        "tokens": 1093,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "learned": {
+        "score": 1,
+        "tokens": 1093,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "compact": {
+        "score": 0,
+        "tokens": 678,
+        "withinBudget": true,
+        "hasAnswer": false
+      }
+    },
+    {
+      "scenario": "file-and-error",
+      "category": "exact",
+      "budget": 2500,
+      "heuristic": {
+        "score": 1,
+        "tokens": 1093,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "learned": {
+        "score": 1,
+        "tokens": 1093,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "compact": {
+        "score": 0,
+        "tokens": 678,
+        "withinBudget": true,
+        "hasAnswer": false
+      }
+    },
+    {
+      "scenario": "file-and-error",
+      "category": "exact",
+      "budget": 4000,
+      "heuristic": {
+        "score": 1,
+        "tokens": 2866,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "learned": {
+        "score": 1,
+        "tokens": 2866,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "compact": {
+        "score": 0,
+        "tokens": 678,
+        "withinBudget": true,
+        "hasAnswer": false
+      }
+    },
+    {
+      "scenario": "crowded-file-list",
+      "category": "exact",
+      "budget": 1500,
+      "heuristic": {
+        "score": 1,
+        "tokens": 1146,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "learned": {
+        "score": 1,
+        "tokens": 1146,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "compact": {
+        "score": 1,
+        "tokens": 770,
+        "withinBudget": true,
+        "hasAnswer": true
+      }
+    },
+    {
+      "scenario": "crowded-file-list",
+      "category": "exact",
+      "budget": 2500,
+      "heuristic": {
+        "score": 1,
+        "tokens": 1147,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "learned": {
+        "score": 1,
+        "tokens": 1147,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "compact": {
+        "score": 1,
+        "tokens": 770,
+        "withinBudget": true,
+        "hasAnswer": true
+      }
+    },
+    {
+      "scenario": "crowded-file-list",
+      "category": "exact",
+      "budget": 4000,
+      "heuristic": {
+        "score": 1,
+        "tokens": 2833,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "learned": {
+        "score": 1,
+        "tokens": 2833,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "compact": {
+        "score": 1,
+        "tokens": 770,
+        "withinBudget": true,
+        "hasAnswer": true
+      }
+    },
+    {
+      "scenario": "late-natural-language-decision",
+      "category": "exact",
+      "budget": 1500,
+      "heuristic": {
+        "score": 1,
+        "tokens": 1136,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "learned": {
+        "score": 1,
+        "tokens": 1136,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "compact": {
+        "score": 1,
+        "tokens": 673,
+        "withinBudget": true,
+        "hasAnswer": true
+      }
+    },
+    {
+      "scenario": "late-natural-language-decision",
+      "category": "exact",
+      "budget": 2500,
+      "heuristic": {
+        "score": 1,
+        "tokens": 1137,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "learned": {
+        "score": 1,
+        "tokens": 1137,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "compact": {
+        "score": 1,
+        "tokens": 673,
+        "withinBudget": true,
+        "hasAnswer": true
+      }
+    },
+    {
+      "scenario": "late-natural-language-decision",
+      "category": "exact",
+      "budget": 4000,
+      "heuristic": {
+        "score": 1,
+        "tokens": 2990,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "learned": {
+        "score": 1,
+        "tokens": 2990,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "compact": {
+        "score": 1,
+        "tokens": 673,
+        "withinBudget": true,
+        "hasAnswer": true
+      }
+    },
+    {
+      "scenario": "api-endpoint-choice",
+      "category": "exact",
+      "budget": 1500,
+      "heuristic": {
+        "score": 1,
+        "tokens": 1132,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "learned": {
+        "score": 1,
+        "tokens": 1132,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "compact": {
+        "score": 1,
+        "tokens": 607,
+        "withinBudget": true,
+        "hasAnswer": true
+      }
+    },
+    {
+      "scenario": "api-endpoint-choice",
+      "category": "exact",
+      "budget": 2500,
+      "heuristic": {
+        "score": 1,
+        "tokens": 1133,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "learned": {
+        "score": 1,
+        "tokens": 1133,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "compact": {
+        "score": 1,
+        "tokens": 607,
+        "withinBudget": true,
+        "hasAnswer": true
+      }
+    },
+    {
+      "scenario": "api-endpoint-choice",
+      "category": "exact",
+      "budget": 4000,
+      "heuristic": {
+        "score": 1,
+        "tokens": 3077,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "learned": {
+        "score": 1,
+        "tokens": 3077,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "compact": {
+        "score": 1,
+        "tokens": 607,
+        "withinBudget": true,
+        "hasAnswer": true
+      }
+    },
+    {
+      "scenario": "crowded-endpoint-list",
+      "category": "exact",
+      "budget": 1500,
+      "heuristic": {
+        "score": 1,
+        "tokens": 1130,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "learned": {
+        "score": 1,
+        "tokens": 1130,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "compact": {
+        "score": 0,
+        "tokens": 616,
+        "withinBudget": true,
+        "hasAnswer": false
+      }
+    },
+    {
+      "scenario": "crowded-endpoint-list",
+      "category": "exact",
+      "budget": 2500,
+      "heuristic": {
+        "score": 1,
+        "tokens": 1132,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "learned": {
+        "score": 1,
+        "tokens": 1132,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "compact": {
+        "score": 0,
+        "tokens": 616,
+        "withinBudget": true,
+        "hasAnswer": false
+      }
+    },
+    {
+      "scenario": "crowded-endpoint-list",
+      "category": "exact",
+      "budget": 4000,
+      "heuristic": {
+        "score": 1,
+        "tokens": 3178,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "learned": {
+        "score": 1,
+        "tokens": 3178,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "compact": {
+        "score": 0,
+        "tokens": 616,
+        "withinBudget": true,
+        "hasAnswer": false
+      }
+    },
+    {
+      "scenario": "ui-policy-choice",
+      "category": "exact",
+      "budget": 1500,
+      "heuristic": {
+        "score": 1,
+        "tokens": 1130,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "learned": {
+        "score": 1,
+        "tokens": 1130,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "compact": {
+        "score": 1,
+        "tokens": 762,
+        "withinBudget": true,
+        "hasAnswer": true
+      }
+    },
+    {
+      "scenario": "ui-policy-choice",
+      "category": "exact",
+      "budget": 2500,
+      "heuristic": {
+        "score": 1,
+        "tokens": 1132,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "learned": {
+        "score": 1,
+        "tokens": 1132,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "compact": {
+        "score": 1,
+        "tokens": 762,
+        "withinBudget": true,
+        "hasAnswer": true
+      }
+    },
+    {
+      "scenario": "ui-policy-choice",
+      "category": "exact",
+      "budget": 4000,
+      "heuristic": {
+        "score": 1,
+        "tokens": 2744,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "learned": {
+        "score": 1,
+        "tokens": 2744,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "compact": {
+        "score": 1,
+        "tokens": 762,
+        "withinBudget": true,
+        "hasAnswer": true
+      }
+    },
+    {
+      "scenario": "exact-command",
+      "category": "exact",
+      "budget": 1500,
+      "heuristic": {
+        "score": 1,
+        "tokens": 1153,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "learned": {
+        "score": 1,
+        "tokens": 1153,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "compact": {
+        "score": 0,
+        "tokens": 574,
+        "withinBudget": true,
+        "hasAnswer": false
+      }
+    },
+    {
+      "scenario": "exact-command",
+      "category": "exact",
+      "budget": 2500,
+      "heuristic": {
+        "score": 1,
+        "tokens": 1154,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "learned": {
+        "score": 1,
+        "tokens": 1154,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "compact": {
+        "score": 0,
+        "tokens": 574,
+        "withinBudget": true,
+        "hasAnswer": false
+      }
+    },
+    {
+      "scenario": "exact-command",
+      "category": "exact",
+      "budget": 4000,
+      "heuristic": {
+        "score": 1,
+        "tokens": 3210,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "learned": {
+        "score": 1,
+        "tokens": 3210,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "compact": {
+        "score": 0,
+        "tokens": 574,
+        "withinBudget": true,
+        "hasAnswer": false
+      }
+    },
+    {
+      "scenario": "semantic-cache-store",
+      "category": "semantic",
+      "budget": 1500,
+      "heuristic": {
+        "score": 1,
+        "tokens": 1132,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "learned": {
+        "score": 1,
+        "tokens": 1132,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "compact": {
+        "score": 1,
+        "tokens": 663,
+        "withinBudget": true,
+        "hasAnswer": true
+      }
+    },
+    {
+      "scenario": "semantic-cache-store",
+      "category": "semantic",
+      "budget": 2500,
+      "heuristic": {
+        "score": 1,
+        "tokens": 1133,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "learned": {
+        "score": 1,
+        "tokens": 1133,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "compact": {
+        "score": 1,
+        "tokens": 663,
+        "withinBudget": true,
+        "hasAnswer": true
+      }
+    },
+    {
+      "scenario": "semantic-cache-store",
+      "category": "semantic",
+      "budget": 4000,
+      "heuristic": {
+        "score": 1,
+        "tokens": 2970,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "learned": {
+        "score": 1,
+        "tokens": 2970,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "compact": {
+        "score": 1,
+        "tokens": 663,
+        "withinBudget": true,
+        "hasAnswer": true
+      }
+    },
+    {
+      "scenario": "semantic-offline-sync",
+      "category": "semantic",
+      "budget": 1500,
+      "heuristic": {
+        "score": 1,
+        "tokens": 1116,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "learned": {
+        "score": 1,
+        "tokens": 1116,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "compact": {
+        "score": 1,
+        "tokens": 717,
+        "withinBudget": true,
+        "hasAnswer": true
+      }
+    },
+    {
+      "scenario": "semantic-offline-sync",
+      "category": "semantic",
+      "budget": 2500,
+      "heuristic": {
+        "score": 1,
+        "tokens": 1116,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "learned": {
+        "score": 1,
+        "tokens": 1116,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "compact": {
+        "score": 1,
+        "tokens": 717,
+        "withinBudget": true,
+        "hasAnswer": true
+      }
+    },
+    {
+      "scenario": "semantic-offline-sync",
+      "category": "semantic",
+      "budget": 4000,
+      "heuristic": {
+        "score": 1,
+        "tokens": 2912,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "learned": {
+        "score": 1,
+        "tokens": 2912,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "compact": {
+        "score": 1,
+        "tokens": 717,
+        "withinBudget": true,
+        "hasAnswer": true
+      }
+    },
+    {
+      "scenario": "semantic-preference-late",
+      "category": "semantic",
+      "budget": 1500,
+      "heuristic": {
+        "score": 1,
+        "tokens": 1130,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "learned": {
+        "score": 1,
+        "tokens": 1130,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "compact": {
+        "score": 0,
+        "tokens": 703,
+        "withinBudget": true,
+        "hasAnswer": false
+      }
+    },
+    {
+      "scenario": "semantic-preference-late",
+      "category": "semantic",
+      "budget": 2500,
+      "heuristic": {
+        "score": 1,
+        "tokens": 1132,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "learned": {
+        "score": 1,
+        "tokens": 1132,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "compact": {
+        "score": 0,
+        "tokens": 703,
+        "withinBudget": true,
+        "hasAnswer": false
+      }
+    },
+    {
+      "scenario": "semantic-preference-late",
+      "category": "semantic",
+      "budget": 4000,
+      "heuristic": {
+        "score": 1,
+        "tokens": 3035,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "learned": {
+        "score": 1,
+        "tokens": 3035,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "compact": {
+        "score": 0,
+        "tokens": 703,
+        "withinBudget": true,
+        "hasAnswer": false
+      }
+    },
+    {
+      "scenario": "semantic-dashboard-preference",
+      "category": "semantic",
+      "budget": 1500,
+      "heuristic": {
+        "score": 1,
+        "tokens": 1131,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "learned": {
+        "score": 1,
+        "tokens": 1131,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "compact": {
+        "score": 0,
+        "tokens": 701,
+        "withinBudget": true,
+        "hasAnswer": false
+      }
+    },
+    {
+      "scenario": "semantic-dashboard-preference",
+      "category": "semantic",
+      "budget": 2500,
+      "heuristic": {
+        "score": 1,
+        "tokens": 1132,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "learned": {
+        "score": 1,
+        "tokens": 1132,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "compact": {
+        "score": 0,
+        "tokens": 701,
+        "withinBudget": true,
+        "hasAnswer": false
+      }
+    },
+    {
+      "scenario": "semantic-dashboard-preference",
+      "category": "semantic",
+      "budget": 4000,
+      "heuristic": {
+        "score": 1,
+        "tokens": 3021,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "learned": {
+        "score": 1,
+        "tokens": 3021,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "compact": {
+        "score": 0,
+        "tokens": 701,
+        "withinBudget": true,
+        "hasAnswer": false
+      }
+    },
+    {
+      "scenario": "semantic-accessibility-preference",
+      "category": "semantic",
+      "budget": 1500,
+      "heuristic": {
+        "score": 1,
+        "tokens": 1122,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "learned": {
+        "score": 1,
+        "tokens": 1122,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "compact": {
+        "score": 0,
+        "tokens": 708,
+        "withinBudget": true,
+        "hasAnswer": false
+      }
+    },
+    {
+      "scenario": "semantic-accessibility-preference",
+      "category": "semantic",
+      "budget": 2500,
+      "heuristic": {
+        "score": 1,
+        "tokens": 1124,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "learned": {
+        "score": 1,
+        "tokens": 1124,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "compact": {
+        "score": 0,
+        "tokens": 708,
+        "withinBudget": true,
+        "hasAnswer": false
+      }
+    },
+    {
+      "scenario": "semantic-accessibility-preference",
+      "category": "semantic",
+      "budget": 4000,
+      "heuristic": {
+        "score": 1,
+        "tokens": 2948,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "learned": {
+        "score": 1,
+        "tokens": 2948,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "compact": {
+        "score": 0,
+        "tokens": 708,
+        "withinBudget": true,
+        "hasAnswer": false
+      }
+    },
+    {
+      "scenario": "semantic-crash-owner",
+      "category": "semantic",
+      "budget": 1500,
+      "heuristic": {
+        "score": 1,
+        "tokens": 1114,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "learned": {
+        "score": 1,
+        "tokens": 1114,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "compact": {
+        "score": 0,
+        "tokens": 708,
+        "withinBudget": true,
+        "hasAnswer": false
+      }
+    },
+    {
+      "scenario": "semantic-crash-owner",
+      "category": "semantic",
+      "budget": 2500,
+      "heuristic": {
+        "score": 1,
+        "tokens": 1114,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "learned": {
+        "score": 1,
+        "tokens": 1114,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "compact": {
+        "score": 0,
+        "tokens": 708,
+        "withinBudget": true,
+        "hasAnswer": false
+      }
+    },
+    {
+      "scenario": "semantic-crash-owner",
+      "category": "semantic",
+      "budget": 4000,
+      "heuristic": {
+        "score": 1,
+        "tokens": 2925,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "learned": {
+        "score": 1,
+        "tokens": 2925,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "compact": {
+        "score": 0,
+        "tokens": 708,
+        "withinBudget": true,
+        "hasAnswer": false
+      }
+    },
+    {
+      "scenario": "semantic-launch-rehearsal",
+      "category": "semantic",
+      "budget": 1500,
+      "heuristic": {
+        "score": 1,
+        "tokens": 1161,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "learned": {
+        "score": 1,
+        "tokens": 1161,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "compact": {
+        "score": 0,
+        "tokens": 706,
+        "withinBudget": true,
+        "hasAnswer": false
+      }
+    },
+    {
+      "scenario": "semantic-launch-rehearsal",
+      "category": "semantic",
+      "budget": 2500,
+      "heuristic": {
+        "score": 1,
+        "tokens": 1162,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "learned": {
+        "score": 1,
+        "tokens": 1162,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "compact": {
+        "score": 0,
+        "tokens": 706,
+        "withinBudget": true,
+        "hasAnswer": false
+      }
+    },
+    {
+      "scenario": "semantic-launch-rehearsal",
+      "category": "semantic",
+      "budget": 4000,
+      "heuristic": {
+        "score": 1,
+        "tokens": 2987,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "learned": {
+        "score": 1,
+        "tokens": 2987,
+        "withinBudget": true,
+        "hasAnswer": true
+      },
+      "compact": {
+        "score": 0,
+        "tokens": 706,
+        "withinBudget": true,
+        "hasAnswer": false
+      }
+    }
+  ]
+}

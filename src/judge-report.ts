@@ -41,12 +41,12 @@ interface ReportInput {
 	optional?: boolean;
 }
 
-const DEFAULT_OUT = "JUDGE_PROOF.md";
+const DEFAULT_OUT = "docs/JUDGE_PROOF.md";
 
 const INPUTS: ReportInput[] = [
 	{
 		label: "Semantic judge grid vs compact-style digest/drop",
-		file: "compact-comparison-judge-semantic.json",
+		file: "docs/compact-comparison-judge-semantic.json",
 		command: "npm run proof:judge",
 		expectedMeta: { budgets: [1500, 2500], categoryFilter: "semantic", compactMode: "deterministic", embeddings: true, withAnswers: true },
 		maxAgeHours: 24,
@@ -58,7 +58,7 @@ const INPUTS: ReportInput[] = [
 	},
 	{
 		label: "Semantic judge grid vs model-generated compact summary",
-		file: "compact-comparison-judge-llm-semantic.json",
+		file: "docs/compact-comparison-judge-llm-semantic.json",
 		command: "npm run proof:judge:llm",
 		expectedMeta: { budgets: [1500, 2500], categoryFilter: "semantic", compactMode: "llm", embeddings: true, withAnswers: true },
 		maxAgeHours: 24,
@@ -70,7 +70,7 @@ const INPUTS: ReportInput[] = [
 	},
 	{
 		label: "Broad exact + semantic grid vs compact-style digest/drop",
-		file: "compact-comparison-proof.json",
+		file: "docs/compact-comparison-proof.json",
 		command: "npm run proof:compact",
 		expectedMeta: { budgets: [1500, 2500, 4000], compactMode: "deterministic", embeddings: true, withAnswers: false },
 		maxAgeHours: 24,
@@ -82,7 +82,7 @@ const INPUTS: ReportInput[] = [
 	},
 	{
 		label: "Local-model paraphrase smoke",
-		file: "compact-comparison-semantic-proof.json",
+		file: "docs/compact-comparison-semantic-proof.json",
 		command: "npm run proof:semantic",
 		expectedMeta: {
 			budgets: [1500],
@@ -101,7 +101,7 @@ const INPUTS: ReportInput[] = [
 	},
 	{
 		label: "Cloud-model paraphrase smoke",
-		file: "compact-comparison-semantic-cloud-proof.json",
+		file: "docs/compact-comparison-semantic-cloud-proof.json",
 		command: "npm run proof:semantic:cloud",
 		expectedMeta: {
 			budgets: [1500],
@@ -123,7 +123,7 @@ const INPUTS: ReportInput[] = [
 const EXTERNAL_INPUTS: ReportInput[] = [
 	{
 		label: "Captured host /compact semantic judge grid",
-		file: "compact-comparison-judge-external-semantic.json",
+		file: "docs/compact-comparison-judge-external-semantic.json",
 		command: "npm run proof:judge:external",
 		expectedMeta: { budgets: [1500, 2500], categoryFilter: "semantic", compactMode: "external", embeddings: true, withAnswers: true },
 		maxAgeHours: 24,

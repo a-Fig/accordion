@@ -176,8 +176,8 @@ Live (pi build with extension tools): the extension registers \`accordion_recall
 *Reproduce: \`npm run evidence\` (this file) · \`npm test\` · \`npm run compare:compact\` · \`node --experimental-strip-types src/generate-demo-transcript.ts\`.*
 `;
 
-	fs.writeFileSync("EVIDENCE.md", md);
-	console.log(`EVIDENCE.md written — scenario "${chosen.name}": compact \u274c, accordion \u2705 at budget ${BUDGET}.`);
+	fs.writeFileSync("docs/EVIDENCE.md", md);
+	console.log(`docs/EVIDENCE.md written — scenario "${chosen.name}": compact \u274c, accordion \u2705 at budget ${BUDGET}.`);
 }
 
 main();

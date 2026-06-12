@@ -38,11 +38,15 @@ import {
 	createAccordionState,
 	createGeminiSummaryProvider,
 	createHaikuSummaryProvider,
+	createArtifactConductorModelProviders,
+	createLocalConductorModelProviders,
 	createOllamaSummaryProvider,
 	createTransformersEmbeddingProvider,
+	isConductorShadowEnabled,
 	mergeConductorConfig,
 	pruneEmbeddingCache,
 	warmEmbeddings,
+	warmConductorModel,
 	blockTokensAtLevel,
 	deterministicDigest,
 	foldAddress,
@@ -51,10 +55,14 @@ import {
 	extractIncomingPrompt,
 	lastCompletedTurnFromMessages,
 	parseMessages,
+	parseConductorModelArtifact,
+	parseConductorModelAuthority,
 	runConductor,
 	type AccordionGroup,
 	type AccordionState,
+	type ConductorDependencies,
 	type ConductorConfig,
+	type ConductorShadowTrace,
 	type ContextBlock,
 	type FoldDecision,
 	type FoldLevel,
@@ -85,6 +93,7 @@ const LIVE_SNAPSHOT_PATH = `${homedir()}/.pi/agent/accordion-live-session.jsonl`
 const LEGACY_STATE_TYPE = "accordion-state";
 const CONDUCTOR_STATE_TYPE = "accordion-conductor-state";
 const CONDUCTOR_DECISION_TYPE = "accordion-conductor-decision";
+const CONDUCTOR_SHADOW_TRACE_TYPE = "accordion-conductor-shadow-trace";
 
 const IS_NODE_TEST = process.env.NODE_TEST_CONTEXT === "child-v8";
 const ENV_EMBEDDINGS_ENABLED = process.env.ACCORDION_EMBEDDINGS === "1" || process.env.ACCORDION_EMBEDDINGS === "true";
@@ -92,6 +101,7 @@ const ENV_SUMMARIES_ENABLED =
 	process.env.ACCORDION_SUMMARIES === "1" ||
 	process.env.ACCORDION_SUMMARIES === "true" ||
 	(!IS_NODE_TEST && process.env.ACCORDION_SUMMARIES !== "0");
+const ENV_CONDUCTOR_MODEL_LIVE = process.env.CONDUCTOR_MODEL_LIVE === "1" || process.env.CONDUCTOR_MODEL_LIVE === "true";
 
 // Registry layout — the GUI desktop discovery contract.
 const HOME = process.env.ACCORDION_HOME || os.homedir();
@@ -106,6 +116,8 @@ type TextToolResult = {
 	details: Record<string, never>;
 };
 
+const ACCORDION_DYNAMIC_APPENDIX_PREFIX = "Currently folded:";
+
 // ── Summary / embedding providers ────────────────────────────────────────────
 
 function effectiveSummariesEnabled(config: ConductorConfig): boolean {
@@ -114,6 +126,60 @@ function effectiveSummariesEnabled(config: ConductorConfig): boolean {
 
 function effectiveEmbeddingsEnabled(config: ConductorConfig): boolean {
 	return config.embeddingsEnabled || ENV_EMBEDDINGS_ENABLED;
+}
+
+function textPart(text: string): { type: "text"; text: string } {
+	return { type: "text", text };
+}
+
+function messageText(message: AgentMessage): string {
+	const content = (message as any).content;
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
+	return content.map((part: any) => part?.text ?? part?.thinking ?? "").join("\n");
+}
+
+function cloneAgentMessage(message: AgentMessage): AgentMessage {
+	const content = (message as any).content;
+	return {
+		...(message as any),
+		content: Array.isArray(content) ? content.map((part: any) => ({ ...part })) : content,
+	};
+}
+
+function isAccordionSkillSystemMessage(message: AgentMessage): boolean {
+	return (message as any).role === "system" && messageText(message).trim() === ACCORDION_AGENT_SKILL.trim();
+}
+
+function isAccordionDynamicAppendixMessage(message: AgentMessage): boolean {
+	return messageText(message).trim().startsWith(ACCORDION_DYNAMIC_APPENDIX_PREFIX);
+}
+
+export function buildAccordionSkillAppendix(foldedTurns: number[], foldTarget: number): string {
+	return `${ACCORDION_DYNAMIC_APPENDIX_PREFIX} turns ${formatTurnList(foldedTurns)}. Conductor target: ${Math.round(foldTarget * 100)}%.`;
+}
+
+export function injectAccordionSkillContext(
+	messages: AgentMessage[],
+	foldedTurns: number[],
+	foldTarget: number,
+): AgentMessage[] {
+	const turns = [...new Set(foldedTurns)].sort((a, b) => a - b);
+	if (turns.length === 0) return messages;
+
+	const out = messages
+		.filter((message) => !isAccordionDynamicAppendixMessage(message))
+		.map(cloneAgentMessage);
+
+	if (!out.some(isAccordionSkillSystemMessage)) {
+		out.unshift({ role: "system", content: [textPart(ACCORDION_AGENT_SKILL)] } as any);
+	}
+
+	const appendix = buildAccordionSkillAppendix(turns, foldTarget);
+	const currentTurnIndex = out.findLastIndex((message) => (message as any).role === "user");
+	const insertAt = currentTurnIndex >= 0 ? currentTurnIndex : out.length;
+	out.splice(insertAt, 0, { role: "assistant", content: [textPart(appendix)] } as any);
+	return out;
 }
 
 /** Default Ollama; prefer Gemini when GOOGLE_API_KEY is set. */
@@ -157,6 +223,64 @@ function syncProviderErrorFromState(): void {
 	if (state.missingApiKeyLogged && !state.providerError) {
 		state.providerError = "ANTHROPIC_API_KEY missing; using digests";
 	}
+}
+
+function shouldUseLocalConductorModelProviders(deps: ConductorDependencies = {}): boolean {
+	return ENV_CONDUCTOR_MODEL_LIVE || isConductorShadowEnabled(deps);
+}
+
+function loadConductorModelAuthority(artifactFile: string) {
+	const explicit = process.env.CONDUCTOR_MODEL_AUTHORITY;
+	const candidates = explicit
+		? [explicit]
+		: [artifactFile.replace(/\.json$/i, ".authority.json")];
+	for (const candidate of candidates) {
+		try {
+			return parseConductorModelAuthority(fs.readFileSync(candidate, "utf8"));
+		} catch {
+			if (explicit) throw new Error(`Failed to load CONDUCTOR_MODEL_AUTHORITY=${candidate}`);
+		}
+	}
+	return undefined;
+}
+
+function loadConductorModelProvidersFromArtifact(): Pick<ConductorDependencies, "budgetOracle" | "foldPolicyProvider" | "compressionProvider"> | undefined {
+	const explicit = process.env.CONDUCTOR_MODEL_ARTIFACT;
+	const here = path.dirname(fileURLToPath(import.meta.url));
+	const candidates = explicit
+		? [explicit]
+		: [path.resolve(here, "../models/conductor-local-v1.json")];
+	for (const candidate of candidates) {
+		try {
+			const artifact = parseConductorModelArtifact(fs.readFileSync(candidate, "utf8"));
+			return createArtifactConductorModelProviders(artifact, loadConductorModelAuthority(candidate));
+		} catch {
+			if (explicit) throw new Error(`Failed to load CONDUCTOR_MODEL_ARTIFACT=${candidate}`);
+		}
+	}
+	return undefined;
+}
+
+export function buildConductorModelDependencies(
+	targetModelId = "",
+	options: {
+		onShadowTrace?: (trace: ConductorShadowTrace) => void;
+		log?: (message: string) => void;
+		shadowMode?: boolean;
+	} = {},
+): ConductorDependencies {
+	const base: ConductorDependencies = {
+		targetModelId,
+		shadowMode: options.shadowMode,
+		onShadowTrace: options.onShadowTrace,
+		log: options.log,
+	};
+	if (!shouldUseLocalConductorModelProviders(base)) return base;
+	const artifactProviders = loadConductorModelProvidersFromArtifact();
+	return {
+		...base,
+		...(artifactProviders ?? createLocalConductorModelProviders()),
+	};
 }
 
 // ── Module-level state ───────────────────────────────────────────────────────
@@ -211,6 +335,11 @@ function writeLiveSnapshot(ctx: ExtensionContext): void {
 				foldLevels: state.foldLevels,
 				foldedSummaries,
 				calibrationEvents: state.calibrationEvents.slice(-10),
+				salienceMetadata: state.salienceMetadata,
+				model: {
+					...state.model,
+					shadowTraces: state.model.shadowTraces.slice(-20),
+				},
 			},
 		});
 
@@ -272,6 +401,8 @@ function persist(pi: ExtensionAPI, blocks: ContextBlock[] = [], incomingPrompt =
 		lastRunHadPressure: state.lastRunHadPressure,
 		lastRunWithinBudget: state.lastRunWithinBudget,
 		calibrationEvents: state.calibrationEvents,
+		salienceMetadata: state.salienceMetadata,
+		model: state.model,
 		conductorPins: state.conductorPins,
 		groups: state.groups,
 		config: state.config,
@@ -282,6 +413,10 @@ function persistDecisions(pi: ExtensionAPI, decisions: FoldDecision[]): void {
 	for (const decision of decisions) {
 		pi.appendEntry(CONDUCTOR_DECISION_TYPE, decision);
 	}
+}
+
+function persistShadowTrace(pi: ExtensionAPI, trace: ConductorShadowTrace): void {
+	pi.appendEntry(CONDUCTOR_SHADOW_TRACE_TYPE, trace);
 }
 
 function liveMessages(ctx: ExtensionContext): AgentMessage[] {
@@ -904,6 +1039,20 @@ export default function accordionExtension(pi: ExtensionAPI): void {
 			}
 		}
 
+		const modelDeps = buildConductorModelDependencies(model, {
+			onShadowTrace: (trace) => persistShadowTrace(pi, trace),
+			log: (message) => ctx.ui.notify(message, "info"),
+		});
+		try {
+			await warmConductorModel(
+				{ blocks: parsed.blocks, prompt: incomingPrompt, messages: event.messages as any, state, targetModelId: model },
+				modelDeps,
+			);
+		} catch (error: any) {
+			state.providerError = `Conductor model: ${error?.message || error}`.slice(0, 200);
+			ctx.ui.notify(error.message || "Failed to warm Conductor model", "warning");
+		}
+
 		const output = runConductor(
 			{
 				messages: event.messages,
@@ -914,6 +1063,7 @@ export default function accordionExtension(pi: ExtensionAPI): void {
 				state,
 			},
 			{
+				...modelDeps,
 				summaryProvider,
 				embeddingProvider,
 				onSummary: () => persist(pi, parsed.blocks, incomingPrompt),
@@ -968,24 +1118,11 @@ export default function accordionExtension(pi: ExtensionAPI): void {
 		// Inject skill when blocks are folded so the agent knows how to reach back.
 		let finalMessages = output.messages;
 		if (state.foldedBlockIds.length > 0) {
-			if (finalMessages === (event.messages as any)) {
-				finalMessages = (event.messages as any[]).map((m: any) => ({
-					...m,
-					content: Array.isArray(m.content) ? m.content.map((c: any) => ({ ...c })) : m.content,
-				}));
-			}
 			const foldedIds = new Set(state.foldedBlockIds);
 			const foldedTurns = [...new Set(
 				parsed.blocks.filter((b) => foldedIds.has(b.id)).map((b) => b.turn),
 			)].sort((a, b) => a - b);
-			const appendix = `Currently folded: turns ${formatTurnList(foldedTurns)}. Conductor target: ${Math.round(output.foldTarget * 100)}%.`;
-			const skillText = `${ACCORDION_AGENT_SKILL}\n\n${appendix}`;
-			for (const msg of finalMessages) {
-				if ((msg as any).role === "assistant" && Array.isArray((msg as any).content)) {
-					(msg as any).content.unshift({ type: "text", text: skillText });
-					break;
-				}
-			}
+			finalMessages = injectAccordionSkillContext(finalMessages as any, foldedTurns, output.foldTarget) as any;
 		}
 
 		if (output.decisions.length || finalMessages !== (event.messages as any)) return { messages: finalMessages };
@@ -1039,6 +1176,16 @@ export default function accordionExtension(pi: ExtensionAPI): void {
 				await warmEmbeddings(parsed.blocks, incomingPrompt, embeddingProvider, state);
 			} catch { /* non-fatal */ }
 		}
+		const modelDeps = buildConductorModelDependencies(model, {
+			onShadowTrace: (trace) => persistShadowTrace(pi, trace),
+			log: (message) => (ctx as ExtensionContext).ui?.notify(message, "info"),
+		});
+		try {
+			await warmConductorModel(
+				{ blocks: parsed.blocks, prompt: incomingPrompt, messages: messages as any, state, targetModelId: model },
+				modelDeps,
+			);
+		} catch { /* non-fatal */ }
 
 		const output = runConductor(
 			{
@@ -1050,6 +1197,7 @@ export default function accordionExtension(pi: ExtensionAPI): void {
 				state,
 			},
 			{
+				...modelDeps,
 				summaryProvider,
 				log: (msg) => (ctx as ExtensionContext).ui?.notify(msg, "info"),
 			},

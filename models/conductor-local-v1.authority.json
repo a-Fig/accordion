@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "generatedAt": "2026-06-12T12:43:54.159Z",
+  "artifact": "models/conductor-local-v1.json",
+  "artifactDatasetHash": "1c929c363887751e4194a281708534a3d74b5bbaf29abc114a5a4a1ee08b574e",
+  "evidence": {
+    "labelAudit": "conductor-label-audit.json",
+    "modelEvaluation": "conductor-model-evaluation.json"
+  },
+  "authority": {
+    "budgetOracle": {
+      "mode": "cost_guarded",
+      "maxTargetMultiplier": 1
+    },
+    "foldPolicy": {
+      "mode": "shadow_only"
+    },
+    "compression": {
+      "mode": "digest_only"
+    }
+  }
+}

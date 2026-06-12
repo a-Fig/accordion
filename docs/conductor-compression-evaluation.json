@@ -1,0 +1,15 @@
+{
+  "artifact": "models/conductor-teacher-student-v1.json",
+  "summary": {
+    "scenarios": 16,
+    "blocks": 482,
+    "answerBearingBlocks": 16,
+    "deterministicRecall": 16,
+    "candidateRecall": 16,
+    "recallDelta": 0,
+    "fidelityEscapes": 0,
+    "teacherDigestHits": 1,
+    "deterministicFallbacks": 481
+  },
+  "failures": []
+}

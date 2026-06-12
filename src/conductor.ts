@@ -67,6 +67,16 @@ export interface CalibrationEvent {
 	reason: "correction" | "decay" | "hold" | "pinned";
 }
 
+export interface SalienceMetadata {
+	paths: string[];
+	commands: string[];
+	errors: string[];
+	exact_values: string[];
+	decisions: string[];
+	sourceHash?: string;
+	digest?: string;
+}
+
 export interface ConductorConfig {
 	budgetTokens: number;
 	workingTailTokens: number;
@@ -107,6 +117,10 @@ export interface AccordionState {
 	lastRunWithinBudget: boolean;
 	/** Recent calibration ticks for the UI/decision log (capped). */
 	calibrationEvents: CalibrationEvent[];
+	/** Session-scoped extracted facts used by folded views; never outlives AccordionState. */
+	salienceMetadata: Record<string, SalienceMetadata>;
+	/** Learned-model caches and shadow traces. Originals remain the source of truth. */
+	model: ConductorModelState;
 	/** Temporary conductor-managed pins. Expire after CONDUCTOR_PIN_LIFETIME turns; never
 	 *  prevent manual human/agent fold. Keyed by block id. */
 	conductorPins: Record<string, { turn: number; reason: string }>;
@@ -174,10 +188,347 @@ export type SummaryProvider = (request: SummaryRequest) => Promise<string>;
 /** Batch embedding function: given N texts, return N L2-normalized float vectors. */
 export type EmbeddingProvider = (texts: string[]) => Promise<number[][]>;
 
+export interface ModelResult<T> {
+	value: T;
+	confidence: number;
+	reason?: string;
+	authority?: string;
+}
+
+export interface BudgetOracleValue {
+	/** Multiplier applied to the deterministic calibrated fold target, then clamped. */
+	targetMultiplier: number;
+	quality?: number;
+	cacheHitRate?: number;
+	cost?: number;
+}
+
+export interface BudgetOracleRequest {
+	prompt: string;
+	promptHash: string;
+	currentTurn: number;
+	calibratedTarget: number;
+	targetModelId?: string;
+	stats: {
+		blockCount: number;
+		turnCount: number;
+		totalTokens: number;
+		kindCounts: Record<BlockKind, number>;
+		maxBlockTokens: number;
+	};
+}
+
+export type BudgetOracleProvider = (request: BudgetOracleRequest) => Promise<ModelResult<BudgetOracleValue>>;
+
+export interface FoldPolicyFeatures {
+	kindRank: number;
+	keywordOverlap: number;
+	recency: number;
+	tokenCount: number;
+	agentAttention: number;
+	wasRecentlyUnfolded: boolean;
+}
+
+export interface FoldPolicyPrediction {
+	blockId: string;
+	blockHash: string;
+	expectedReuseTurns: number;
+	keepScore?: number;
+	level?: FoldLevel;
+	reason?: string;
+}
+
+export interface FoldPolicyRequest {
+	prompt: string;
+	promptHash: string;
+	currentTurn: number;
+	targetModelId?: string;
+	items: Array<{
+		block: ContextBlock;
+		blockHash: string;
+		features: FoldPolicyFeatures;
+	}>;
+}
+
+export interface FoldPolicyResponse {
+	predictions: Array<ModelResult<FoldPolicyPrediction>>;
+	reason?: string;
+}
+
+export type FoldPolicyProvider = (request: FoldPolicyRequest) => Promise<FoldPolicyResponse>;
+
+export interface CompressionValue {
+	digest: string;
+	salience?: Partial<SalienceMetadata>;
+}
+
+export interface CompressionRequest {
+	block: ContextBlock;
+	hash: string;
+	deterministicDigest: string;
+}
+
+export type CompressionProvider = (request: CompressionRequest) => Promise<ModelResult<CompressionValue>>;
+
+export interface CachedBudgetOracleDecision extends ModelResult<BudgetOracleValue> {
+	promptHash: string;
+	turn: number;
+	shadow: boolean;
+	createdAt: number;
+	fallbackReason?: string;
+}
+
+export interface CachedFoldPolicyDecision extends ModelResult<FoldPolicyPrediction> {
+	promptHash: string;
+	blockHash: string;
+	turn: number;
+	features: FoldPolicyFeatures;
+	shadow: boolean;
+	createdAt: number;
+	fallbackReason?: string;
+}
+
+export interface CachedCompressionDecision extends ModelResult<CompressionValue> {
+	hash: string;
+	accepted: boolean;
+	shadow: boolean;
+	createdAt: number;
+	fallbackReason?: string;
+}
+
+export interface ConductorShadowTrace {
+	kind: "budget_oracle" | "fold_policy" | "compression";
+	turn: number;
+	blockId?: string;
+	heuristicDecision: unknown;
+	modelDecision: unknown;
+	outcome: "pending" | "accepted" | "fallback";
+	reason?: string;
+}
+
+export interface ManualChangeTraceLabel {
+	source: "manualChanges";
+	blockId: string;
+	action: ManualChange["action"];
+	actor: ManualChange["actor"];
+	turn: number;
+	reuseDistanceTurns?: number;
+}
+
+export interface FoldDecisionTraceLabel {
+	source: "foldDecision";
+	blockId: string;
+	action: DecisionAction;
+	turn: number;
+	kind: BlockKind;
+	level: FoldLevel;
+	reason: string[];
+}
+
+export interface NiahHoldoutTraceLabel {
+	source: "niah";
+	blockId: string;
+	turn: number;
+	needle: string;
+	shouldKeep: true;
+}
+
+export interface CompactSweepTraceLabel {
+	source: "compactSweep";
+	scenario: string;
+	budgetTokens: number;
+	accordionScore: number;
+	compactScore: number;
+	tokenSpend?: number;
+	cacheHitRate?: number;
+	jointScore?: number;
+}
+
+export interface ConductorTraceExtractionInput {
+	state: AccordionState;
+	decisions?: FoldDecision[];
+	niahNeedles?: Array<{ blockId: string; turn: number; needle: string }>;
+	compactSweeps?: Array<{
+		scenario: string;
+		budgetTokens: number;
+		accordionScore: number;
+		compactScore: number;
+		tokenSpend?: number;
+		cacheHitRate?: number;
+	}>;
+}
+
+export interface ConductorTraceDataset {
+	manualChanges: ManualChangeTraceLabel[];
+	foldDecisions: FoldDecisionTraceLabel[];
+	niahHoldouts: NiahHoldoutTraceLabel[];
+	compactSweeps: CompactSweepTraceLabel[];
+}
+
+export interface ConductorModelState {
+	budgetOracle?: CachedBudgetOracleDecision;
+	foldPolicyCache: Record<string, CachedFoldPolicyDecision>;
+	compressionCache: Record<string, CachedCompressionDecision>;
+	shadowTraces: ConductorShadowTrace[];
+}
+
+export interface WarmConductorModelInput {
+	blocks: ContextBlock[];
+	prompt: string;
+	state: AccordionState;
+	messages?: AgentMessage[];
+	currentTurn?: number;
+	targetModelId?: string;
+}
+
+export interface LocalConductorModelProviderOptions {
+	budgetOracle?: boolean;
+	foldPolicyProvider?: boolean;
+	compressionProvider?: boolean;
+}
+
+export interface LinearModelArtifact {
+	intercept: number;
+	weights: Record<string, number>;
+	confidence: number;
+	min?: number;
+	max?: number;
+}
+
+export type FoldPolicyArchitecture = "linear_replay" | "minilm_cross_encoder_distilled";
+
+export interface FoldPolicyEncoderArtifact {
+	modelFamily: "MiniLM";
+	modelId: string;
+	pairTemplate: string;
+	pooling: "cls" | "mean";
+	embeddingDimension?: number;
+}
+
+export interface FoldPolicyCrossEncoderHeadArtifact {
+	type: "hashed_pair_regressor";
+	featureDimension: number;
+	intercept: number;
+	weights: number[];
+	confidence: number;
+	trainingPairs: number;
+	teacherPairs: number;
+}
+
+export interface FoldPolicyModelArtifact extends LinearModelArtifact {
+	reuseHorizonTurns: number;
+	architecture?: FoldPolicyArchitecture;
+	encoder?: FoldPolicyEncoderArtifact;
+	crossEncoderHead?: FoldPolicyCrossEncoderHeadArtifact;
+	distillation?: {
+		teacherRecords: number;
+		trainingPairs: number;
+		holdoutPairs: number;
+		source: string;
+	};
+}
+
+export interface CompressionFidelityLabels {
+	paths: string[];
+	commands: string[];
+	errors: string[];
+	exactValues: string[];
+	decisions: string[];
+}
+
+export interface CompressionDigestEntryArtifact {
+	digest: string;
+	fidelityLabels: CompressionFidelityLabels;
+	labeler: string;
+}
+
+export interface CompressionModelArtifact {
+	mode: "deterministic_extract" | "teacher_textual_digest_table";
+	confidence: number;
+	fidelityGate: boolean;
+	baseModel?: {
+		modelFamily: "Qwen2.5" | "local_textual";
+		modelId: string;
+	};
+	adapter?: {
+		type: "LoRA" | "digest_table";
+		rank?: number;
+		path?: string;
+	};
+	promptTemplate?: string;
+	distillation?: {
+		teacherRecords: number;
+		compressionRecords: number;
+		source: string;
+	};
+	digestTable?: Record<string, CompressionDigestEntryArtifact>;
+}
+
+export interface ConductorModelArtifact {
+	version: 1;
+	createdAt: string;
+	source: string;
+	training: {
+		examples: number;
+		oracleExamples: number;
+		foldPolicyExamples: number;
+		compressionExamples?: number;
+		holdoutExamples?: number;
+		datasetRecords?: number;
+		datasetHash?: string;
+		datasetSource?: string;
+		rubricVersion: string;
+		rubricPath?: string;
+		distillation?: {
+			teacherRecords: number;
+			localRecords: number;
+			labelers: string[];
+			readyForLiveAuthority: boolean;
+			missing: string[];
+		};
+	};
+	budgetOracle: LinearModelArtifact;
+	foldPolicy: FoldPolicyModelArtifact;
+	compression: CompressionModelArtifact;
+}
+
+export type BudgetOracleAuthorityMode = "shadow_only" | "cost_guarded" | "live";
+export type FoldPolicyAuthorityMode = "shadow_only" | "live";
+export type CompressionAuthorityMode = "digest_only" | "metadata_live";
+
+export interface ConductorModelAuthority {
+	version: 1;
+	generatedAt: string;
+	artifact: string;
+	artifactDatasetHash?: string;
+	evidence: {
+		labelAudit?: string;
+		modelEvaluation?: string;
+		niahBenchmark?: string;
+		compactComparison?: string;
+	};
+	authority: {
+		budgetOracle: {
+			mode: BudgetOracleAuthorityMode;
+			maxTargetMultiplier?: number;
+		};
+		foldPolicy: {
+			mode: FoldPolicyAuthorityMode;
+		};
+		compression: {
+			mode: CompressionAuthorityMode;
+		};
+	};
+}
+
 export interface ConductorDependencies {
 	summaryProvider?: SummaryProvider;
 	embeddingProvider?: EmbeddingProvider;
+	budgetOracle?: BudgetOracleProvider;
+	foldPolicyProvider?: FoldPolicyProvider;
+	compressionProvider?: CompressionProvider;
 	onSummary?: (hash: string, summary: string) => void;
+	onShadowTrace?: (trace: ConductorShadowTrace) => void;
 	log?: (message: string) => void;
 	now?: () => number;
 	/** Override UNFOLD_RELATIVE_MARGIN at call time (also readable from env ACCORDION_UNFOLD_MARGIN). */
@@ -186,6 +537,14 @@ export interface ConductorDependencies {
 	unfoldFloor?: number;
 	/** Pin the fold target, disabling self-calibration (also readable from env ACCORDION_FIXED_TARGET). */
 	fixedFoldTarget?: number;
+	/** Minimum confidence for learned components to have live authority. */
+	modelConfidenceFloor?: number;
+	/** Timeout for async model warm-up providers. */
+	modelTimeoutMs?: number;
+	/** Force shadow mode; env CONDUCTOR_SHADOW=1 also enables it. */
+	shadowMode?: boolean;
+	/** Target model id for learned budget/policy features. */
+	targetModelId?: string;
 }
 
 export interface OpenAICompatibleSummaryProviderOptions {
@@ -254,10 +613,15 @@ export const SUMMARY_MODEL = "claude-haiku-4-5";
 export const DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434";
 export const DEFAULT_OLLAMA_MODEL = "llama3.2:3b";
 export const DEFAULT_SUMMARY_TIMEOUT_MS = 30_000;
+export const DEFAULT_MODEL_CONFIDENCE_FLOOR = 0.65;
+export const DEFAULT_MODEL_TIMEOUT_MS = 500;
+export const MAX_MODEL_CACHE_ENTRIES = 1_000;
+export const MAX_SHADOW_TRACES = 500;
 /** Conductor pins expire after this many turns without renewal (auto-fold protection). */
 export const CONDUCTOR_PIN_LIFETIME = 3;
 /** Minimum pairwise digest-text keyword overlap for semantic group formation (second pass). */
 export const SEMANTIC_GROUP_OVERLAP_THRESHOLD = 0.4;
+export const SEMANTIC_GROUP_MAX_CANDIDATES = 80;
 /** Each risk category (commands/paths/exact_values/decisions) in a digest's suffix
  *  lowers the effective proactive-unfold floor by this amount. */
 export const RISK_FLOOR_BONUS = 0.1;
@@ -329,6 +693,41 @@ export function mergeConductorConfig(partial?: Partial<ConductorConfig>): Conduc
 	return { ...defaults, ...partial };
 }
 
+function mergeSalienceMetadata(seed?: Record<string, Partial<SalienceMetadata>>): Record<string, SalienceMetadata> {
+	const out: Record<string, SalienceMetadata> = {};
+	for (const [key, value] of Object.entries(seed ?? {})) {
+		out[key] = {
+			paths: [...(value.paths ?? [])],
+			commands: [...(value.commands ?? [])],
+			errors: [...(value.errors ?? [])],
+			exact_values: [...(value.exact_values ?? [])],
+			decisions: [...(value.decisions ?? [])],
+			sourceHash: value.sourceHash,
+			digest: value.digest,
+		};
+	}
+	return out;
+}
+
+function mergeModelState(seed?: Partial<ConductorModelState>): ConductorModelState {
+	return {
+		budgetOracle: seed?.budgetOracle ? { ...seed.budgetOracle, value: { ...seed.budgetOracle.value } } : undefined,
+		foldPolicyCache: Object.fromEntries(
+			Object.entries(seed?.foldPolicyCache ?? {}).map(([key, value]) => [
+				key,
+				{ ...value, value: { ...value.value }, features: { ...value.features } },
+			]),
+		),
+		compressionCache: Object.fromEntries(
+			Object.entries(seed?.compressionCache ?? {}).map(([key, value]) => [
+				key,
+				{ ...value, value: { digest: value.value.digest, salience: value.value.salience ? { ...value.value.salience } : undefined } },
+			]),
+		),
+		shadowTraces: [...(seed?.shadowTraces ?? [])].slice(-MAX_SHADOW_TRACES),
+	};
+}
+
 export function createAccordionState(seed: Partial<AccordionState> = {}): AccordionState {
 	// Membership source of truth is foldedBlockIds (manual fold/unfold paths edit
 	// it directly); foldLevels records depth for members. Stale level entries for
@@ -360,6 +759,8 @@ export function createAccordionState(seed: Partial<AccordionState> = {}): Accord
 		lastRunHadPressure: seed.lastRunHadPressure ?? false,
 		lastRunWithinBudget: seed.lastRunWithinBudget ?? false,
 		calibrationEvents: [...(seed.calibrationEvents ?? [])].slice(-MAX_CALIBRATION_EVENTS),
+		salienceMetadata: mergeSalienceMetadata(seed.salienceMetadata),
+		model: mergeModelState(seed.model),
 		conductorPins: { ...(seed.conductorPins ?? {}) },
 		groups: (seed.groups ?? []).map((g: AccordionGroup) => ({ ...g, memberIds: [...g.memberIds] })),
 		config,
@@ -1021,17 +1422,122 @@ function makeUnit(
 	};
 }
 
-function unitScore(unit: FoldUnit, prompt: string, weights: PromptWeights, currentTurn: number, state: AccordionState): FoldUnit {
+function unitScore(
+	unit: FoldUnit,
+	prompt: string,
+	weights: PromptWeights,
+	currentTurn: number,
+	state: AccordionState,
+	deps: ConductorDependencies,
+): FoldUnit {
 	const weighted = unit.blocks.map((block) => {
 		const kindScore = FOLD_RANK[block.kind] / 4;
 		const overlap = relevance(block.text, prompt, state);
 		const recency = currentTurn <= 1 ? 1 : block.turn / currentTurn;
-		return kindScore * weights.kind + overlap * weights.keyword + recency * weights.recency;
+		const heuristic = kindScore * weights.kind + overlap * weights.keyword + recency * weights.recency;
+		const cached = cachedFoldPolicy(block, prompt, state, deps);
+		const learned = cached ? learnedKeepScoreFromCached(cached) : undefined;
+		if (learned === undefined) return heuristic;
+		return isArtifactFoldPolicyDecision(cached) && cached.authority !== "live" ? heuristic : learned;
 	});
 	return {
 		...unit,
 		score: weighted.reduce((sum, n) => sum + n, 0) / Math.max(1, weighted.length),
 	};
+}
+
+function cachedFoldPolicy(
+	block: ContextBlock,
+	prompt: string,
+	state: AccordionState,
+	deps: ConductorDependencies = {},
+): CachedFoldPolicyDecision | undefined {
+	const cached = state.model.foldPolicyCache[textHash(block.text)];
+	if (!cached || cached.promptHash !== textHash(prompt) || cached.fallbackReason) return undefined;
+	if (!modelAuthorityAllowed(deps)) return undefined;
+	if (cached.confidence < modelConfidenceFloor(deps)) return undefined;
+	return cached;
+}
+
+function learnedKeepScore(
+	block: ContextBlock,
+	prompt: string,
+	state: AccordionState,
+	deps: ConductorDependencies = {},
+): number | undefined {
+	const cached = cachedFoldPolicy(block, prompt, state, deps);
+	if (!cached) return undefined;
+	return learnedKeepScoreFromCached(cached);
+}
+
+function learnedKeepScoreFromCached(cached: CachedFoldPolicyDecision): number {
+	const predicted = cached.value;
+	const base = Number.isFinite(predicted.keepScore ?? NaN)
+		? predicted.keepScore!
+		: reuseDistanceToKeepScore(predicted.expectedReuseTurns);
+	const attentionBoost = cached.features.agentAttention * 0.25;
+	return Math.max(0, Math.min(1, base + attentionBoost));
+}
+
+function learnedFoldLevel(
+	block: ContextBlock,
+	prompt: string,
+	state: AccordionState,
+	deps: ConductorDependencies,
+): FoldLevel | undefined {
+	const cached = cachedFoldPolicy(block, prompt, state, deps);
+	if (!cached) return undefined;
+	if (isArtifactFoldPolicyDecision(cached) && cached.authority !== "live") return undefined;
+	const level = normalizeLevel(cached.value.level ?? reuseDistanceToFoldLevel(cached.value.expectedReuseTurns));
+	return level;
+}
+
+function isArtifactFoldPolicyDecision(cached: CachedFoldPolicyDecision): boolean {
+	return cached.value.reason?.startsWith("artifact:") === true || cached.reason?.startsWith("artifact:") === true;
+}
+
+function learnedUnitFoldLevel(
+	unit: FoldUnit,
+	prompt: string,
+	state: AccordionState,
+	deps: ConductorDependencies,
+): FoldLevel | undefined {
+	const levels = unit.blocks
+		.map((block) => learnedFoldLevel(block, prompt, state, deps))
+		.filter((level): level is FoldLevel => level !== undefined);
+	if (levels.length === 0) return undefined;
+	return Math.max(...levels) as FoldLevel;
+}
+
+function vectorForBlock(block: ContextBlock, state: AccordionState): number[] | undefined {
+	return state.embeddingCache[textHash(block.text)];
+}
+
+function cosine(a: number[] | undefined, b: number[] | undefined): number {
+	if (!a || !b || a.length !== b.length) return 0;
+	let dot = 0;
+	for (let i = 0; i < a.length; i++) dot += a[i] * b[i];
+	return dot;
+}
+
+export function mmrRedundancyPenalty(vector: number[] | undefined, selectedVectors: Array<number[] | undefined>, weight = 0.15): number {
+	const maxSimilarity = Math.max(0, ...selectedVectors.map((selected) => cosine(vector, selected)));
+	return maxSimilarity * weight;
+}
+
+function applyMmrRedundancyPenalty(units: FoldUnit[], state: AccordionState): FoldUnit[] {
+	if (!hasEmbeddings(state)) return units;
+	const byScore = [...units].sort((a, b) => b.score - a.score);
+	const selected: ContextBlock[] = [];
+	const adjusted = new Map<string, number>();
+	for (const unit of byScore) {
+		const block = unit.blocks[0];
+		const vector = vectorForBlock(block, state);
+		const penalty = mmrRedundancyPenalty(vector, selected.map((prior) => vectorForBlock(prior, state)));
+		adjusted.set(unit.id, Math.max(0, unit.score - penalty));
+		selected.push(block);
+	}
+	return units.map((unit) => ({ ...unit, score: adjusted.get(unit.id) ?? unit.score }));
 }
 
 function isPinned(block: ContextBlock, state: AccordionState): boolean {
@@ -1127,6 +1633,786 @@ function median(values: number[]): number {
 	return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
 }
 
+function modelConfidenceFloor(deps: ConductorDependencies): number {
+	const raw = parseFloat(process?.env?.ACCORDION_MODEL_CONFIDENCE_FLOOR ?? "");
+	const configured = deps.modelConfidenceFloor ?? (!isNaN(raw) ? raw : DEFAULT_MODEL_CONFIDENCE_FLOOR);
+	if (!Number.isFinite(configured)) return DEFAULT_MODEL_CONFIDENCE_FLOOR;
+	return Math.max(0, Math.min(1, configured));
+}
+
+function modelTimeoutMs(deps: ConductorDependencies): number {
+	const raw = parseInt(process?.env?.ACCORDION_MODEL_TIMEOUT_MS ?? "", 10);
+	const configured = deps.modelTimeoutMs ?? (!isNaN(raw) ? raw : DEFAULT_MODEL_TIMEOUT_MS);
+	if (!Number.isFinite(configured)) return DEFAULT_MODEL_TIMEOUT_MS;
+	return Math.max(1, configured);
+}
+
+export function isConductorShadowEnabled(deps: ConductorDependencies = {}): boolean {
+	const env = process?.env?.CONDUCTOR_SHADOW;
+	return deps.shadowMode ?? (env === "1" || env === "true");
+}
+
+function modelAuthorityAllowed(deps: ConductorDependencies): boolean {
+	return !isConductorShadowEnabled(deps);
+}
+
+async function withModelTimeout<T>(promise: Promise<T>, deps: ConductorDependencies): Promise<T> {
+	const timeout = new Promise<never>((_, reject) =>
+		setTimeout(() => reject(new Error("model provider timed out")), modelTimeoutMs(deps)),
+	);
+	return Promise.race([promise, timeout]);
+}
+
+function recordShadowTrace(state: AccordionState, deps: ConductorDependencies, trace: ConductorShadowTrace): void {
+	state.model.shadowTraces.push(trace);
+	if (state.model.shadowTraces.length > MAX_SHADOW_TRACES) {
+		state.model.shadowTraces = state.model.shadowTraces.slice(-MAX_SHADOW_TRACES);
+	}
+	deps.onShadowTrace?.(trace);
+}
+
+function conductorStats(blocks: ContextBlock[]): BudgetOracleRequest["stats"] {
+	const kindCounts: Record<BlockKind, number> = {
+		user: 0,
+		text: 0,
+		thinking: 0,
+		tool_call: 0,
+		tool_result: 0,
+	};
+	let totalTokens = 0;
+	let maxBlockTokens = 0;
+	const turns = new Set<number>();
+	for (const block of blocks) {
+		kindCounts[block.kind]++;
+		totalTokens += block.tokens;
+		maxBlockTokens = Math.max(maxBlockTokens, block.tokens);
+		turns.add(block.turn);
+	}
+	return {
+		blockCount: blocks.length,
+		turnCount: turns.size,
+		totalTokens,
+		kindCounts,
+		maxBlockTokens,
+	};
+}
+
+function recentAssistantText(messages: AgentMessage[] | undefined, maxMessages = 4): string {
+	if (!messages?.length) return "";
+	const parts: string[] = [];
+	for (let i = messages.length - 1; i >= 0 && parts.length < maxMessages; i--) {
+		const message = messages[i] as any;
+		if (message.role !== "assistant") continue;
+		const text = getText(message.content);
+		if (text.trim()) parts.push(text);
+	}
+	return parts.reverse().join("\n");
+}
+
+function agentAttentionScore(block: ContextBlock, messages: AgentMessage[] | undefined): number {
+	const ownText = block.text.trim();
+	const recent = recentAssistantText(messages)
+		.replace(ownText, "")
+		.trim();
+	if (!recent) return 0;
+	const recentLower = recent.toLowerCase();
+	const salience = categorizeSalienceMarkers(block.text);
+	const markers = [
+		...salience.paths,
+		...salience.commands,
+		...salience.errors,
+		...salience.exact_values,
+		...salience.decisions,
+	].filter((marker) => marker.length >= 3);
+	if (markers.some((marker) => recentLower.includes(marker.toLowerCase()))) return 1;
+
+	const blockTokens = new Set(tokenizeForRelevance(block.text));
+	if (blockTokens.size === 0) return 0;
+	const assistantTokens = new Set(tokenizeForRelevance(recent));
+	let shared = 0;
+	for (const token of blockTokens) if (assistantTokens.has(token)) shared++;
+	return Math.min(1, shared / Math.min(blockTokens.size, 20));
+}
+
+function foldPolicyFeatures(
+	block: ContextBlock,
+	prompt: string,
+	currentTurn: number,
+	state: AccordionState,
+	messages: AgentMessage[] | undefined,
+): FoldPolicyFeatures {
+	return {
+		kindRank: FOLD_RANK[block.kind] / 4,
+		keywordOverlap: keywordOverlap(block.text, prompt),
+		recency: currentTurn <= 1 ? 1 : block.turn / currentTurn,
+		tokenCount: block.tokens,
+		agentAttention: agentAttentionScore(block, messages),
+		wasRecentlyUnfolded: state.manualChanges.some(
+			(change) =>
+				change.blockId === block.id &&
+				change.action === "unfold" &&
+				currentTurn - change.turn <= UNFOLD_FEEDBACK_TURNS,
+		),
+	};
+}
+
+function pruneModelCaches(state: AccordionState): void {
+	const policyEntries = Object.entries(state.model.foldPolicyCache);
+	if (policyEntries.length > MAX_MODEL_CACHE_ENTRIES) {
+		state.model.foldPolicyCache = Object.fromEntries(policyEntries.slice(-MAX_MODEL_CACHE_ENTRIES));
+	}
+	const compressionEntries = Object.entries(state.model.compressionCache);
+	if (compressionEntries.length > MAX_MODEL_CACHE_ENTRIES) {
+		state.model.compressionCache = Object.fromEntries(compressionEntries.slice(-MAX_MODEL_CACHE_ENTRIES));
+	}
+}
+
+export function reuseDistanceToFoldLevel(expectedReuseTurns: number): FoldLevel {
+	if (!Number.isFinite(expectedReuseTurns) || expectedReuseTurns < 0) return 2;
+	if (expectedReuseTurns <= 1) return 0;
+	if (expectedReuseTurns <= 3) return 1;
+	if (expectedReuseTurns <= 8) return 2;
+	return 3;
+}
+
+function reuseDistanceToKeepScore(expectedReuseTurns: number): number {
+	if (!Number.isFinite(expectedReuseTurns) || expectedReuseTurns < 0) return 0.5;
+	return 1 / (1 + Math.max(0, expectedReuseTurns));
+}
+
+function salienceMetadataFromText(text: string, digest?: string): SalienceMetadata {
+	const cats = categorizeSalienceMarkers(text);
+	return {
+		paths: cats.paths,
+		commands: cats.commands,
+		errors: cats.errors,
+		exact_values: cats.exact_values,
+		decisions: cats.decisions,
+		sourceHash: textHash(text),
+		digest,
+	};
+}
+
+function mergeMetadata(base: SalienceMetadata, extra?: Partial<SalienceMetadata>): SalienceMetadata {
+	const merge = (key: keyof Omit<SalienceMetadata, "sourceHash" | "digest">): string[] => {
+		const seen = new Set<string>();
+		const out: string[] = [];
+		for (const value of [...(base[key] ?? []), ...(extra?.[key] ?? [])]) {
+			const normalized = value.trim();
+			if (!normalized || seen.has(normalized) || out.length >= 5) continue;
+			seen.add(normalized);
+			out.push(normalized);
+		}
+		return out;
+	};
+	return {
+		paths: merge("paths"),
+		commands: merge("commands"),
+		errors: merge("errors"),
+		exact_values: merge("exact_values"),
+		decisions: merge("decisions"),
+		sourceHash: base.sourceHash,
+		digest: extra?.digest ?? base.digest,
+	};
+}
+
+function metadataValues(metadata: Partial<SalienceMetadata> | undefined): string[] {
+	if (!metadata) return [];
+	return [
+		...(metadata.paths ?? []),
+		...(metadata.commands ?? []),
+		...(metadata.errors ?? []),
+		...(metadata.exact_values ?? []),
+		...(metadata.decisions ?? []),
+	].filter(Boolean);
+}
+
+function compressionFidelityFailure(block: ContextBlock, value: CompressionValue): string | undefined {
+	const source = block.text.toLowerCase();
+	const digestMetadata = salienceMetadataFromText(value.digest);
+	digestMetadata.exact_values = digestMetadata.exact_values.filter((marker) => !/^digest=/i.test(marker));
+	const candidateMetadata = mergeMetadata(
+		digestMetadata,
+		value.salience,
+	);
+	for (const marker of metadataValues(candidateMetadata)) {
+		if (!source.includes(marker.toLowerCase())) return `ungrounded marker: ${marker}`;
+	}
+	return undefined;
+}
+
+function applyBudgetOracleTarget(
+	state: AccordionState,
+	currentTurn: number,
+	calibratedTarget: number,
+	deps: ConductorDependencies,
+): number {
+	const cached = state.model.budgetOracle;
+	if (!cached || cached.turn !== currentTurn || cached.fallbackReason || !modelAuthorityAllowed(deps)) {
+		return calibratedTarget;
+	}
+	if (cached.confidence < modelConfidenceFloor(deps)) return calibratedTarget;
+	const multiplier = cached.value.targetMultiplier;
+	if (!Number.isFinite(multiplier) || multiplier <= 0) return calibratedTarget;
+	return clampFoldTarget(calibratedTarget * multiplier, foldTargetBand(state.config));
+}
+
+function promptHasHighRecallRisk(prompt: string): boolean {
+	return hasIdentifierOrError(prompt) || referencesPast(prompt);
+}
+
+function sigmoid(value: number): number {
+	return 1 / (1 + Math.exp(-value));
+}
+
+function dotFeatures(features: Record<string, number>, model: LinearModelArtifact): number {
+	let total = model.intercept;
+	for (const [name, weight] of Object.entries(model.weights)) {
+		total += (features[name] ?? 0) * weight;
+	}
+	return total;
+}
+
+function clampModelOutput(value: number, model: LinearModelArtifact): number {
+	const min = model.min ?? Number.NEGATIVE_INFINITY;
+	const max = model.max ?? Number.POSITIVE_INFINITY;
+	if (!Number.isFinite(value)) return Math.max(min, Math.min(max, model.intercept));
+	return Math.max(min, Math.min(max, value));
+}
+
+function budgetArtifactFeatures(request: BudgetOracleRequest): Record<string, number> {
+	return {
+		prompt_risk: promptHasHighRecallRisk(request.prompt) ? 1 : 0,
+		log_blocks: Math.log1p(request.stats.blockCount),
+		log_turns: Math.log1p(request.stats.turnCount),
+		log_total_tokens: Math.log1p(request.stats.totalTokens),
+		log_max_block_tokens: Math.log1p(request.stats.maxBlockTokens),
+		tool_ratio: request.stats.blockCount > 0
+			? (request.stats.kindCounts.tool_call + request.stats.kindCounts.tool_result) / request.stats.blockCount
+			: 0,
+	};
+}
+
+function foldArtifactFeatures(features: FoldPolicyFeatures): Record<string, number> {
+	return {
+		kind_rank: features.kindRank,
+		keyword_overlap: features.keywordOverlap,
+		recency: features.recency,
+		log_tokens: Math.log1p(features.tokenCount),
+		agent_attention: features.agentAttention,
+		recent_unfold: features.wasRecentlyUnfolded ? 1 : 0,
+	};
+}
+
+export function foldPolicyCrossEncoderFeatureEntries(
+	prompt: string,
+	blockText: string,
+	features: Record<string, number>,
+	featureDimension: number,
+): Array<[number, number]> {
+	const dimension = Math.max(8, Math.floor(featureDimension));
+	const entries = new Map<number, number>();
+	const add = (name: string, value: number) => {
+		if (!Number.isFinite(value) || value === 0) return;
+		const index = stableFeatureIndex(name, dimension);
+		entries.set(index, (entries.get(index) ?? 0) + value);
+	};
+	for (const [name, value] of Object.entries(features)) add(`num:${name}`, value);
+	const promptTokens = tokenizeForRelevance(prompt).slice(0, 64);
+	const blockTokens = tokenizeForRelevance(blockText).slice(0, 256);
+	const promptScale = promptTokens.length === 0 ? 0 : 1 / Math.sqrt(promptTokens.length);
+	const blockScale = blockTokens.length === 0 ? 0 : 1 / Math.sqrt(blockTokens.length);
+	for (const token of promptTokens) add(`prompt:${token}`, promptScale);
+	for (const token of blockTokens) add(`block:${token}`, blockScale);
+	const blockSet = new Set(blockTokens);
+	let overlap = 0;
+	for (const token of new Set(promptTokens)) {
+		if (!blockSet.has(token)) continue;
+		overlap++;
+		add(`overlap:${token}`, 1);
+	}
+	add("pair:overlap_ratio", promptTokens.length === 0 ? 0 : overlap / promptTokens.length);
+	const salience = categorizeSalienceMarkers(blockText);
+	for (const [name, values] of Object.entries(salience)) {
+		add(`salience:${name}`, Math.min(1, values.length / 4));
+		for (const value of values.slice(0, 4)) add(`salience:${name}:${value.toLowerCase()}`, 1);
+	}
+	return [...entries.entries()].sort(([a], [b]) => a - b);
+}
+
+function stableFeatureIndex(name: string, dimension: number): number {
+	const digest = createHash("sha256").update(name).digest();
+	return digest.readUInt32BE(0) % dimension;
+}
+
+function dotSparseFeatures(entries: Array<[number, number]>, weights: number[]): number {
+	let sum = 0;
+	for (const [index, value] of entries) sum += (weights[index] ?? 0) * value;
+	return sum;
+}
+
+export function validateConductorModelArtifact(artifact: ConductorModelArtifact): ConductorModelArtifact {
+	if (artifact.version !== 1) throw new Error(`Unsupported Conductor model artifact version: ${artifact.version}`);
+	if (!artifact.budgetOracle || !artifact.foldPolicy || !artifact.compression) {
+		throw new Error("Conductor model artifact is missing one or more job sections");
+	}
+	validateFoldPolicyArtifact(artifact.foldPolicy);
+	validateCompressionArtifact(artifact.compression);
+	return artifact;
+}
+
+export function validateFoldPolicyArtifact(model: FoldPolicyModelArtifact): FoldPolicyModelArtifact {
+	const architecture = model.architecture ?? "linear_replay";
+	if (architecture !== "linear_replay" && architecture !== "minilm_cross_encoder_distilled") {
+		throw new Error(`Unsupported fold policy architecture: ${architecture}`);
+	}
+	if (architecture === "minilm_cross_encoder_distilled") {
+		if (model.encoder?.modelFamily !== "MiniLM") {
+			throw new Error("MiniLM fold policy artifact must declare encoder.modelFamily=MiniLM");
+		}
+		if (!model.encoder.modelId || !/minilm/i.test(model.encoder.modelId)) {
+			throw new Error("MiniLM fold policy artifact must declare a MiniLM modelId");
+		}
+		if (!model.encoder.pairTemplate || !model.encoder.pairTemplate.includes("{prompt}") || !model.encoder.pairTemplate.includes("{block}")) {
+			throw new Error("MiniLM fold policy artifact must declare a prompt/block pairTemplate");
+		}
+		if (!model.distillation || model.distillation.teacherRecords <= 0 || model.distillation.trainingPairs <= 0) {
+			throw new Error("MiniLM fold policy artifact requires teacher distillation metadata");
+		}
+		if (model.crossEncoderHead?.type !== "hashed_pair_regressor") {
+			throw new Error("MiniLM fold policy artifact must include a runnable crossEncoderHead");
+		}
+		if (!Number.isFinite(model.crossEncoderHead.featureDimension) || model.crossEncoderHead.featureDimension <= 0) {
+			throw new Error("MiniLM fold policy crossEncoderHead has invalid featureDimension");
+		}
+		if (model.crossEncoderHead.weights.length !== model.crossEncoderHead.featureDimension) {
+			throw new Error("MiniLM fold policy crossEncoderHead weight dimension mismatch");
+		}
+		if (!Number.isFinite(model.crossEncoderHead.intercept) || !Number.isFinite(model.crossEncoderHead.confidence)) {
+			throw new Error("MiniLM fold policy crossEncoderHead has invalid numeric weights");
+		}
+		if (model.crossEncoderHead.teacherPairs <= 0 || model.crossEncoderHead.trainingPairs <= 0) {
+			throw new Error("MiniLM fold policy crossEncoderHead requires teacher-trained pairs");
+		}
+	}
+	return model;
+}
+
+export function validateCompressionArtifact(model: CompressionModelArtifact): CompressionModelArtifact {
+	if (model.mode !== "deterministic_extract" && model.mode !== "teacher_textual_digest_table") {
+		throw new Error(`Unsupported compression artifact mode: ${model.mode}`);
+	}
+	if (model.mode === "teacher_textual_digest_table") {
+		if (!model.fidelityGate) throw new Error("Textual compressor artifact must enable fidelityGate");
+		if ((model.distillation?.teacherRecords ?? 0) <= 0 || (model.distillation?.compressionRecords ?? 0) <= 0) {
+			throw new Error("Textual compressor artifact requires teacher compression distillation metadata");
+		}
+		if (!model.baseModel?.modelId || !["Qwen2.5", "local_textual"].includes(model.baseModel.modelFamily)) {
+			throw new Error("Textual compressor artifact must declare a supported baseModel");
+		}
+		if (!model.adapter || !["LoRA", "digest_table"].includes(model.adapter.type)) {
+			throw new Error("Textual compressor artifact must declare a LoRA or digest_table adapter");
+		}
+		if (!model.promptTemplate || !model.promptTemplate.includes("{block}")) {
+			throw new Error("Textual compressor artifact must declare a block promptTemplate");
+		}
+		if (!model.digestTable || Object.keys(model.digestTable).length === 0) {
+			throw new Error("Textual compressor artifact requires at least one teacher digest entry");
+		}
+	}
+	return model;
+}
+
+export function parseConductorModelArtifact(json: string): ConductorModelArtifact {
+	return validateConductorModelArtifact(JSON.parse(json) as ConductorModelArtifact);
+}
+
+export function validateConductorModelAuthority(authority: ConductorModelAuthority): ConductorModelAuthority {
+	if (authority.version !== 1) throw new Error(`Unsupported Conductor model authority version: ${authority.version}`);
+	if (!["shadow_only", "cost_guarded", "live"].includes(authority.authority?.budgetOracle?.mode)) {
+		throw new Error(`Unsupported budget oracle authority mode: ${authority.authority?.budgetOracle?.mode}`);
+	}
+	if (!["shadow_only", "live"].includes(authority.authority?.foldPolicy?.mode)) {
+		throw new Error(`Unsupported fold policy authority mode: ${authority.authority?.foldPolicy?.mode}`);
+	}
+	if (!["digest_only", "metadata_live"].includes(authority.authority?.compression?.mode)) {
+		throw new Error(`Unsupported compression authority mode: ${authority.authority?.compression?.mode}`);
+	}
+	return authority;
+}
+
+export function parseConductorModelAuthority(json: string): ConductorModelAuthority {
+	return validateConductorModelAuthority(JSON.parse(json) as ConductorModelAuthority);
+}
+
+function budgetAuthorityMode(authority?: ConductorModelAuthority): BudgetOracleAuthorityMode {
+	return authority?.authority.budgetOracle.mode ?? "cost_guarded";
+}
+
+function foldPolicyAuthorityMode(authority?: ConductorModelAuthority): FoldPolicyAuthorityMode {
+	return authority?.authority.foldPolicy.mode ?? "shadow_only";
+}
+
+function compressionAuthorityMode(authority?: ConductorModelAuthority): CompressionAuthorityMode {
+	return authority?.authority.compression.mode ?? "digest_only";
+}
+
+export function createArtifactBudgetOracleProvider(
+	artifact: ConductorModelArtifact,
+	authority?: ConductorModelAuthority,
+): BudgetOracleProvider {
+	const model = validateConductorModelArtifact(artifact).budgetOracle;
+	const mode = budgetAuthorityMode(authority);
+	return async (request) => {
+		const raw = dotFeatures(budgetArtifactFeatures(request), model);
+		let targetMultiplier = clampModelOutput(raw, model);
+		if (mode === "shadow_only") targetMultiplier = 1;
+		else if (mode === "cost_guarded") {
+			targetMultiplier = Math.min(authority?.authority.budgetOracle.maxTargetMultiplier ?? 1, targetMultiplier);
+		}
+		const cacheHitRate = Math.max(0.01, Math.min(1, 1 - Math.log1p(request.stats.totalTokens) / 20));
+		return {
+			value: {
+				targetMultiplier,
+				quality: Math.max(0, Math.min(1, 0.7 + (targetMultiplier - 1) * 0.8)),
+				cacheHitRate,
+				cost: Math.max(1, request.stats.totalTokens * targetMultiplier),
+			},
+			confidence: model.confidence,
+			reason: `artifact:${artifact.source}`,
+			authority: mode,
+		};
+	};
+}
+
+export function createArtifactFoldPolicyProvider(
+	artifact: ConductorModelArtifact,
+	authority?: ConductorModelAuthority,
+): FoldPolicyProvider {
+	const model = validateConductorModelArtifact(artifact).foldPolicy;
+	const mode = foldPolicyAuthorityMode(authority);
+	return async (request) => ({
+		reason: `artifact:${artifact.source}`,
+		predictions: request.items.map((item) => {
+			const features = foldArtifactFeatures(item.features);
+			const head = model.architecture === "minilm_cross_encoder_distilled" ? model.crossEncoderHead : undefined;
+			const score = head
+				? sigmoid(
+						head.intercept +
+						dotSparseFeatures(
+							foldPolicyCrossEncoderFeatureEntries(request.prompt, item.block.text, features, head.featureDimension),
+							head.weights,
+						),
+					)
+				: sigmoid(dotFeatures(features, model));
+			const expectedReuseTurns = Math.max(0, Math.round((1 - score) * model.reuseHorizonTurns));
+			const reason = head ? `artifact:${artifact.source}:cross_encoder_head` : `artifact:${artifact.source}:linear_head`;
+			return {
+				value: {
+					blockId: item.block.id,
+					blockHash: item.blockHash,
+					expectedReuseTurns,
+					keepScore: score,
+					level: reuseDistanceToFoldLevel(expectedReuseTurns),
+					reason,
+				},
+				confidence: Math.max(0, Math.min(1, (head?.confidence ?? model.confidence) * (0.8 + Math.abs(score - 0.5) * 0.4))),
+				reason,
+				authority: mode,
+			};
+		}),
+	});
+}
+
+export function createArtifactCompressionProvider(
+	artifact: ConductorModelArtifact,
+	authority?: ConductorModelAuthority,
+): CompressionProvider {
+	const model = validateConductorModelArtifact(artifact).compression;
+	const mode = compressionAuthorityMode(authority);
+	return async ({ block, hash, deterministicDigest }) => {
+		const entry = model.mode === "teacher_textual_digest_table" ? model.digestTable?.[hash] : undefined;
+		const digest = entry?.digest ?? deterministicDigest;
+		const value: CompressionValue = { digest };
+		if (mode === "metadata_live") {
+			value.salience = entry
+				? {
+						paths: entry.fidelityLabels.paths,
+						commands: entry.fidelityLabels.commands,
+						errors: entry.fidelityLabels.errors,
+						exact_values: entry.fidelityLabels.exactValues,
+						decisions: entry.fidelityLabels.decisions,
+					}
+				: salienceMetadataFromText(block.text, digest);
+		}
+		return {
+			value,
+			confidence: model.confidence,
+			reason: entry ? `artifact:${artifact.source}:teacher_digest` : `artifact:${artifact.source}:deterministic_fallback`,
+			authority: mode,
+		};
+	};
+}
+
+export function createArtifactConductorModelProviders(
+	artifact: ConductorModelArtifact,
+	authority?: ConductorModelAuthority,
+): Pick<ConductorDependencies, "budgetOracle" | "foldPolicyProvider" | "compressionProvider"> {
+	const validated = validateConductorModelArtifact(artifact);
+	const validatedAuthority = authority ? validateConductorModelAuthority(authority) : undefined;
+	return {
+		budgetOracle: createArtifactBudgetOracleProvider(validated, validatedAuthority),
+		foldPolicyProvider: createArtifactFoldPolicyProvider(validated, validatedAuthority),
+		compressionProvider: createArtifactCompressionProvider(validated, validatedAuthority),
+	};
+}
+
+export function createLocalBudgetOracleProvider(): BudgetOracleProvider {
+	return async (request) => {
+		const manyBlocks = request.stats.blockCount >= 80 || request.stats.turnCount >= 30;
+		const largeBlocks = request.stats.maxBlockTokens >= 1_200;
+		const riskyPrompt = promptHasHighRecallRisk(request.prompt);
+		let targetMultiplier = 1;
+		if (riskyPrompt) targetMultiplier += 0.06;
+		if (!riskyPrompt && manyBlocks) targetMultiplier -= 0.04;
+		if (!riskyPrompt && largeBlocks) targetMultiplier -= 0.02;
+		return {
+			value: {
+				targetMultiplier: Math.max(0.85, Math.min(1.12, targetMultiplier)),
+				quality: riskyPrompt ? 0.78 : 0.7,
+				cacheHitRate: manyBlocks ? 0.74 : 0.86,
+				cost: Math.max(1, request.stats.totalTokens),
+			},
+			confidence: 0.72,
+			reason: "local_deterministic_prior",
+		};
+	};
+}
+
+export function createLocalFoldPolicyProvider(): FoldPolicyProvider {
+	return async (request) => ({
+		reason: "local_deterministic_prior",
+		predictions: request.items.map((item) => {
+			const f = item.features;
+			const hot = f.agentAttention >= 0.8 || f.keywordOverlap >= 0.55 || f.wasRecentlyUnfolded;
+			const soon = f.keywordOverlap >= 0.25 || f.agentAttention >= 0.35 || f.recency >= 0.85;
+			const expectedReuseTurns = hot ? 0 : soon ? 3 : f.tokenCount >= 600 ? 12 : 8;
+			const keepScore = Math.max(
+				0,
+				Math.min(
+					1,
+					f.kindRank * 0.2 +
+						f.keywordOverlap * 0.45 +
+						f.recency * 0.2 +
+						f.agentAttention * 0.35 +
+						(f.wasRecentlyUnfolded ? 0.25 : 0),
+				),
+			);
+			return {
+				value: {
+					blockId: item.block.id,
+					blockHash: item.blockHash,
+					expectedReuseTurns,
+					keepScore,
+					level: reuseDistanceToFoldLevel(expectedReuseTurns),
+					reason: "local_deterministic_prior",
+				},
+				confidence: hot || soon ? 0.78 : 0.7,
+				reason: "local_deterministic_prior",
+			};
+		}),
+	});
+}
+
+export function createLocalCompressionProvider(): CompressionProvider {
+	return async ({ block, deterministicDigest }) => ({
+		value: {
+			digest: deterministicDigest,
+			salience: salienceMetadataFromText(block.text, deterministicDigest),
+		},
+		confidence: 0.75,
+		reason: "local_deterministic_prior",
+	});
+}
+
+export function createLocalConductorModelProviders(
+	options: LocalConductorModelProviderOptions = {},
+): Pick<ConductorDependencies, "budgetOracle" | "foldPolicyProvider" | "compressionProvider"> {
+	const enableBudgetOracle = options.budgetOracle ?? true;
+	const enableFoldPolicyProvider = options.foldPolicyProvider ?? true;
+	const enableCompressionProvider = options.compressionProvider ?? true;
+	return {
+		budgetOracle: enableBudgetOracle ? createLocalBudgetOracleProvider() : undefined,
+		foldPolicyProvider: enableFoldPolicyProvider ? createLocalFoldPolicyProvider() : undefined,
+		compressionProvider: enableCompressionProvider ? createLocalCompressionProvider() : undefined,
+	};
+}
+
+export async function warmConductorModel(
+	input: WarmConductorModelInput,
+	deps: ConductorDependencies = {},
+): Promise<void> {
+	const state = input.state;
+	const promptHash = textHash(input.prompt);
+	const currentTurn = input.currentTurn ?? Math.max(0, ...input.blocks.map((block) => block.turn));
+	const shadow = isConductorShadowEnabled(deps);
+	const targetModelId = input.targetModelId ?? deps.targetModelId;
+	const now = deps.now?.() ?? Date.now();
+
+	const tasks: Array<Promise<void>> = [];
+
+	if (deps.budgetOracle) {
+		tasks.push((async () => {
+			const calibratedTarget = clampFoldTarget(state.foldTargetCalibrated ?? state.config.foldTargetInitial, foldTargetBand(state.config));
+			const request: BudgetOracleRequest = {
+				prompt: input.prompt,
+				promptHash,
+				currentTurn,
+				calibratedTarget,
+				targetModelId,
+				stats: conductorStats(input.blocks),
+			};
+			try {
+				const result = await withModelTimeout(deps.budgetOracle!(request), deps);
+				const fallbackReason = result.confidence < modelConfidenceFloor(deps) ? "confidence_below_floor" : undefined;
+				state.model.budgetOracle = { ...result, promptHash, turn: currentTurn, shadow, createdAt: now, fallbackReason };
+				if (shadow) {
+					recordShadowTrace(state, deps, {
+						kind: "budget_oracle",
+						turn: currentTurn,
+						heuristicDecision: { foldTarget: calibratedTarget },
+						modelDecision: result.value,
+						outcome: "pending",
+						reason: fallbackReason,
+					});
+				}
+			} catch (error: any) {
+				state.model.budgetOracle = {
+					value: { targetMultiplier: 1 },
+					confidence: 0,
+					promptHash,
+					turn: currentTurn,
+					shadow,
+					createdAt: now,
+					fallbackReason: error?.message || "budget_oracle_failed",
+				};
+			}
+		})());
+	}
+
+	if (deps.foldPolicyProvider) {
+		tasks.push((async () => {
+			const items = input.blocks.flatMap((block) => {
+				const blockHash = textHash(block.text);
+				const cached = state.model.foldPolicyCache[blockHash];
+				if (cached && cached.promptHash === promptHash) return [];
+				return [{
+					block,
+					blockHash,
+					features: foldPolicyFeatures(block, input.prompt, currentTurn, state, input.messages),
+				}];
+			});
+			if (items.length === 0) return;
+			try {
+				const response = await withModelTimeout(deps.foldPolicyProvider!({
+					prompt: input.prompt,
+					promptHash,
+					currentTurn,
+					targetModelId,
+					items,
+				}), deps);
+				const byHash = new Map(items.map((item) => [item.blockHash, item]));
+				for (const prediction of response.predictions) {
+					const blockHash = prediction.value.blockHash;
+					const item = byHash.get(blockHash);
+					if (!item) continue;
+					const fallbackReason = prediction.confidence < modelConfidenceFloor(deps) ? "confidence_below_floor" : undefined;
+					state.model.foldPolicyCache[blockHash] = {
+						...prediction,
+						blockHash,
+						promptHash,
+						turn: currentTurn,
+						features: item.features,
+						shadow,
+						createdAt: now,
+						fallbackReason,
+					};
+					if (shadow) {
+						recordShadowTrace(state, deps, {
+							kind: "fold_policy",
+							turn: currentTurn,
+							blockId: prediction.value.blockId,
+							heuristicDecision: { score: undefined },
+							modelDecision: prediction.value,
+							outcome: "pending",
+							reason: fallbackReason,
+						});
+					}
+				}
+			} catch (error: any) {
+				deps.log?.(`Accordion Conductor model warm-up failed: ${error?.message || error}`);
+			}
+		})());
+	}
+
+	if (deps.compressionProvider) {
+		for (const block of input.blocks) {
+			const hash = contentHash(block);
+			if (state.model.compressionCache[hash]) continue;
+			tasks.push((async () => {
+				const digest = deterministicDigest(block);
+				try {
+					const result = await withModelTimeout(deps.compressionProvider!({ block, hash, deterministicDigest: digest }), deps);
+					const fidelityFailure = compressionFidelityFailure(block, result.value);
+					const fallbackReason =
+						result.confidence < modelConfidenceFloor(deps)
+							? "confidence_below_floor"
+							: fidelityFailure;
+					const accepted = !fallbackReason;
+					state.model.compressionCache[hash] = {
+						...result,
+						hash,
+						accepted,
+						shadow,
+						createdAt: now,
+						fallbackReason,
+					};
+					if (accepted && !shadow) {
+						state.salienceMetadata[hash] = mergeMetadata(
+							salienceMetadataFromText(block.text, result.value.digest),
+							result.value.salience,
+						);
+					}
+					if (shadow) {
+						recordShadowTrace(state, deps, {
+							kind: "compression",
+							turn: block.turn,
+							blockId: block.id,
+							heuristicDecision: { digest },
+							modelDecision: result.value,
+							outcome: accepted ? "accepted" : "fallback",
+							reason: fallbackReason,
+						});
+					}
+				} catch (error: any) {
+					state.model.compressionCache[hash] = {
+						value: { digest },
+						confidence: 0,
+						hash,
+						accepted: false,
+						shadow,
+						createdAt: now,
+						fallbackReason: error?.message || "compression_failed",
+					};
+				}
+			})());
+		}
+	}
+
+	await Promise.all(tasks);
+	pruneModelCaches(state);
+}
+
 /** Pre-warm the embedding cache for all block texts and the incoming prompt.
  *  Must be awaited BEFORE calling runConductor() to enable the semantic relevance path.
  *  runConductor() itself is synchronous — it only reads the cache. */
@@ -1171,10 +2457,31 @@ function relevance(blockText: string, promptText: string, state: AccordionState)
 }
 
 function summaryFor(block: ContextBlock, state: AccordionState, deps: ConductorDependencies): string {
-	const digest = deterministicDigest(block);
 	const hash = contentHash(block);
+
+	const compressed = state.model.compressionCache[hash];
+	if (compressed && modelAuthorityAllowed(deps)) {
+		if (
+			compressed.accepted &&
+			!compressed.fallbackReason &&
+			compressed.confidence >= modelConfidenceFloor(deps)
+		) {
+			state.salienceMetadata[hash] = mergeMetadata(
+				salienceMetadataFromText(block.text, compressed.value.digest),
+				compressed.value.salience,
+			);
+			return compressed.value.digest;
+		}
+		const digest = deterministicDigest(block);
+		state.salienceMetadata[hash] = mergeMetadata(salienceMetadataFromText(block.text, digest), state.salienceMetadata[hash]);
+		return digest;
+	}
+
 	const cached = state.summaryCache[hash];
 	if (cached) return cached;
+
+	const digest = deterministicDigest(block);
+	state.salienceMetadata[hash] = mergeMetadata(salienceMetadataFromText(block.text, digest), state.salienceMetadata[hash]);
 
 	if (!deps.summaryProvider) {
 		if (!state.missingApiKeyLogged) {
@@ -1299,15 +2606,19 @@ export function runConductor(input: ConductorInput, deps: ConductorDependencies 
 		return { messages: input.messages, decisions: [], warnings, proactiveUnfolds: [], foldTarget: restingTarget, assembledTokens: live };
 	}
 
-	// Pressure-active run: tick the calibrated fold target, then choose weights.
-	const foldTarget = calibrateFoldTarget(input.state, currentTurn, deps);
+	// Pressure-active run: tick the calibrated fold target, then let a warmed,
+	// confidence-gated oracle adjust it inside the same configured band.
+	const calibratedTarget = calibrateFoldTarget(input.state, currentTurn, deps);
+	const foldTarget = applyBudgetOracleTarget(input.state, currentTurn, calibratedTarget, deps);
 	const weights = choosePromptWeights(input.incomingPrompt, input.state, currentTurn, foldTarget);
 
 	const availableBudget = Math.max(0, input.budgetTokens - pinnedTokens);
 	const targetTokens = pinnedTokens + Math.floor(availableBudget * weights.foldTargetRatio);
-	const units = buildFoldUnits(parsed.blocks, input.incomingPrompt, currentTurn, input.state)
-		.map((unit) => unitScore(unit, input.incomingPrompt, weights, currentTurn, input.state))
-		.sort((a, b) => a.score - b.score || a.blocks[0].order - b.blocks[0].order);
+	const units = applyMmrRedundancyPenalty(
+		buildFoldUnits(parsed.blocks, input.incomingPrompt, currentTurn, input.state)
+			.map((unit) => unitScore(unit, input.incomingPrompt, weights, currentTurn, input.state, deps)),
+		input.state,
+	).sort((a, b) => a.score - b.score || a.blocks[0].order - b.blocks[0].order);
 	const canFoldUnit = (unit: FoldUnit) =>
 		unit.foldable &&
 		unit.foldedTokens < unit.fullTokens &&
@@ -1329,6 +2640,43 @@ export function runConductor(input: ConductorInput, deps: ConductorDependencies 
 	};
 	const tokensAt = (unit: FoldUnit, level: FoldLevel) =>
 		unit.blocks.reduce((sum, block) => sum + blockTokensAtLevel(block, level), 0);
+	const canFoldByUnitId = new Map<string, boolean>();
+	const learnedTargetByUnitId = new Map<string, FoldLevel | undefined>();
+	const digestByUnitId = new Map<string, string>();
+	const digestTokensByUnitId = new Map<string, Set<string>>();
+	for (const unit of units) {
+		canFoldByUnitId.set(unit.id, canFoldUnit(unit));
+		learnedTargetByUnitId.set(unit.id, learnedUnitFoldLevel(unit, input.incomingPrompt, input.state, deps));
+	}
+	const digestForUnit = (unit: FoldUnit): string => {
+		const cached = digestByUnitId.get(unit.id);
+		if (cached !== undefined) return cached;
+		const digest = deterministicDigest(unit.blocks[0]);
+		digestByUnitId.set(unit.id, digest);
+		return digest;
+	};
+	const digestTokensForUnit = (unit: FoldUnit): Set<string> => {
+		const cached = digestTokensByUnitId.get(unit.id);
+		if (cached) return cached;
+		const tokens = new Set(tokenizeForRelevance(digestForUnit(unit)));
+		digestTokensByUnitId.set(unit.id, tokens);
+		return tokens;
+	};
+	const digestOverlapForUnits = (seed: FoldUnit, other: FoldUnit): number => {
+		const seedTokens = digestTokensForUnit(seed);
+		if (seedTokens.size === 0) return 0;
+		const otherTokens = digestTokensForUnit(other);
+		let shared = 0;
+		for (const token of seedTokens) if (otherTokens.has(token)) shared++;
+		return shared / seedTokens.size;
+	};
+	const hasAlternativeFoldCandidate = (unit: FoldUnit): boolean =>
+		units.some((other) =>
+			other.id !== unit.id &&
+			canFoldByUnitId.get(other.id) === true &&
+			unitLevel(other) < 2 &&
+			learnedTargetByUnitId.get(other.id) !== 0,
+		);
 
 	// Normalize: non-foldable units snap to full; mixed-level units snap to their
 	// shallowest member, so tool pairs always move as one unit — the same
@@ -1336,7 +2684,7 @@ export function runConductor(input: ConductorInput, deps: ConductorDependencies 
 	for (const unit of units) {
 		const blockLevels = unit.blocks.map((block) => levels.get(block.id) ?? 0);
 		const hasFold = blockLevels.some((level) => level > 0);
-		if (!canFoldUnit(unit)) {
+		if (!canFoldByUnitId.get(unit.id)) {
 			if (hasFold) setUnitLevel(unit, 0);
 			continue;
 		}
@@ -1352,10 +2700,23 @@ export function runConductor(input: ConductorInput, deps: ConductorDependencies 
 	if (live > input.budgetTokens) {
 		for (const unit of units) {
 			if (live <= targetTokens) break;
-			if (!canFoldUnit(unit)) continue;
+			if (!canFoldByUnitId.get(unit.id)) continue;
 			const current = unitLevel(unit);
 			if (current >= 2) continue;
 			const currentTokens = tokensAt(unit, current);
+			const learnedTarget = learnedTargetByUnitId.get(unit.id);
+			if (learnedTarget === 0 && hasAlternativeFoldCandidate(unit)) {
+				continue;
+			}
+			if (learnedTarget !== undefined && learnedTarget > current) {
+				const targetLevel: FoldLevel = learnedTarget === 1 && unit.trimEligible ? 1 : 2;
+				const saved = currentTokens - tokensAt(unit, targetLevel);
+				if (saved > 0) {
+					setUnitLevel(unit, targetLevel);
+					live -= saved;
+					continue;
+				}
+			}
 			const need = live - targetTokens;
 			if (current < 1 && unit.trimEligible) {
 				const trimSave = currentTokens - unit.trimTokens;
@@ -1381,8 +2742,23 @@ export function runConductor(input: ConductorInput, deps: ConductorDependencies 
 	/** Union salience markers from all member digests for enriched group head prefix. */
 	const buildGroupMemberSalienceSuffix = (group: FoldUnit[]): string => {
 		const cats = { paths: new Set<string>(), commands: new Set<string>(), errors: new Set<string>(), exact_values: new Set<string>(), decisions: new Set<string>() };
+		const add = (key: keyof typeof cats, values: string[] | undefined) => {
+			for (const value of values ?? []) {
+				const t = value.trim();
+				if (t && cats[key].size < 3) cats[key].add(t);
+			}
+		};
 		for (const unit of group) {
 			for (const block of unit.blocks) {
+				const metadata = input.state.salienceMetadata[contentHash(block)];
+				if (metadata) {
+					add("paths", metadata.paths);
+					add("commands", metadata.commands);
+					add("errors", metadata.errors);
+					add("exact_values", metadata.exact_values);
+					add("decisions", metadata.decisions);
+					continue;
+				}
 				const digest = deterministicDigest(block);
 				const match = digest.match(/⟦([^⟧]+)⟧\s*$/);
 				if (!match || /^(?:group|trim)\b/.test(match[1].trim())) continue;
@@ -1391,10 +2767,7 @@ export function runConductor(input: ConductorInput, deps: ConductorDependencies 
 					if (colon < 0) continue;
 					const key = part.slice(0, colon).trim() as keyof typeof cats;
 					if (!(key in cats)) continue;
-					for (const val of part.slice(colon + 1).split(/,\s*/)) {
-						const t = val.trim();
-						if (t && cats[key].size < 3) cats[key].add(t);
-					}
+					add(key, part.slice(colon + 1).split(/,\s*/));
 				}
 			}
 		}
@@ -1431,7 +2804,7 @@ export function runConductor(input: ConductorInput, deps: ConductorDependencies 
 		};
 		for (const unit of ordered) {
 			if (live <= targetTokens) break;
-			if (canFoldUnit(unit) && unitLevel(unit) === 2) run.push(unit);
+			if (canFoldByUnitId.get(unit.id) && unitLevel(unit) === 2) run.push(unit);
 			else flushRun();
 		}
 		flushRun();
@@ -1442,19 +2815,18 @@ export function runConductor(input: ConductorInput, deps: ConductorDependencies 
 	// pairwise against the seed). Fires only when there are ≥ GROUP_MIN_UNITS candidates.
 	if (live > targetTokens) {
 		const ungroupedL2 = [...units]
-			.filter((unit) => canFoldUnit(unit) && unitLevel(unit) === 2 && !groupHeadMeta.has(unit.blocks[0].id))
-			.sort((a, b) => b.score - a.score); // highest relevance first = best group head
+			.filter((unit) => canFoldByUnitId.get(unit.id) && unitLevel(unit) === 2 && !groupHeadMeta.has(unit.blocks[0].id))
+			.sort((a, b) => b.score - a.score) // highest relevance first = best group head
+			.slice(0, SEMANTIC_GROUP_MAX_CANDIDATES);
 		if (ungroupedL2.length >= GROUP_MIN_UNITS) {
 			const used = new Set<string>();
 			for (const seed of ungroupedL2) {
 				if (live <= targetTokens) break;
 				if (used.has(seed.id)) continue;
-				const seedDigest = deterministicDigest(seed.blocks[0]);
 				const group = [seed];
 				for (const other of ungroupedL2) {
 					if (other === seed || used.has(other.id)) continue;
-					const otherDigest = deterministicDigest(other.blocks[0]);
-					if (keywordOverlap(seedDigest, otherDigest) >= SEMANTIC_GROUP_OVERLAP_THRESHOLD) {
+					if (digestOverlapForUnits(seed, other) >= SEMANTIC_GROUP_OVERLAP_THRESHOLD) {
 						group.push(other);
 					}
 				}
@@ -1462,7 +2834,7 @@ export function runConductor(input: ConductorInput, deps: ConductorDependencies 
 				// Form group: seed is head; group members go to L3
 				let saved = 0;
 				for (const member of group.slice(1)) {
-					if (canFoldUnit(member) && unitLevel(member) === 2) {
+					if (canFoldByUnitId.get(member.id) && unitLevel(member) === 2) {
 						saved += tokensAt(member, 2) - tokensAt(member, 3);
 						setUnitLevel(member, 3);
 						used.add(member.id);
@@ -1603,6 +2975,7 @@ export function runConductor(input: ConductorInput, deps: ConductorDependencies 
 		proactiveUnfoldIds: proactiveUnfoldSet,
 		riskFlagsByBlockId,
 	});
+	recordFoldPolicyShadowOutcomes(parsed.blocks, levels, input.incomingPrompt, input.state, deps, currentTurn);
 
 	// Emit pin decisions for newly created conductor pins so they're visible in the decision log.
 	const pinDecisions: FoldDecision[] = [];
@@ -1721,6 +3094,101 @@ function buildDecisions(
 		});
 	}
 	return decisions;
+}
+
+function recordFoldPolicyShadowOutcomes(
+	blocks: ContextBlock[],
+	finalLevels: Map<string, FoldLevel>,
+	prompt: string,
+	state: AccordionState,
+	deps: ConductorDependencies,
+	currentTurn: number,
+): void {
+	if (!isConductorShadowEnabled(deps)) return;
+	const promptHash = textHash(prompt);
+	for (const block of blocks) {
+		const cached = state.model.foldPolicyCache[textHash(block.text)];
+		if (!cached || cached.promptHash !== promptHash || !cached.shadow) continue;
+		const heuristicLevel = (finalLevels.get(block.id) ?? 0) as FoldLevel;
+		const modelLevel = normalizeLevel(cached.value.level ?? reuseDistanceToFoldLevel(cached.value.expectedReuseTurns));
+		recordShadowTrace(state, deps, {
+			kind: "fold_policy",
+			turn: currentTurn,
+			blockId: block.id,
+			heuristicDecision: { level: heuristicLevel },
+			modelDecision: { ...cached.value, level: modelLevel },
+			outcome: "pending",
+			reason: cached.fallbackReason ?? (heuristicLevel === modelLevel ? "agreement" : "disagreement"),
+		});
+	}
+}
+
+function normalizeReason(reason: string | string[]): string[] {
+	return Array.isArray(reason) ? reason : [reason];
+}
+
+export function extractConductorTraceLabels(input: ConductorTraceExtractionInput): ConductorTraceDataset {
+	const sortedChanges = [...input.state.manualChanges].sort((a, b) => a.turn - b.turn);
+	const foldTurnsByBlock = new Map<string, number[]>();
+	for (const change of sortedChanges) {
+		if (change.action !== "fold") continue;
+		const turns = foldTurnsByBlock.get(change.blockId) ?? [];
+		turns.push(change.turn);
+		foldTurnsByBlock.set(change.blockId, turns);
+	}
+
+	const manualChanges = sortedChanges.map((change): ManualChangeTraceLabel => {
+		let reuseDistanceTurns: number | undefined;
+		if (change.action === "unfold") {
+			const priorFold = (foldTurnsByBlock.get(change.blockId) ?? [])
+				.filter((turn) => turn <= change.turn)
+				.at(-1);
+			if (priorFold !== undefined) reuseDistanceTurns = change.turn - priorFold;
+		}
+		return {
+			source: "manualChanges",
+			blockId: change.blockId,
+			action: change.action,
+			actor: change.actor,
+			turn: change.turn,
+			reuseDistanceTurns,
+		};
+	});
+
+	const foldDecisions = (input.decisions ?? []).map((decision): FoldDecisionTraceLabel => ({
+		source: "foldDecision",
+		blockId: decision.blockId,
+		action: decision.action,
+		turn: decision.turn,
+		kind: decision.kind,
+		level: normalizeLevel(decision.level ?? (decision.action === "fold" ? 2 : 0)),
+		reason: normalizeReason(decision.reason),
+	}));
+
+	const niahHoldouts = (input.niahNeedles ?? []).map((needle): NiahHoldoutTraceLabel => ({
+		source: "niah",
+		blockId: needle.blockId,
+		turn: needle.turn,
+		needle: needle.needle,
+		shouldKeep: true,
+	}));
+
+	const compactSweeps = (input.compactSweeps ?? []).map((cell): CompactSweepTraceLabel => {
+		const cost = Math.max(1, cell.tokenSpend ?? cell.budgetTokens);
+		const cache = cell.cacheHitRate ?? 1;
+		return {
+			source: "compactSweep",
+			scenario: cell.scenario,
+			budgetTokens: cell.budgetTokens,
+			accordionScore: cell.accordionScore,
+			compactScore: cell.compactScore,
+			tokenSpend: cell.tokenSpend,
+			cacheHitRate: cell.cacheHitRate,
+			jointScore: (cell.accordionScore * cache) / cost,
+		};
+	});
+
+	return { manualChanges, foldDecisions, niahHoldouts, compactSweeps };
 }
 
 export function applyDecisionsToState(state: AccordionState, decisions: FoldDecision[]): void {
