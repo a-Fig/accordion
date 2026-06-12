@@ -5,7 +5,7 @@
  * lives here so it is fully unit-testable via vitest (node env, no canvas API
  * needed for geometry tests).
  *
- * PERFORMANCE CONTRACT (per CLAUDE.md):
+ * PERFORMANCE CONTRACT (per docs/DEVELOPMENT.md):
  *  - No per-tile gradients or ctx.filter in the hot draw loop.
  *  - Dice sprites are pre-rendered once to offscreen canvases, then blitted.
  *  - Folded desaturation is done in JS (HSL math) — NOT ctx.filter.
@@ -675,4 +675,3 @@ function hexWithAlpha(hex: string, alpha: number): string {
     return `rgba(110,168,254,${alpha})`;
   }
 }
-

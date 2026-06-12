@@ -11,6 +11,8 @@ compact-comparison*.json
 compact-comparison*.md
 compact-captures*.json
 compact-captures*.md
+docs/EVIDENCE.md
+docs/JUDGE_PROOF.md
 
 # Local scratch artifacts
 debug*.ts
