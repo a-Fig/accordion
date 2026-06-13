@@ -12,6 +12,16 @@
 	import TileCanvas from "./TileCanvas.svelte";
 	import type { TileSpec } from "./tileDraw";
 	import { faceFor as faceForLib } from "./tileDraw";
+	import {
+		relevanceLab,
+		getActiveScoreMap,
+		getAvailableScorers,
+		ALL_SCORER_IDS,
+		SCORER_LABELS,
+		loadViaDialog,
+		autoLoadDemo,
+	} from "$lib/relevance/state.svelte";
+	import { isTauriEnv } from "$lib/session.svelte";
 
 	let {
 		store,
@@ -105,10 +115,13 @@
 	/** Build specs for a "tiles" segment (collapsed groups + plain blocks). */
 	function buildTilesSpecs(rows: DisplayRow[]): TileSpec[] {
 		const out: TileSpec[] = [];
+		// Capture the score map once per call (reactive dep is in the $derived.by callers).
+		const labEnabled = relevanceLab.enabled;
+		const scoreMap = labEnabled ? getActiveScoreMap() : null;
 		for (const row of rows) {
 			if (row.type === "block") {
 				const b = row.block;
-				out.push({
+				const spec: TileSpec = {
 					id: b.id,
 					kind: b.kind,
 					face: faceFor(b.tokens),
@@ -116,9 +129,14 @@
 					pinned: b.override === "pinned",
 					selected: b.id === selectedId,
 					inrange: rangeSet.has(b.id),
-				});
+				};
+				if (scoreMap) {
+					const s = scoreMap.get(b.id);
+					if (s !== undefined) spec.score = s;
+				}
+				out.push(spec);
 			} else {
-				// collapsed group tile
+				// collapsed group tile — groups are in the older box, never protected
 				const g = row.group;
 				out.push({
 					id: g.id,
@@ -128,6 +146,7 @@
 					pinned: false,
 					selected: selectedId === g.id,
 					inrange: false,
+					// groups don't get individual scores
 				});
 			}
 		}
@@ -794,6 +813,60 @@
 					<Icon name="plus" size={12} />
 				</button>
 			</div>
+
+			<div class="tb-divider"></div>
+
+			<!-- Relevance Lab toggle + controls -->
+			<button
+				class="lab-toggle"
+				class:lab-on={relevanceLab.enabled}
+				title={relevanceLab.enabled ? "Disable Relevance Lab" : "Enable Relevance Lab (dev tool)"}
+				onclick={() => {
+					relevanceLab.enabled = !relevanceLab.enabled;
+					if (relevanceLab.enabled) autoLoadDemo();
+				}}
+			>
+				{#if relevanceLab.error}
+					<span class="lab-warn-dot" title={relevanceLab.error}></span>
+				{/if}
+				Lab
+			</button>
+
+			{#if relevanceLab.enabled}
+				<!-- Scorer select -->
+				{@const availableScorers = getAvailableScorers()}
+				<select
+					class="lab-select"
+					value={relevanceLab.scorer}
+					onchange={(e) => { relevanceLab.scorer = (e.currentTarget as HTMLSelectElement).value as import("$lib/relevance/types").ScorerId; }}
+					title="Active scorer"
+				>
+					{#each ALL_SCORER_IDS as id}
+						<option value={id} disabled={!availableScorers.has(id)}>{SCORER_LABELS[id]}</option>
+					{/each}
+				</select>
+
+				<!-- Tick select — only when file has multiple ticks -->
+				{#if relevanceLab.file && relevanceLab.file.ticks.length > 1}
+					<select
+						class="lab-select"
+						value={relevanceLab.tickIndex}
+						onchange={(e) => { relevanceLab.tickIndex = parseInt((e.currentTarget as HTMLSelectElement).value, 10); }}
+						title="Score file tick"
+					>
+						{#each relevanceLab.file.ticks as tick, i}
+							<option value={i}>t{tick.tick} @{tick.endBlock}</option>
+						{/each}
+					</select>
+				{/if}
+
+				<!-- Load scores button (Tauri only) -->
+				{#if isTauriEnv}
+					<button class="lab-load-btn" onclick={loadViaDialog} title="Load a .json score file">
+						Load scores…
+					</button>
+				{/if}
+			{/if}
 		{:else}
 			<!-- Transcript mode info -->
 			<span class="count mono">{store.blocks.length} blocks · {store.foldedCount} folded</span>
@@ -1623,5 +1696,73 @@
 		opacity: 1;
 		outline: none;
 		box-shadow: var(--focus-ring);
+	}
+
+	/* ---- Relevance Lab toolbar controls ---- */
+	.lab-toggle {
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+		background: var(--panel-2);
+		border: 1px solid var(--line);
+		color: var(--muted);
+		border-radius: var(--radius-sm);
+		font-size: var(--fs-xs);
+		font-weight: 600;
+		padding: 3px 9px;
+		cursor: pointer;
+		letter-spacing: 0.04em;
+		transition: background var(--dur-fast) var(--ease-out),
+		            color var(--dur-fast) var(--ease-out),
+		            border-color var(--dur-fast) var(--ease-out);
+	}
+	.lab-toggle:hover {
+		background: var(--panel-3);
+		color: var(--text);
+	}
+	.lab-toggle.lab-on {
+		background: color-mix(in srgb, var(--accent) 14%, var(--panel-2));
+		border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+		color: var(--accent);
+	}
+	.lab-toggle.lab-on:hover {
+		background: color-mix(in srgb, var(--accent) 22%, var(--panel-2));
+		border-color: var(--accent);
+	}
+	.lab-warn-dot {
+		width: 6px;
+		height: 6px;
+		border-radius: 50%;
+		background: var(--warn, #f0b450);
+		flex: 0 0 auto;
+	}
+	.lab-select {
+		background: var(--panel-3);
+		border: 1px solid var(--line);
+		border-radius: var(--radius-sm);
+		color: var(--text);
+		font-size: var(--fs-xs);
+		padding: 3px 6px;
+		cursor: pointer;
+		max-width: 140px;
+	}
+	.lab-select:focus {
+		outline: none;
+		border-color: var(--accent);
+	}
+	.lab-load-btn {
+		background: var(--panel-2);
+		border: 1px solid var(--line);
+		color: var(--muted);
+		border-radius: var(--radius-sm);
+		font-size: var(--fs-xs);
+		padding: 3px 9px;
+		cursor: pointer;
+		transition: background var(--dur-fast) var(--ease-out),
+		            color var(--dur-fast) var(--ease-out);
+	}
+	.lab-load-btn:hover {
+		background: var(--panel-3);
+		color: var(--text);
 	}
 </style>

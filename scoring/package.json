@@ -1,0 +1,9 @@
+{
+  "name": "accordion-scoring",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Relevance lab harness — offline scorer runner for accordion sessions",
+  "dependencies": {
+    "jiti": "^2.7.0"
+  }
+}
