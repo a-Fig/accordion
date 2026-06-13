@@ -18,20 +18,21 @@
  * `applyCommands`, which clamps every command to provider-validity).
  */
 import type { AccordionStore } from "../engine/store.svelte";
-import type { Conductor, ContextSnapshot, Command } from "../engine/conductor";
-import { BuiltinConductor } from "../engine/conductor.builtin";
+import { BuiltinConductor, inProcessConductor } from "$conductors";
 import { digest } from "../engine/digest";
 import { estTokens, firstLine } from "../engine/tokens";
 import type { ConductorEntry } from "./registry";
 import {
 	CONDUCTOR_PROTOCOL_VERSION,
 	isHostMessage, // (re-exported for symmetry/tests; host parses conductor msgs)
-	type BlockView,
+	type Conductor,
+	type ConductorView,
+	type Command,
 	type ContentMode,
 	type ConductorMessage,
 	type HostHelloMessage,
 	type ContextUpdateMessage,
-} from "./conductorProtocol";
+} from "$conductors/contract";
 
 void isHostMessage; // referenced to keep the import meaningful for downstream consumers
 
@@ -77,9 +78,9 @@ export class RemoteRunner implements Conductor {
 	}
 
 	// ---- Conductor interface ----------------------------------------------
-	conduct(snap: ContextSnapshot): Command[] | null {
+	conduct(view: ConductorView): Command[] | null {
 		if (this.suppressUpdate) this.suppressUpdate = false;
-		else if (this.greeted) this.pushContext(snap); // hold the first push until wants is known
+		else if (this.greeted) this.pushContext(view); // hold the first push until wants is known
 		return this.desired;
 	}
 
@@ -223,35 +224,32 @@ export class RemoteRunner implements Conductor {
 		this.send({ type: "host/event", event, ids, detail });
 	}
 
-	private pushContext(snap: ContextSnapshot): void {
+	/**
+	 * Ship the prebuilt `ConductorView` to the remote almost verbatim — the store already
+	 * built the single public view, so the runner only adjusts content FIDELITY. Under
+	 * `wants:"full"` each block's `text` rides along as-is; otherwise we downgrade — drop the
+	 * full text and substitute a one-line `preview` — so a `shape`/`onDemand` conductor never
+	 * receives text it didn't ask for.
+	 */
+	private pushContext(view: ConductorView): void {
+		const blocks =
+			this.wants === "full"
+				? view.blocks
+				: view.blocks.map((b) => {
+						const { text: _text, ...rest } = b;
+						return { ...rest, preview: firstLine(b.text ?? "", 100) };
+					});
 		const update: ContextUpdateMessage = {
 			type: "context/update",
 			rev: ++this.rev,
-			budget: snap.budget,
-			contextWindow: snap.contextWindow,
-			protectedFromIndex: snap.protectedFromIndex,
-			blocks: snap.blocks.map((b, i) => this.toView(b, i, snap)),
+			budget: view.budget,
+			contextWindow: view.contextWindow,
+			liveTokens: view.liveTokens,
+			protectedFromIndex: view.protectedFromIndex,
+			protectTokens: view.protectTokens,
+			blocks,
 		};
 		this.send(update);
-	}
-
-	private toView(b: ContextSnapshot["blocks"][number], i: number, snap: ContextSnapshot): BlockView {
-		const folded = b.override === "folded" || snap.isInFoldedGroup(b.id);
-		const view: BlockView = {
-			id: b.id,
-			kind: b.kind,
-			turn: b.turn,
-			order: b.order,
-			tokens: b.tokens,
-			toolName: b.toolName,
-			callId: b.callId,
-			isError: b.isError,
-			folded,
-			protected: i >= snap.protectedFromIndex,
-		};
-		if (this.wants === "full") view.text = b.text;
-		else view.preview = firstLine(b.text, 100);
-		return view;
 	}
 
 	private send(msg: object): void {
@@ -283,8 +281,9 @@ export function activeRemoteRunner(): RemoteRunner | null {
 
 /**
  * Attach the conductor identified by `id` to `store`. `null`/`"none"` ⇒ detach (raw);
- * `"builtin"` ⇒ the in-process default folder; anything else ⇒ a remote runner dialed at
- * the matching discovered/configured `ConductorEntry` (falling back to the built-in if the
+ * any id in the in-process registry (`IN_PROCESS_CONDUCTORS` — `"builtin"` and any future
+ * sibling) ⇒ a fresh in-process instance; anything else ⇒ a remote runner dialed at the
+ * matching discovered/configured `ConductorEntry` (falling back to the built-in if the
  * entry isn't available *yet*, so the view is never stranded). Safe to call from an effect
  * that tracks the available list: it is IDEMPOTENT — if we are already correctly attached to
  * `id` on `store` it returns untouched (no reconnect on list churn / heartbeat refresh), and
@@ -292,9 +291,10 @@ export function activeRemoteRunner(): RemoteRunner | null {
  */
 export function attachConductor(store: AccordionStore, id: string | null, available: ConductorEntry[]): void {
 	const norm = id ?? NONE_ID;
-	const isRemoteId = norm !== BUILTIN_ID && norm !== NONE_ID;
+	const inProc = norm === NONE_ID ? null : inProcessConductor(norm);
+	const isRemoteId = norm !== NONE_ID && !inProc;
 	// Already correctly attached? For a remote that means the live runner's id matches; for
-	// builtin/none, just the id+store. (A remote id that fell back to built-in last time has
+	// in-process/none, just the id+store. (A remote id that fell back to built-in last time has
 	// activeRemote === null, so this is false → we retry now that it may have appeared.)
 	const alreadyCorrect =
 		store === lastStore && norm === lastId && (isRemoteId ? activeRemote?.id === norm : true);
@@ -312,8 +312,8 @@ export function attachConductor(store: AccordionStore, id: string | null, availa
 		store.detach();
 		return;
 	}
-	if (norm === BUILTIN_ID) {
-		store.attach(new BuiltinConductor());
+	if (inProc) {
+		store.attach(inProc.create()); // fresh in-process instance (builtin or a sibling)
 		return;
 	}
 	const entry = available.find((e) => e.id === norm);

@@ -3,40 +3,103 @@
 A **conductor** is an interchangeable context-management strategy for Accordion — the thing
 that decides, between turns, *which* blocks to fold / replace / group / restore / pin to keep
 the live context useful and under budget. Conductors are pluggable behind one contract
-([ADR 0007](../docs/adr/0007-conductor-protocol.md)); Accordion imposes no strategy of its own
-(no conductor attached ⇒ raw context).
+([ADR 0007](../docs/adr/0007-conductor-protocol.md), refined by
+[ADR 0008](../docs/adr/0008-conductor-first-party-one-view.md)); Accordion imposes no
+strategy of its own (no conductor attached ⇒ raw context).
 
-**This directory holds external conductor implementations** — one subdirectory per conductor,
-in any language. Each hosts a WebSocket endpoint that Accordion dials as a client, and (for
-local ones) advertises a heartbeat file at `~/.accordion/conductors/<id>.json` so the desktop
-app auto-discovers it. Off-box / remote conductors can instead be added by `ws://` URL in the
-app's header conductor dropdown.
+Conductors are **first-party** — every one ships in this repo or a fork of it. There is no
+sandbox and no trust boundary; the point of the interface is to make a conductor *cheap to
+write*, with the built-in folder as the worked example.
 
-> The **built-in** conductor is *not* here — it runs in-process at
-> [`app/src/lib/engine/conductor.builtin.ts`](../app/src/lib/engine/conductor.builtin.ts) and is
-> the default strategy. This directory is for the external ones, all the way down.
+## What a conductor is
 
-## Writing one
+One pure idea:
 
-Start with the developer reference: **[`docs/conductor-protocol.md`](../docs/conductor-protocol.md)**
-— topology (you host, Accordion dials), the `connect → hello → context → commands` lifecycle,
-every message shape, the command set, and the safety rules the host enforces (the
-provider-validity floor, human overrides always win, unsafe commands are clamped to
-nearest-safe and reported — never dropped). The contract types live in
-[`app/src/lib/engine/conductor.ts`](../app/src/lib/engine/conductor.ts) (the in-process shape)
-and [`app/src/lib/live/conductorProtocol.ts`](../app/src/lib/live/conductorProtocol.ts) (the
-wire messages, which import `Command` / `ClampReport` so there is one definition, not two).
+```ts
+conduct(view: ConductorView): Command[] | null
+```
 
-**Convention:** give your conductor its own subdirectory here with its own README/build, pick
-a stable `id`, and either advertise a registry file (local) or hand out a `ws://` URL (remote).
+The host hands you a read-only [`ConductorView`](contract/conductor.ts) — every block in
+conversation order plus the budget, context window, live token count, and the protected-tail
+policy. You return the context you *want*, as commands:
 
-## Conductors here
+- **`Command[]`** — your complete desired state. The host resets to the raw baseline and
+  applies the whole batch, so to change one block you re-send your whole intention.
+- **`[]`** — explicitly clear to raw (nothing folded).
+- **`null`** — *hold*: keep the last applied state (used by an async/remote conductor still
+  thinking; never blocks a model call).
 
-| directory | language | what it does |
-|-----------|----------|--------------|
-| [`recency-folder/`](recency-folder/) | Node.js | **Reference starter.** Folds the oldest non-protected `tool_result` blocks until the live estimate is under budget, and auto-advertises for discovery. Intentionally crude — copy it and grow your own. |
+The `Command` union is `fold · replace · group · restore · pin` — all **content
+substitution, never structural removal**, so a `tool_call`/`tool_result` pair can never
+orphan. The host enforces exactly one floor — **provider-validity** (the outgoing message
+stays sendable) — plus two guardrails: human overrides always win, and anything it can't
+apply verbatim is clamped to nearest-safe and **reported**, never silently dropped. These
+are bug/UX rails, not defenses against you.
 
-### Run the reference
+## Writing one (in-process — the main way)
+
+Drop a TypeScript class in `conductors/<your-name>/` and register one line. Here is a
+complete conductor that folds the oldest non-protected `tool_result` blocks until the live
+context fits the budget:
+
+```ts
+// conductors/recency-min/recency-min.ts
+import type { Conductor, ConductorView, Command } from "../contract";
+
+export class RecencyMinConductor implements Conductor {
+  readonly id = "recency-min";
+  readonly label = "Recency (min)";
+
+  conduct(view: ConductorView): Command[] {
+    let live = view.liveTokens;
+    if (live <= view.budget) return []; // already fits → raw
+
+    const ids: string[] = [];
+    for (const b of view.blocks) {
+      // blocks are in conversation order (oldest first)
+      if (live <= view.budget) break;
+      if (b.kind !== "tool_result" || b.held || b.protected || b.grouped) continue;
+      ids.push(b.id);
+      live += b.foldedTokens - b.tokens; // foldedTokens is precomputed for you
+    }
+    return ids.length ? [{ kind: "fold", ids }] : [];
+  }
+}
+```
+
+Then register it — one line in [`index.ts`](index.ts), in the `IN_PROCESS_CONDUCTORS` array:
+
+```ts
+import { RecencyMinConductor } from "./recency-min/recency-min";
+
+export const IN_PROCESS_CONDUCTORS: InProcessConductor[] = [
+  { id: "builtin",     label: "Built-in",      create: () => new BuiltinConductor() },
+  { id: "recency-min", label: "Recency (min)", create: () => new RecencyMinConductor() }, // ← added
+];
+```
+
+That's it. It appears in the conductor dropdown in the map header and is selectable per
+session automatically.
+
+**The real worked example is the built-in:** [`builtin/builtin.ts`](builtin/builtin.ts) is a
+~15-line `conduct` that does exactly this kind of budget-folding (oldest-first,
+lowest-value-kind-first). It reads the *same* public `ConductorView` you do — there is no
+privileged richer input — so reading it teaches you the whole interface. The full contract
+(the `ConductorView` / `ViewBlock` field tables, every command, the clamp reasons) is the
+first half of [`docs/conductor-protocol.md`](../docs/conductor-protocol.md).
+
+## Escape hatch: separate process / another language (WebSocket)
+
+Reach for this **only** when an in-process TypeScript class won't do — you need a separate
+process, a long-running model, or a non-JS language. The conductor then hosts a WebSocket
+endpoint that Accordion dials as a client; the `context/update` frame carries the same
+`ConductorView`, and you reply with the same `Command[]`. Local conductors advertise a
+heartbeat file at `~/.accordion/conductors/<id>.json` so the desktop app auto-discovers them;
+off-box ones are added by `ws://` URL in the header dropdown.
+
+The runnable wire example is [`recency-folder/`](recency-folder/) (Node.js). The full
+lifecycle and message reference is the second half of
+[`docs/conductor-protocol.md`](../docs/conductor-protocol.md).
 
 ```bash
 cd recency-folder
@@ -46,3 +109,23 @@ npm start        # listens on ws://127.0.0.1:7700, advertises under ~/.accordion
 
 Then open the Accordion desktop app, load a session, and pick **Recency folder** from the
 conductor dropdown in the map header.
+
+## Layout
+
+| path                  | what                                                                 |
+|-----------------------|----------------------------------------------------------------------|
+| [`contract/`](contract/) | The contract, dependency-free: `conductor.ts` (the in-process `ConductorView` / `Command` / `Conductor`) + `protocol.ts` (the WebSocket messages, which import `Command`/`ViewBlock` so there's one definition). |
+| [`builtin/`](builtin/)   | The default conductor (`builtin.ts`) — the worked example. |
+| [`index.ts`](index.ts)   | The in-process registry (`IN_PROCESS_CONDUCTORS`). Add a line; it appears in the switcher. |
+| [`recency-folder/`](recency-folder/) | The runnable out-of-process (WebSocket) example. |
+
+## Conductors here
+
+| directory | language | in/out of process | what it does |
+|-----------|----------|-------------------|--------------|
+| [`builtin/`](builtin/) | TypeScript | in-process | **The default + reference.** Folds purely to keep the live context under budget, oldest-first, lowest-value-kind-first (`tool_result` → `thinking` → `text` → `tool_call` → `user`). ~15-line `conduct`; golden-tested byte-identical. |
+| [`recency-folder/`](recency-folder/) | Node.js | out-of-process (WS) | **Wire example.** Folds the oldest non-protected `tool_result` blocks until under budget, and auto-advertises for discovery. Intentionally crude — copy it and grow your own. |
+
+**Convention:** give your conductor its own subdirectory here, pick a stable `id`, and either
+register it in-process (`index.ts`) or — for the WS escape hatch — advertise a registry file
+(local) / hand out a `ws://` URL (remote).

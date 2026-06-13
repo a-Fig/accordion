@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { AccordionStore } from "./store.svelte";
-import { BuiltinConductor } from "./conductor.builtin";
-import type { Conductor, ContextSnapshot, Command } from "./conductor";
+import { BuiltinConductor } from "$conductors";
+import type { Conductor, ConductorView, Command } from "$conductors/contract";
 import type { Block, ParsedSession } from "./types";
 import { BLOCK_OVERHEAD } from "./tokens";
 
@@ -42,9 +42,9 @@ class StubConductor implements Conductor {
 	readonly id = "stub";
 	readonly label = "Stub";
 	cmds: Command[] | null = [];
-	lastSnapshot: ContextSnapshot | null = null;
-	conduct(snap: ContextSnapshot): Command[] | null {
-		this.lastSnapshot = snap;
+	lastSnapshot: ConductorView | null = null;
+	conduct(view: ConductorView): Command[] | null {
+		this.lastSnapshot = view;
 		return this.cmds;
 	}
 }
@@ -97,7 +97,7 @@ describe("conductor seam — human overrides always win", () => {
 		expect(s.isFolded(s.get("m0:p0")!)).toBe(false); // pinned → conductor refused
 		expect(s.get("m0:p0")!.override).toBe("pinned");
 		expect(s.isFolded(s.get("m1:p0")!)).toBe(true); // un-held → conductor folds it
-		expect(s.get("m1:p0")!.by).toBe("conductor");
+		expect(s.get("m1:p0")!.by).toBe("auto"); // attribution is now uniform across all conductors
 	});
 
 	it("a human manual fold survives a conductor pass that folds nothing", () => {

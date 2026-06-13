@@ -14,8 +14,8 @@
 import type { Block, Actor, SessionMeta, ParsedSession, Group } from "./types";
 import { digest, digestTokens, groupDigest, groupDigestTokens, substTokens } from "./digest";
 import { messageKey } from "./ids";
-import type { Conductor, ContextSnapshot, Command, ClampReport, ClampReason } from "./conductor";
-import { BuiltinConductor } from "./conductor.builtin";
+import type { Conductor, ConductorView, Command, ClampReport, ClampReason } from "$conductors/contract";
+import { BuiltinConductor } from "$conductors";
 
 /** Classification of a folded group's members for accounting + the wire (ADR 0006 §4/§5). */
 interface GroupShape {
@@ -29,7 +29,7 @@ interface GroupShape {
 	carrier: string | null;
 }
 
-// The fold-ranking (which kinds fold first) moved to `conductor.builtin.ts` — it is the
+// The fold-ranking (which kinds fold first) moved to `conductors/builtin/builtin.ts` — it is the
 // built-in conductor's STRATEGY, not an engine constant. The store now only enforces
 // provider-validity and applies whatever conductor is attached (ADR 0007).
 
@@ -382,25 +382,20 @@ export class AccordionStore {
 			// applied batch (a remote one still thinking); `[]` ⇒ clear to raw; no conductor ⇒ raw.
 			let result: Command[] | null;
 			try {
-				result = this.conductor ? this.conductor.conduct(this.snapshot(protectedFrom)) : [];
+				result = this.conductor ? this.conductor.conduct(this.buildView(protectedFrom)) : [];
 			} catch (e) {
-				// A misbehaving (e.g. untrusted remote) conductor must never wedge the store or
+				// A buggy conductor (first-party, not an adversary) must never wedge the store or
 				// abort the live model-call path. Hold the last applied state and surface the error.
 				result = null;
 				this.emit("conductor", "conductor error", e instanceof Error ? e.message : String(e));
 			}
 			const cmds = result === null ? this.lastCmds : result;
-			// The built-in folds as the old auto-folder did (`by: "auto"`, silent); any other
-			// conductor is attributed to "conductor" and its activity is surfaced in the log.
-			const by: Actor = this.conductor && this.conductor.id !== "builtin" ? "conductor" : "auto";
+			// Every conductor's folds are attributed uniformly — no conductor is special by id.
+			const by: Actor = "auto";
 			const reports = this.applyCommands(cmds, by);
 			this.lastReports = reports;
 			if (result !== null) this.lastCmds = cmds;
 
-			if (by === "conductor") {
-				const n = countAffected(cmds);
-				if (n) this.emit("conductor", "conducted", `${n} block${n === 1 ? "" : "s"}`);
-			}
 			for (const r of reports) this.emit(by, `clamped · ${r.reason}`, r.detail);
 		} finally {
 			this.conducting = false;
@@ -436,16 +431,39 @@ export class AccordionStore {
 		}
 	}
 
-	/** A read-only snapshot for the conductor. Taken AFTER the reset, so `liveTokens` is the baseline. */
-	private snapshot(protectedFrom: number): ContextSnapshot {
+	/**
+	 * Build the ONE public view every conductor consumes — pure, serializable data, the same
+	 * surface the wire ships (`ViewBlock`). Taken AFTER the reset, so `liveTokens` is the
+	 * baseline the conductor folds down from. The built-in folder reads exactly this; there
+	 * is no privileged richer input. Per-block flags fold the host's policy into plain bools
+	 * so a conductor needn't call any engine helper: `held` = a human override owns it,
+	 * `folded` = currently rendered folded, `protected` = inside the working tail, `grouped`
+	 * = member of a folded group, `foldedTokens` = the digest's token cost.
+	 */
+	private buildView(protectedFrom: number): ConductorView {
+		const blocks = this.blocks.map((b, i) => ({
+			id: b.id,
+			kind: b.kind,
+			turn: b.turn,
+			order: b.order,
+			tokens: b.tokens,
+			foldedTokens: digestTokens(b),
+			toolName: b.toolName,
+			callId: b.callId,
+			isError: b.isError,
+			held: b.override !== null,
+			folded: this.isFolded(b),
+			protected: i >= protectedFrom,
+			grouped: this.groupWire.has(b.id),
+			text: b.text,
+		}));
 		return {
-			blocks: this.blocks,
+			blocks,
 			budget: this.budget,
 			contextWindow: this.contextWindow,
 			liveTokens: this.liveTokens,
 			protectedFromIndex: protectedFrom,
 			protectTokens: this.protectTokens,
-			isInFoldedGroup: (id) => this.groupWire.has(id),
 		};
 	}
 
@@ -791,11 +809,4 @@ function label(b: Block): string {
 /** Build a ClampReport (host clamped a command to the validity floor instead of dropping it). */
 function clamp(command: Command["kind"], ids: string[], reason: ClampReason, detail: string): ClampReport {
 	return { command, ids, reason, detail };
-}
-
-/** How many blocks a command batch touches — for the activity log summary. */
-function countAffected(cmds: Command[]): number {
-	let n = 0;
-	for (const c of cmds) n += c.kind === "replace" ? 1 : c.ids.length;
-	return n;
 }

@@ -78,7 +78,7 @@ function makeStore(n: number): AccordionStore {
 
 const ENTRY: ConductorEntry = {
 	registryProtocol: 1,
-	conductorProtocol: 1,
+	conductorProtocol: 2,
 	id: "remote-test",
 	label: "Remote Test",
 	url: "ws://127.0.0.1:9999",
@@ -107,7 +107,7 @@ function connectRunner(store: AccordionStore): { runner: RemoteRunner; ws: FakeW
 }
 
 function sendHello(ws: FakeWebSocket, content: "full" | "shape" | "onDemand" = "full"): void {
-	ws.emit({ type: "conductor/hello", conductorProtocol: 1, id: "remote-test", label: "Remote Test", wants: { content } });
+	ws.emit({ type: "conductor/hello", conductorProtocol: 2, id: "remote-test", label: "Remote Test", wants: { content } });
 }
 
 describe("RemoteRunner — handshake & context push", () => {
@@ -115,7 +115,7 @@ describe("RemoteRunner — handshake & context push", () => {
 		const { ws } = connectRunner(makeStore(3));
 		const hello = ws.framesOfType("host/hello");
 		expect(hello).toHaveLength(1);
-		expect(hello[0].conductorProtocol).toBe(1);
+		expect(hello[0].conductorProtocol).toBe(2);
 		// No context pushed yet — we wait to learn `wants` so we never leak full text.
 		expect(ws.framesOfType("context/update")).toHaveLength(0);
 
@@ -141,7 +141,7 @@ describe("RemoteRunner — commands drive the store", () => {
 		ws.emit({ type: "conductor/commands", rev: 1, commands: [{ kind: "fold", ids: ["m0:p0"] }] });
 
 		expect(store.isFolded(store.get("m0:p0")!)).toBe(true);
-		expect(store.get("m0:p0")!.by).toBe("conductor");
+		expect(store.get("m0:p0")!.by).toBe("auto"); // attribution is now uniform across all conductors
 
 		const results = ws.framesOfType("host/commandResult");
 		expect(results.length).toBeGreaterThanOrEqual(1);
