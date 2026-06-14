@@ -245,6 +245,10 @@ Environment gotchas (Windows, this repo's usual setup):
   page is healthy); verify via `preview_eval` / `preview_inspect` and `svelte-check`.
 - Always `npx svelte-check --tsconfig ./tsconfig.json` before declaring done.
 
+## Post-merge routine
+
+After a PR lands on `main`, close any open Accordion window (the running `app.exe` locks the file), then pull main on the registered checkout (the one in `~/.pi/agent/settings.json → extensions`), run `npm install` inside `app/` in case deps changed, and rebuild the binary with `npm run tauri build -- --no-bundle` (cargo must be on PATH). The next `/accordion` call picks up the new binary automatically. If the extension code changed, restart pi so it reloads `accordion.ts`.
+
 ## Data & security
 
 - Dev sample: `app/static/sample-session.jsonl` — a real ~130k-token / ~982-block pi
