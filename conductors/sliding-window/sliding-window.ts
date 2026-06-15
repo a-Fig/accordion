@@ -8,9 +8,8 @@
  * Fires in discrete chops, not continuously:
  *  - Threshold: liveTokens > budget * 0.95
  *  - Chop target: ~20% of budget worth of tokens
- *  - Dropping: `group` commands per contiguous run between user/protected boundaries;
- *    `replace { content: "" }` for isolated single blocks (true erasure, not digest)
- *  - State: tracks cumulative token savings and re-emits commands; extends on next trigger
+ *  - Dropping: `group` commands per contiguous run; `replace { content: "" }` for singles
+ *  - State: remembers commands and re-emits them; extends on next trigger
  *
  * This is the dumb baseline — no ranking, no scoring, just oldest-first erasure.
  */
@@ -21,14 +20,22 @@ const TRIGGER_RATIO = 0.95;
 /** Fraction of budget to recover per chop. */
 const CHOP_RATIO = 0.20;
 
+/** Kinds the conductor will never target (user intent + durable action records). */
+const SKIP_KINDS = new Set(["user", "tool_call"]);
+
 /**
- * Extract the message key from a durable block id (the prefix before the first colon).
- * Blocks sharing a message key belong to the same assistant/user message and must be
- * grouped or skipped together — the host snaps group ranges to message boundaries.
+ * Extract the message key from a durable block id — the prefix that all parts of a
+ * single assistant message share. Mirrors `engine/ids.ts:messageKey` (two id regimes):
+ *  - Live wire: `a:<anchor>:p<j>` / `m<i>:p<j>` → strip the `:p<j>` suffix.
+ *  - Loaded transcript: `<eid>:<j>` (numeric suffix) → strip `:<j>`.
+ *  - Scalar ids like `u:1234` or `r:<callId>` → returned as-is.
  */
 function messageKey(id: string): string {
-	const i = id.indexOf(":");
-	return i >= 0 ? id.slice(0, i) : id;
+	const live = id.match(/^(.*):p(?:\d+|\?)$/);
+	if (live) return live[1];
+	const parsed = id.match(/^(.+):\d+$/);
+	if (parsed && !/^[a-z]:\d+$/.test(id)) return parsed[1];
+	return id;
 }
 
 export class SlidingWindowConductor implements Conductor {
@@ -37,14 +44,18 @@ export class SlidingWindowConductor implements Conductor {
 
 	/** Accumulated commands from all chops so far — re-emitted each call. */
 	private _commands: Command[] = [];
-	/** Cumulative token savings from all emitted commands (avoids re-scanning). */
-	private _tokensSaved = 0;
 
 	conduct(view: ConductorView): Command[] {
 		if (view.budget <= 0 || view.blocks.length === 0) return this._commands;
 
+		// Prune commands referencing blocks that no longer exist in the view.
+		this._pruneStale(view);
+
 		const threshold = view.budget * TRIGGER_RATIO;
-		const effectiveLive = view.liveTokens - this._tokensSaved;
+		// Compute effective live tokens: the raw baseline (host cleared prior pass) minus
+		// what our accumulated commands would save. Derived fresh each call from the view —
+		// no cumulative counter, so no drift from clamped commands or resync changes.
+		const effectiveLive = view.liveTokens - this._estimateSavings(view);
 
 		if (effectiveLive <= threshold) return this._commands;
 
@@ -54,10 +65,38 @@ export class SlidingWindowConductor implements Conductor {
 	}
 
 	/**
+	 * Estimate how many tokens our current commands save by looking up each targeted
+	 * block's token cost in the current view. Group digest overhead is ignored (small,
+	 * and this is a dumb baseline — slight under-triggering is acceptable).
+	 */
+	private _estimateSavings(view: ConductorView): number {
+		const targeted = this._droppedIds();
+		let savings = 0;
+		for (const b of view.blocks) {
+			if (targeted.has(b.id)) savings += b.tokens;
+		}
+		return savings;
+	}
+
+	/** Remove commands whose block ids no longer exist in the view. */
+	private _pruneStale(view: ConductorView): void {
+		const existing = new Set(view.blocks.map((b) => b.id));
+		const before = this._commands.length;
+		this._commands = this._commands.filter((cmd) => {
+			if (cmd.kind === "group") return cmd.ids.every((id) => existing.has(id));
+			if (cmd.kind === "replace") return existing.has(cmd.id);
+			return true;
+		});
+		// If we pruned anything, the savings estimate will naturally adjust on the
+		// next _estimateSavings call (it reads from _commands + view).
+		void before;
+	}
+
+	/**
 	 * Walk blocks oldest-first and collect enough to recover `chopTarget` tokens.
 	 * Builds group commands per contiguous run, validated against message-boundary
 	 * snapping so the host won't reject them. Single isolated blocks use `replace`
-	 * with empty content (true erasure — no digest, near-zero token cost).
+	 * with empty content (true erasure, near-zero token cost).
 	 */
 	private _extendChop(view: ConductorView, chopTarget: number): void {
 		const alreadyDropped = this._droppedIds();
@@ -79,13 +118,11 @@ export class SlidingWindowConductor implements Conductor {
 			if (currentRun.length === 1) {
 				const b = currentRun[0];
 				this._commands.push({ kind: "replace", id: b.id, content: "" });
-				this._tokensSaved += b.tokens;
 			} else {
 				this._commands.push({
 					kind: "group",
 					ids: currentRun.map((b) => b.id),
 				});
-				for (const b of currentRun) this._tokensSaved += b.tokens;
 			}
 			currentRun = [];
 		};
@@ -97,7 +134,7 @@ export class SlidingWindowConductor implements Conductor {
 			}
 
 			const isDroppable =
-				b.kind !== "user" &&
+				!SKIP_KINDS.has(b.kind) &&
 				!b.protected &&
 				!b.held &&
 				!b.grouped &&
@@ -123,7 +160,7 @@ export class SlidingWindowConductor implements Conductor {
 		flushRun();
 	}
 
-	/** All block ids already targeted by prior commands. */
+	/** All block ids currently targeted by our commands. */
 	private _droppedIds(): Set<string> {
 		const ids = new Set<string>();
 		for (const cmd of this._commands) {
