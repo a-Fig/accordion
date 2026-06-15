@@ -14,11 +14,12 @@
 	// Focus management: move focus into the close button when the panel opens,
 	// and restore focus to the previously-focused element when it closes.
 	let closeBtn = $state<HTMLButtonElement | null>(null);
-	let returnFocus = $state<Element | null>(null);
+	let returnFocus = $state<HTMLElement | null>(null);
 
 	$effect(() => {
 		if (open) {
-			returnFocus = document.activeElement;
+			// activeElement may be null or a non-HTMLElement (e.g. SVG); only keep something focusable.
+			returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
 			// Defer one microtask so the DOM is rendered before we focus
 			Promise.resolve().then(() => closeBtn?.focus());
 		} else {

@@ -632,10 +632,15 @@
 				return;
 			}
 		}
-		// Fallback: open-group band members are still DOM nodes.
+		// Fallback: sliver-mode lane items and open-group band members are DOM nodes. Prefer the
+		// cocoa summary tile (`data-summary`, the large visual anchor for an ungrouped fold) over
+		// its thin 8px sliver (`data-id`); fall back to a plain block tile / group cocoa.
 		const esc = id.replace(/"/g, '\\"');
-		stage?.querySelector<HTMLElement>(`[data-id="${esc}"]`)?.scrollIntoView({ block: "nearest", inline: "nearest" });
-		stage?.querySelector<HTMLElement>(`[data-group="${esc}"]`)?.scrollIntoView({ block: "nearest", inline: "nearest" });
+		const target =
+			stage?.querySelector<HTMLElement>(`[data-summary="${esc}"]`) ??
+			stage?.querySelector<HTMLElement>(`[data-id="${esc}"]`) ??
+			stage?.querySelector<HTMLElement>(`[data-group="${esc}"]`);
+		target?.scrollIntoView({ block: "nearest", inline: "nearest" });
 	}
 
 	function focusStop(blockIdx: number) {
@@ -904,9 +909,10 @@
 				<div
 					class="sliver k-{b.kind}"
 					class:sel={interactive && b.id === selectedId}
+					class:inrange={rangeSet.has(b.id)}
 					style:height="{cell}px"
 					data-id={interactive ? b.id : undefined}
-					title={tip(b)}
+					title={interactive ? foldTip(b) : `folded · ${k(b.tokens)} tok · grouped`}
 				>
 					{#each { length: face } as _, n}
 						<div class="bar" style:top="{barStart + n * gap}px"></div>
@@ -950,6 +956,7 @@
 												<div
 													class="cell face f{faceFor(store.effTokens(b))} summary-tile"
 													class:sel={b.id === selectedId}
+													class:inrange={rangeSet.has(b.id)}
 													style:width="{cell}px"
 													style:height="{cell}px"
 													data-summary={b.id}
@@ -1715,6 +1722,12 @@
 		box-shadow: inset 0 0 0 2px var(--accent),
 		            inset 0 0 0 3px rgba(0, 0, 0, 0.55);
 		filter: brightness(1.18);
+	}
+	/* In a shift-range selection, folded slivers must show membership too (parity with the
+	   .cell.inrange tiles) — a ring is enough on an 8px bar; the full tinted fill would swamp it. */
+	.sliver.inrange {
+		box-shadow: inset 0 0 0 2px var(--group-accent),
+		            inset 0 0 0 3px rgba(0, 0, 0, 0.4);
 	}
 
 	/* Weight bars: horizontal white lines, centered in the sliver.
