@@ -185,14 +185,18 @@ fn launch_conductor(
     procs: tauri::State<'_, ConductorProcs>,
 ) -> Result<(), String> {
     // Check if already running.
+    // Fix #6: if try_wait() returns Err (state unknown), treat the existing child as
+    // possibly alive — do NOT remove-and-respawn (risks double process / port conflict).
+    // Return Ok as if it's still running; this is the conservative safe choice.
     {
         let mut map = procs.0.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(child) = map.get_mut(&id) {
             match child.try_wait() {
                 Ok(None) => return Ok(()), // still running
-                _ => {
-                    map.remove(&id); // exited or error — fall through to re-launch
+                Ok(Some(_)) => {
+                    map.remove(&id); // cleanly exited — fall through to re-launch
                 }
+                Err(_) => return Ok(()), // state unknown — treat as alive, don't respawn
             }
         }
     }
@@ -230,6 +234,8 @@ fn launch_conductor(
     // (declaring deps) so a future dependency-free conductor isn't blocked on a node_modules
     // that never exists; the `command == "node"` signal is implied — a deps-declaring conductor
     // is the case we care about regardless of how it's launched.
+    // NOTE: checks only the leaf node_modules dir; hoisted deps in a workspace root won't be
+    // caught, but the common single-package case is covered.
     if dir.join("package.json").is_file() && !dir.join("node_modules").is_dir() {
         return Err(format!(
             "Conductor '{id}' isn't set up yet. Run `npm install` in conductors/{id}/ first (attention-folder also needs the Python probe venv — see its README)."
@@ -251,7 +257,7 @@ fn launch_conductor(
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
 
-    let mut child = cmd.spawn().map_err(|e| {
+    let child = cmd.spawn().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             format!(
                 "Could not start '{id}': '{command}' was not found on PATH. Install Node.js or add it to PATH."
@@ -261,25 +267,44 @@ fn launch_conductor(
         }
     })?;
 
+    // Fix #5: insert the child into the map IMMEDIATELY after a successful spawn, BEFORE
+    // the 400ms sleep. This way a concurrent RunEvent::Exit can find and kill it; without
+    // this, a child that spawns during the sleep window would be orphaned on app exit.
+    // Fix #4: if map.insert returns a previous Child for this id (concurrent launch TOCTOU),
+    // kill and best-effort reap the OLD one so it can't hold the WS port as an orphan.
+    {
+        let mut map = procs.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(mut old) = map.insert(id.clone(), child) {
+            let _ = old.kill();
+            let _ = old.try_wait();
+        }
+    }
+    // Lock is released here — we do NOT hold the mutex across the sleep.
+
     // Early-exit detection: a conductor that crashes on startup (e.g. an `import` that throws,
     // or deps that pre-flight didn't catch) dies almost immediately. Give it a brief moment,
-    // then check whether it already exited — if so, surface that instead of inserting a dead
-    // handle and reporting a false "launching" that the GUI watchdog would later have to time
-    // out. The crash happens in well under 400ms; this short block in a sync command is fine.
+    // then check whether it already exited — if so, surface that and remove the dead handle
+    // instead of leaving the GUI to time out waiting for a heartbeat.
+    // The crash happens in well under 400ms; this short block in a sync command is fine.
     std::thread::sleep(std::time::Duration::from_millis(400));
-    match child.try_wait() {
-        Ok(Some(status)) => {
-            // Already exited — startup crash. Do NOT insert the dead child.
-            return Err(format!(
-                "Conductor '{id}' started but exited immediately ({status}). Check that its dependencies are installed (npm install in conductors/{id}/)."
-            ));
-        }
-        // Still running, or try_wait itself errored (non-fatal) — treat as alive and insert.
-        Ok(None) | Err(_) => {}
-    }
 
     let mut map = procs.0.lock().unwrap_or_else(|e| e.into_inner());
-    map.insert(id, child);
+    if let Some(child) = map.get_mut(&id) {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                // Already exited — startup crash. Remove the dead handle.
+                map.remove(&id);
+                return Err(format!(
+                    "Conductor '{id}' started but exited immediately ({status}). Check that its dependencies are installed (npm install in conductors/{id}/)."
+                ));
+            }
+            // Fix #6 (post-spawn site): still running, or try_wait errored — treat as alive.
+            // This matches the existing comment; state is preserved as-is.
+            Ok(None) | Err(_) => {}
+        }
+    }
+    // If the entry was removed by a concurrent stop_conductor during the sleep, that's fine —
+    // the process was killed externally and we simply return Ok (the stop already handled it).
     Ok(())
 }
 
@@ -651,11 +676,36 @@ pub fn run() {
         .run(|app_handle, event| {
             if let tauri::RunEvent::Exit = event {
                 // Kill all conductor child processes on app exit to avoid orphaned nodes.
+                //
+                // Fix #3: kill ALL children first (before any waiting) so one stuck child
+                // can't block the kill signals to the rest. Then do a bounded reap — loop
+                // try_wait() with short sleeps rather than calling blocking wait(). If a
+                // child still hasn't exited after ~500ms we move on; a hung child must not
+                // prevent the app from shutting down.
                 let state = app_handle.state::<ConductorProcs>();
                 let mut map = state.0.lock().unwrap_or_else(|e| e.into_inner());
-                for (_, mut child) in map.drain() {
+                let mut children: Vec<std::process::Child> = map.drain().map(|(_, c)| c).collect();
+                drop(map); // release the lock; no callers remain during Exit
+
+                // Phase 1: issue kill() to every child without waiting.
+                for child in &mut children {
                     let _ = child.kill();
-                    let _ = child.wait();
+                }
+
+                // Phase 2: bounded reap — up to ~500ms per child via try_wait polling.
+                const POLL_INTERVAL_MS: u64 = 25;
+                const MAX_POLLS: u32 = 20; // 20 × 25ms = 500ms cap per child
+                for mut child in children {
+                    for _ in 0..MAX_POLLS {
+                        match child.try_wait() {
+                            Ok(Some(_)) => break,           // reaped
+                            Ok(None) => {}                  // still running — keep polling
+                            Err(_) => break,                // state unknown — move on
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS));
+                    }
+                    // If the child still hasn't exited, drop it and move on.
+                    // The OS will clean up the process once our handle is dropped.
                 }
             }
         })

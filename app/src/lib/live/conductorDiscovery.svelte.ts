@@ -107,16 +107,21 @@ export function isLaunching(id: string): boolean {
  * "Launching…" spinner that holds the attach effect forever (the original deadlock).
  */
 export async function launchConductor(id: string): Promise<void> {
-	const invoke = await getInvoke();
-	// Clear any stale failure/watchdog from a prior attempt at this id.
+	// Arm launching state SYNCHRONOUSLY before any await. handleLaunch calls setActiveConductor(id)
+	// synchronously right before awaiting us; a Svelte effect could otherwise flush during the
+	// await below and (a) attach Built-in for one cycle (no launching guard yet) or (b) see a
+	// stale launchFailures[id] and revert to Built-in (forcing a second click). Arming first closes
+	// both holes.
 	clearLaunchWatchdog(id);
 	if (id in launchFailures) delete launchFailures[id];
 	launchingSet.add(id);
+
+	const invoke = await getInvoke();
 	try {
 		await invoke("launch_conductor", { id });
 	} catch (err) {
-		// A direct reject (e.g. missing deps, immediate exit, command not found). No watchdog
-		// was armed yet; drop the launching flag and let the caller surface the error.
+		// A direct reject (e.g. missing deps, immediate exit, command not found). Drop the
+		// launching flag (armed above) and let the caller surface the error.
 		launchingSet.delete(id);
 		clearLaunchWatchdog(id);
 		throw err;
