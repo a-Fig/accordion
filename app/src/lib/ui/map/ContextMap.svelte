@@ -6,7 +6,8 @@
 	import { ghosts } from "../../live/ghostState.svelte";
 	import { nextVacated } from "./drain";
 	import AnimatedNumber from "$lib/ui/AnimatedNumber.svelte";
-	import { buildDisplay, segmentDisplay, type DisplayRow } from "$lib/engine/display";
+	import { buildDisplay, segmentDisplay, buildLane, type DisplayRow } from "$lib/engine/display";
+	import { settings } from "$lib/settings.svelte";
 	import Icon from "$lib/ui/Icon.svelte";
 	import SegControl from "$lib/ui/SegControl.svelte";
 	import TileCanvas from "./TileCanvas.svelte";
@@ -201,11 +202,18 @@
 	// On scroll, clear the canvas hover state and tooltip immediately so the
 	// tooltip doesn't freeze pointing at stale content (no pointermove fires
 	// during a wheel-scroll while hovering).
+	// `scrolling` suppresses lane hover repaints mid-scroll (`.stage.scrolling .lane`
+	// has `pointer-events: none`). Cleared ~140 ms after the last scroll event.
+	let scrolling = $state(false);
+	let scrollEndTimer: ReturnType<typeof setTimeout> | undefined;
 	function onScroll() {
 		tooltip = null;
 		for (const ref of Object.values(canvasRefs)) {
 			ref?.clearHover();
 		}
+		scrolling = true;
+		clearTimeout(scrollEndTimer);
+		scrollEndTimer = setTimeout(() => (scrolling = false), 140);
 	}
 
 	// ---- custom tooltip (replaces native title on canvas tiles) -----------------
@@ -253,6 +261,7 @@
 	}
 	onDestroy(() => {
 		clearPendingClick();
+		clearTimeout(scrollEndTimer);
 	});
 
 	function fit() {
@@ -325,6 +334,15 @@
 		const savedStr = saved > 0 ? ` · saves ${k(saved)} tok` : "";
 		const stragStr = strag > 0 ? ` · ${strag} kept live` : "";
 		return `group · ${members.length} blocks · ${k(full)} tok full${savedStr}${stragStr}\n${turns}\nclick to peek · double-click to collapse`;
+	}
+
+	// ---- sliver mode helpers ------------------------------------------------
+
+	/** Title for an ungrouped fold's cocoa block — the digest now standing in for the block.
+	 *  The dice face on the cocoa shows ITS size (the digest); the sliver beside it carries the
+	 *  original block's weight. */
+	function foldTip(b: Block): string {
+		return `folded · ${k(b.tokens)}→${k(store.effTokens(b))} tok · click to inspect · double-click to unfold`;
 	}
 
 	// ---- range selection state (local — for creating groups) ----------------
@@ -405,11 +423,22 @@
 	type HitResult =
 		| { kind: "block"; id: string }
 		| { kind: "group"; gid: string }
+		/** Sliver mode: click on the summary tile of a fold-cluster. memberIds = comma-joined ids. */
+		| { kind: "summary"; memberIds: string[] }
 		| { kind: "none" };
 	function resolveHit(e: MouseEvent): HitResult {
 		const t = e.target as HTMLElement;
+		// Summary tile: data-summary takes priority unless a data-id (sliver) is closer.
+		const summaryEl = t.closest<HTMLElement>("[data-summary]");
 		const idEl = t.closest<HTMLElement>("[data-id]");
 		const groupEl = t.closest<HTMLElement>("[data-group]");
+		// If there's a data-id inside the summary bubble (a sliver), prefer "block".
+		const idInsideSummary = !!(summaryEl && idEl && summaryEl.contains(idEl));
+		if (!idInsideSummary && summaryEl?.dataset.summary !== undefined) {
+			const raw = summaryEl.dataset.summary ?? "";
+			const memberIds = raw ? raw.split(",") : [];
+			return { kind: "summary", memberIds };
+		}
 		const isBlockClick = !!idEl && (!groupEl || groupEl.contains(idEl));
 		if (isBlockClick && idEl!.dataset.id) return { kind: "block", id: idEl!.dataset.id };
 		if (groupEl?.dataset.group) return { kind: "group", gid: groupEl.dataset.group };
@@ -521,6 +550,13 @@
 			handleGroupClick(hit.gid, e.shiftKey);
 		} else if (hit.kind === "block") {
 			handleBlockClick(hit.id, e.shiftKey);
+		} else if (hit.kind === "summary") {
+			// Single-click summary → inspect the first block.
+			// v1 simplification: summary inspect shows first block only.
+			// TODO: future cluster inspector could show all member blocks.
+			if (hit.memberIds.length > 0) {
+				deferClick(() => onselect(hit.memberIds[0]));
+			}
 		}
 	}
 
@@ -531,6 +567,12 @@
 			collapseGroup(hit.gid);
 		} else if (hit.kind === "block") {
 			store.toggle(hit.id);
+		} else if (hit.kind === "summary") {
+			// Double-click summary → unfold the whole run.
+			for (const id of hit.memberIds) {
+				const b = store.get(id);
+				if (b && store.isFolded(b)) store.toggle(id);
+			}
 		}
 	}
 
@@ -590,10 +632,15 @@
 				return;
 			}
 		}
-		// Fallback: open-group band members are still DOM nodes.
+		// Fallback: sliver-mode lane items and open-group band members are DOM nodes. Prefer the
+		// cocoa summary tile (`data-summary`, the large visual anchor for an ungrouped fold) over
+		// its thin 8px sliver (`data-id`); fall back to a plain block tile / group cocoa.
 		const esc = id.replace(/"/g, '\\"');
-		stage?.querySelector<HTMLElement>(`[data-id="${esc}"]`)?.scrollIntoView({ block: "nearest", inline: "nearest" });
-		stage?.querySelector<HTMLElement>(`[data-group="${esc}"]`)?.scrollIntoView({ block: "nearest", inline: "nearest" });
+		const target =
+			stage?.querySelector<HTMLElement>(`[data-summary="${esc}"]`) ??
+			stage?.querySelector<HTMLElement>(`[data-id="${esc}"]`) ??
+			stage?.querySelector<HTMLElement>(`[data-group="${esc}"]`);
+		target?.scrollIntoView({ block: "nearest", inline: "nearest" });
 	}
 
 	function focusStop(blockIdx: number) {
@@ -635,11 +682,21 @@
 		// specifically, NOT plain `[data-group]`, so we don't grab the outer `.group-band`
 		// wrapper (its rect is the whole band, not the parent tile). getBoundingClientRect()
 		// returns client coords, the same space allTileCenters() uses (canvasRect.left + x).
+		// Also include sliver-mode lane items: `.lane [data-id]` (live tiles + slivers),
+		// `.lane [data-summary]` (a fold's cocoa, anchored on its block id), and
+		// `.lane [data-group]` (a group's cocoa, anchored on the group id).
 		if (stage) {
 			for (const el of stage.querySelectorAll<HTMLElement>(
-				".group-band [data-id], .group-tile-open[data-group]",
+				".group-band [data-id], .group-tile-open[data-group], .lane [data-id], .lane [data-summary], .lane [data-group]",
 			)) {
-				const id = el.dataset.id ?? el.dataset.group;
+				let id: string | undefined;
+				if (el.dataset.summary !== undefined) {
+					// Summary tile: use the first member id as the nav anchor.
+					const raw = el.dataset.summary ?? "";
+					id = raw ? raw.split(",")[0] : undefined;
+				} else {
+					id = el.dataset.id ?? el.dataset.group;
+				}
 				if (!id) continue;
 				const r = el.getBoundingClientRect();
 				centers.push({ id, cx: r.left + r.width / 2, cy: r.top + r.height / 2 });
@@ -817,6 +874,7 @@
 		class="stage"
 		class:isgrid={view === "map"}
 		class:istranscript={view === "transcript"}
+		class:scrolling={scrolling}
 		bind:this={stage}
 		role="toolbar"
 		tabindex="0"
@@ -840,6 +898,27 @@
 					title={tip(t.b, prot)}
 				></div>
 			{/snippet}
+			{#snippet sliverTile(b: Block, interactive: boolean)}
+				<!-- The ORIGINAL folded block as a thin sliver; white lines = its weight (die face).
+				     `interactive` slivers carry data-id (click=inspect / dbl=unfold); group-member
+				     slivers are display-only (the group's cocoa owns the interaction). -->
+				{@const face = faceFor(b.tokens)}
+				{@const usable = cell - 4}
+				{@const gap = face > 1 ? Math.min(4, usable / (face - 1)) : 0}
+				{@const barStart = cell / 2 - (gap * (face - 1)) / 2}
+				<div
+					class="sliver k-{b.kind}"
+					class:sel={interactive && b.id === selectedId}
+					class:inrange={rangeSet.has(b.id)}
+					style:height="{cell}px"
+					data-id={interactive ? b.id : undefined}
+					title={interactive ? foldTip(b) : `folded · ${k(b.tokens)} tok · grouped`}
+				>
+					{#each { length: face } as _, n}
+						<div class="bar" style:top="{barStart + n * gap}px"></div>
+					{/each}
+				</div>
+			{/snippet}
 			<div class="boxes" style:--cell="{cell}px" style:--cols={cols}>
 				{#if olderTiles.length}
 					<section class="box older">
@@ -849,17 +928,75 @@
 						<div class="stack">
 							{#each segments as seg, segIdx (seg.kind === "band" ? "band-" + seg.row.group.id : "tiles-" + (seg.rows[0].type === "block" ? seg.rows[0].block.id : seg.rows[0].group.id))}
 								{#if seg.kind === "tiles"}
-									<!-- Canvas replaces the DOM .grid for tile segments -->
-									<TileCanvas
-										bind:this={canvasRefs[String(segIdx)]}
-										specs={olderSegmentSpecs[segIdx] ?? []}
-										{cols}
-										{cell}
-										gap={4}
-										onhit={onCanvasHit}
-										ondbl={onCanvasDbl}
-										onhover={onCanvasHover}
-									/>
+									{#if settings.foldDisplayMode === "sliver"}
+										{@const laneItems = buildLane(seg.rows, (b) => store.isFolded(b))}
+										<!-- Sliver mode: DOM flex-wrap lane. Live block = a full square; each ungrouped
+										     folded block = its own cocoa + 1 sliver (never merged); a group = 1 cocoa + N slivers. Open
+										     group bands are still rendered below unchanged. -->
+										<div class="lane">
+											{#each laneItems as item (item.kind === "tile" ? "t-" + item.block.id : item.kind === "fold" ? "f-" + item.block.id : "g-" + item.group.id)}
+												{#if item.kind === "tile"}
+													{@const b = item.block}
+													<div
+														class="cell face f{faceFor(b.tokens)} k-{b.kind}"
+														class:sel={b.id === selectedId}
+														class:pinned={b.override === "pinned"}
+														class:inrange={rangeSet.has(b.id)}
+														style:width="{cell}px"
+														style:height="{cell}px"
+														data-id={b.id}
+														title={tip(b)}
+													></div>
+												{:else if item.kind === "fold"}
+											{@const b = item.block}
+											<!-- ungrouped fold: the cocoa block (digest = a real block now in context; its dice
+											     face = its OWN size) + the original block as a thin sliver. Each ungrouped fold
+											     is its own unit — never merged with neighbours. -->
+											<div class="fold-cluster" data-cluster-ids={b.id}>
+												<div
+													class="cell face f{faceFor(store.effTokens(b))} summary-tile"
+													class:sel={b.id === selectedId}
+													class:inrange={rangeSet.has(b.id)}
+													style:width="{cell}px"
+													style:height="{cell}px"
+													data-summary={b.id}
+													title={foldTip(b)}
+												></div>
+												{@render sliverTile(b, true)}
+											</div>
+										{:else}
+											{@const g = item.group}
+											<!-- explicit group: ONE shared cocoa summary + its member slivers (display-only;
+											     the cocoa owns peek/collapse via data-group, like the old group tile). -->
+											<div class="fold-cluster" data-cluster-ids={item.members.map((m) => m.id).join(",")}>
+												<div
+													class="cell face f{faceFor(store.groupLiveTokens(g))} summary-tile"
+													class:sel={selectedId === g.id}
+													style:width="{cell}px"
+													style:height="{cell}px"
+													data-group={g.id}
+													title={groupTip(g)}
+												></div>
+												{#each item.members as m (m.id)}
+													{@render sliverTile(m, false)}
+												{/each}
+											</div>
+										{/if}
+											{/each}
+										</div>
+									{:else}
+										<!-- Classic mode: canvas (unchanged) -->
+										<TileCanvas
+											bind:this={canvasRefs[String(segIdx)]}
+											specs={olderSegmentSpecs[segIdx] ?? []}
+											{cols}
+											{cell}
+											gap={4}
+											onhit={onCanvasHit}
+											ondbl={onCanvasDbl}
+											onhover={onCanvasHover}
+										/>
+									{/if}
 								{:else}
 									{@const g = seg.row.group}
 									{@const live = seg.row.live}
@@ -1509,6 +1646,106 @@
 		z-index: 100;
 		max-width: 280px;
 		white-space: pre-wrap;
+	}
+
+	/* ---- sliver fold mode ---- */
+
+	/* Lane: a flex-wrap row containing live cells, group tiles, and fold-clusters.
+	   align-items:center ensures cells and clusters share one vertical centerline.
+	   gap mirrors the canvas grid gap (4px). */
+	.lane {
+		display: flex;
+		flex-wrap: wrap;
+		gap: var(--gap, 4px);
+		align-items: center;
+	}
+	/* Kill hover repaints mid-scroll (mirrors `.stage.scrolling .grid` for canvases). */
+	.stage.scrolling .lane {
+		pointer-events: none;
+	}
+
+	/* Fold-cluster: a cocoa summary + its sliver(s) as one compact object. No bubble —
+	   an invisible layout wrapper; proximity (tight 2px gap vs the lane's 4px) is what pairs
+	   the cocoa with its slivers. Still carries the click-routing data attributes. */
+	.fold-cluster {
+		display: inline-flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 2px;
+		flex: 0 0 auto;
+	}
+
+	/* Summary tile: stands in for the whole folded run; cocoa color signals synthesis.
+	   Reuses .cell.face.fN for dice pips (::before pseudo, no extra markup needed).
+	   No dashed outline — the cocoa color alone carries the "synthesized" signal. */
+	.summary-tile {
+		background: var(--k-summary);
+		box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.22),
+		            inset 0 0 0 2px rgba(255, 255, 255, 0.06);
+		flex: 0 0 auto;
+		cursor: pointer;
+	}
+	.summary-tile:hover {
+		filter: brightness(1.22);
+		box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.3);
+	}
+	.summary-tile.sel {
+		box-shadow: inset 0 0 0 2px var(--accent),
+		            inset 0 0 0 3px rgba(0, 0, 0, 0.55);
+		filter: brightness(1.18);
+		z-index: 3;
+		animation: pop var(--dur-fast) var(--ease-spring);
+	}
+
+	/* Sliver: the original folded block squeezed to an 8px-wide vertical bar.
+	   Full --cell height, kind-colored at reduced saturation (filter:saturate(.62)).
+	   Weight = N horizontal white bars (count = die face); bars set via inline `top`. */
+	.sliver {
+		width: 8px;
+		border-radius: 2px;
+		box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.3);
+		position: relative;
+		overflow: hidden;
+		flex: 0 0 auto;
+		cursor: pointer;
+	}
+	.sliver.k-user        { background: color-mix(in srgb, var(--k-user)        66%, var(--panel-3)); }
+	.sliver.k-text        { background: color-mix(in srgb, var(--k-text)        66%, var(--panel-3)); }
+	.sliver.k-thinking    { background: color-mix(in srgb, var(--k-thinking)    66%, var(--panel-3)); }
+	.sliver.k-tool_call   { background: color-mix(in srgb, var(--k-tool_call)   66%, var(--panel-3)); }
+	.sliver.k-tool_result { background: color-mix(in srgb, var(--k-tool_result) 66%, var(--panel-3)); }
+	.sliver:hover {
+		filter: brightness(1.12);
+		box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.3);
+	}
+	.sliver.sel {
+		box-shadow: inset 0 0 0 2px var(--accent),
+		            inset 0 0 0 3px rgba(0, 0, 0, 0.55);
+		filter: brightness(1.18);
+	}
+	/* In a shift-range selection, folded slivers must show membership too (parity with the
+	   .cell.inrange tiles) — a ring is enough on an 8px bar; the full tinted fill would swamp it. */
+	.sliver.inrange {
+		box-shadow: inset 0 0 0 2px var(--group-accent),
+		            inset 0 0 0 3px rgba(0, 0, 0, 0.4);
+	}
+
+	/* Weight bars: horizontal white lines, centered in the sliver.
+	   N bars (N = die face), each 2px tall, 4px gap between centers.
+	   Position is set inline via `top` + translateY(-50%) so no bar reads heavier. */
+	.sliver .bar {
+		position: absolute;
+		left: 1px;
+		right: 1px;
+		height: 2px;
+		border-radius: 1px;
+		background: rgba(255, 255, 255, 0.9);
+		transform: translateY(-50%);
+	}
+
+	/* Lane live tiles: .cell base, but explicit width/height set inline (--cell px value) */
+	.lane .cell {
+		flex: 0 0 auto;
 	}
 
 	/* ---- transcript (the readable, scrollable concretion) ---- */
