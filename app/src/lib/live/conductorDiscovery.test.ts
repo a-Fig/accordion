@@ -58,6 +58,38 @@ afterEach(() => {
 	vi.useRealTimers();
 });
 
+describe("launchConductor synchronous state-arming (HIGH bugs #1 and #2)", () => {
+	it("launchConductor arms launchingSet and clears prior failure synchronously (before any await)", () => {
+		const id = "sync-arm-test";
+
+		// Pre-seed a prior failure so we can confirm delete launchFailures[id] runs synchronously.
+		launchFailures[id] = "previous failure message";
+
+		// invokeImpl resolves immediately for both commands — this test only cares about state
+		// that is armed before the first await; the post-await path (watchdog) runs cleanly.
+		invokeImpl = async (cmd) => {
+			if (cmd === "launch_conductor") return undefined;
+			return undefined;
+		};
+
+		// Call WITHOUT awaiting. JS guarantees an async function runs synchronously up to its
+		// first `await`, so the three arming lines (clearLaunchWatchdog / delete launchFailures /
+		// launchingSet.add) have already executed by the time control returns here. This is the
+		// invariant that closes both HIGH bugs: no Svelte effect can flush between
+		// setActiveConductor(id) and the point where launchingSet.add(id) is visible, because
+		// the add now happens before the first await in launchConductor.
+		const _p = launchConductor(id);
+
+		// Assertions run synchronously — before any microtask from the async chain resolves.
+		expect(isLaunching(id)).toBe(true);       // launchingSet.add(id) ran synchronously
+		expect(id in launchFailures).toBe(false); // delete launchFailures[id] ran synchronously
+
+		// Return the promise so vitest waits for it (avoids unhandled-rejection noise from the
+		// watchdog setTimeout that fires if we abandon it mid-flight).
+		return _p;
+	});
+});
+
 describe("launch watchdog — discovery cancels it (the happy path)", () => {
 	it("launch resolves → isLaunching true → poll discovers → launching clears and watchdog is cancelled", async () => {
 		const id = "recency-folder";
