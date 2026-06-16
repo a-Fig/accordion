@@ -505,12 +505,19 @@ export default function accordionLive(pi: ExtensionAPI): void {
 							if (capturedWs === client && capturedWs.readyState === 1) send(capturedWs, r);
 						};
 						try {
+							if (typeof req.prompt !== "string" || req.prompt.length === 0) {
+								reply({ type: "completeResult", reqId: req.reqId, ok: false, error: "invalid completion prompt" });
+								return;
+							}
 							const ctx = latestCtx;
 							const m = ctx?.model;
 							if (!ctx || !m) {
 								reply({ type: "completeResult", reqId: req.reqId, ok: false, error: "no model available" });
 								return;
 							}
+							const modelMaxTokens = typeof (m as any).maxTokens === "number" && Number.isFinite((m as any).maxTokens) && (m as any).maxTokens > 0 ? Math.floor((m as any).maxTokens) : null;
+							let maxTokens = typeof req.maxOutputTokens === "number" && Number.isFinite(req.maxOutputTokens) && req.maxOutputTokens > 0 ? Math.floor(req.maxOutputTokens) : undefined;
+							if (maxTokens !== undefined && modelMaxTokens !== null) maxTokens = Math.min(maxTokens, modelMaxTokens);
 							const auth = await ctx.modelRegistry.getApiKeyAndHeaders(m);
 							if (!auth.ok) {
 								reply({ type: "completeResult", reqId: req.reqId, ok: false, error: `could not resolve API key: ${(auth as any).error ?? "unknown"}` });
@@ -518,19 +525,23 @@ export default function accordionLive(pi: ExtensionAPI): void {
 							}
 							const { complete } = await import("@earendil-works/pi-ai");
 							const context = {
-								systemPrompt: req.system,
+								...(typeof req.system === "string" ? { systemPrompt: req.system } : {}),
 								messages: [{ role: "user" as const, content: req.prompt, timestamp: Date.now() }],
 							};
 							const result = await complete(m, context, {
 								apiKey: auth.apiKey,
 								headers: auth.headers,
-								...(typeof req.maxOutputTokens === "number" ? { maxTokens: req.maxOutputTokens } : {}),
+								...(maxTokens !== undefined ? { maxTokens } : {}),
 							});
-							// Extract the first text part (defensive — handle any content shape).
+							// Concatenate ALL text parts in order (a multi-part response must not be
+							// truncated to the first part only). Defensively guard non-array content
+							// and missing/non-string part text.
 							let text = "";
 							if (Array.isArray(result.content)) {
-								const textPart = result.content.find((p: any) => p?.type === "text");
-								text = (textPart as any)?.text ?? "";
+								text = result.content
+									.filter((p: any) => p?.type === "text")
+									.map((p: any) => (typeof p?.text === "string" ? p.text : ""))
+									.join("");
 							}
 							reply({
 								type: "completeResult",
