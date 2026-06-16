@@ -15,7 +15,7 @@ import type { Block, Actor, SessionMeta, ParsedSession, Group } from "./types";
 import { digest, digestTokens, groupDigest, groupDigestTokens, substTokens, wireFoldable } from "./digest";
 import { estTokens, BLOCK_OVERHEAD } from "./tokens";
 import { messageKey } from "./ids";
-import type { Conductor, ConductorView, Command, ClampReport, ClampReason, LockName, ConductorHost } from "$conductors/contract";
+import type { Conductor, ConductorView, Command, ClampReport, ClampReason, LockName, ConductorHost, CompletionRequest, CompletionResult } from "$conductors/contract";
 import { hasLock } from "$conductors/contract";
 import { BuiltinConductor } from "$conductors";
 
@@ -119,6 +119,17 @@ export class AccordionStore {
 	 * the wire layer. Only ever fired for human ("you") actions; null ⇒ nobody is listening.
 	 */
 	onHumanOverride: ((ids: string[], action: string) => void) | null = null;
+
+	/**
+	 * Optional completion backend injected by the live layer. The live client sets this
+	 * once the WebSocket connection to the pi extension is established (and clears it on
+	 * disconnect); the host exposes it to conductors via `ConductorHost.complete()`.
+	 *
+	 * Null whenever there is no live model link — demo sessions, read-only Claude Code
+	 * transcripts, or a disconnected extension. Conductors MUST call `host.can("complete")`
+	 * before depending on it; the host rejects if it is called while null.
+	 */
+	completer: ((req: CompletionRequest) => Promise<CompletionResult>) | null = null;
 
 	// ---- involvement locks (ADR 0011) -------------------------------------
 	/**
@@ -387,15 +398,44 @@ export class AccordionStore {
 		for (let i = 0; i < this.blocks.length; i++) this.index.set(this.blocks[i].id, i);
 	}
 
-	/** Give the current in-process conductor a tiny host API, if it asked for one. */
+	/**
+	 * Build the host-capabilities object the store hands to a conductor on attach.
+	 *
+	 * A fresh object is built once per `attach()` call and handed to the conductor's
+	 * `attach(host)`. The conductor holds the reference for its lifetime; `requestRerun()`
+	 * captures this attach's epoch while the capability methods read through live store state,
+	 * so `can("complete")` reflects a model link becoming available or disappearing later.
+	 */
+	private buildHost(forConductor: Conductor, epoch: number): ConductorHost {
+		const store = this;
+		return {
+			can(capability) {
+				if (capability === "complete") return store.completer != null;
+				if (capability === "countTokens") return true;
+				if (capability === "digest") return true;
+				return false;
+			},
+			complete(req: CompletionRequest): Promise<CompletionResult> {
+				if (!store.completer) return Promise.reject(new Error("completion capability unavailable"));
+				return store.completer(req);
+			},
+			countTokens(text: string): number {
+				return estTokens(text);
+			},
+			digestOf(id: string): string | null {
+				const b = store.get(id);
+				return b ? digest(b) : null;
+			},
+			requestRerun: () => store.requestConductorRerun(forConductor, epoch),
+		};
+	}
+
+	/** Give the current in-process conductor a host API, if it asked for one. */
 	private attachConductorHost(c: Conductor | null): void {
 		if (!c?.attach) return;
 		const epoch = this.conductorEpoch;
-		const host: ConductorHost = {
-			requestRerun: () => this.requestConductorRerun(c, epoch),
-		};
 		try {
-			c.attach(host);
+			c.attach(this.buildHost(c, epoch));
 		} catch (e) {
 			// Lifecycle failures are conductor bugs, not store bugs. Keep the model-call path live
 			// and let the upcoming refold fall back to the conductor's normal `conduct()` handling.
