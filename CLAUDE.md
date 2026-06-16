@@ -106,6 +106,19 @@ appended* CC session re-runs `_load` on each tail tick, which rebuilds the store
 drops manual folds; static transcripts (the common case) never re-load. The durable fix
 is an incremental `appendBlocks` tail like the WS path.
 
+**RULE — preview/read-only is NOT a more permissive mode.** Preview, demo, and read-only
+Claude Code sessions obey EVERY rule the steering path does — the same foldability
+predicate, the same UI affordances, the same token accounting, the same group/conductor
+constraints. The *only* difference between preview and steering is that no plan is ever
+written to the agent's wire; the agent's context is never altered. Everything else is
+byte-identical. The UI must NEVER render a fold, group, or state that the steering path
+could not itself produce — if the wire would refuse it, the UI must refuse it too, in
+every mode. "There's no agent on the other end, so anything goes" is a forbidden line of
+reasoning: the app is a source of truth, and a source of truth does not relax its rules
+when no one is watching. The foldability gate lives in ONE place (the engine) and is the
+single predicate shared by `fold()`/`isFolded`/`computeFoldOps` — never a stricter rule on
+the wire than in the view.
+
 **Invariants (don't break):** discovery I/O is best-effort and **never blocks or alters
 a model call**; no GUI / reply timeout / empty plan ⇒ messages pass through untouched;
 no disk I/O on the `context` (pre-model-call) hook. **The engine is now on (M2, ADR
