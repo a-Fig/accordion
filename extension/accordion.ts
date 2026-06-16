@@ -504,6 +504,11 @@ export default function accordionLive(pi: ExtensionAPI): void {
 							// Only send if this GUI is still the active client (reconnect guard).
 							if (capturedWs === client && capturedWs.readyState === 1) send(capturedWs, r);
 						};
+						// FIX #7: validate prompt before doing any async work.
+						if (typeof req.prompt !== "string" || req.prompt.length === 0) {
+							reply({ type: "completeResult", reqId: req.reqId, ok: false, error: "missing or empty prompt" });
+							return;
+						}
 						try {
 							if (typeof req.prompt !== "string" || req.prompt.length === 0) {
 								reply({ type: "completeResult", reqId: req.reqId, ok: false, error: "invalid completion prompt" });
@@ -524,10 +529,19 @@ export default function accordionLive(pi: ExtensionAPI): void {
 								return;
 							}
 							const { complete } = await import("@earendil-works/pi-ai");
+							// FIX #7: pass system only if it's a string; treat as optional.
 							const context = {
 								...(typeof req.system === "string" ? { systemPrompt: req.system } : {}),
 								messages: [{ role: "user" as const, content: req.prompt, timestamp: Date.now() }],
 							};
+							// FIX #3: clamp requested maxOutputTokens to the model's own output ceiling
+							// so a conductor requesting more than the model allows can't trigger a provider
+							// rejection; the model still hard-caps generation (truncates at the limit).
+							let maxTokens: number | undefined;
+							if (typeof req.maxOutputTokens === "number" && req.maxOutputTokens > 0) {
+								const modelCeiling = typeof m.maxTokens === "number" && m.maxTokens > 0 ? m.maxTokens : undefined;
+								maxTokens = modelCeiling !== undefined ? Math.min(req.maxOutputTokens, modelCeiling) : req.maxOutputTokens;
+							}
 							const result = await complete(m, context, {
 								apiKey: auth.apiKey,
 								headers: auth.headers,

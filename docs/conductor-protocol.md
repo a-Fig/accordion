@@ -518,7 +518,7 @@ instance-state reads and command emission.
 |-------|------|---------|
 | `prompt` | `string` | The user-role content to operate on (required). |
 | `system` | `string?` | Optional system instruction — e.g. a compaction persona or template. |
-| `maxOutputTokens` | `number?` | Soft cap on output tokens. The host may clamp to its own ceiling. Omit for the host default. |
+| `maxOutputTokens` | `number?` | Requested cap on output tokens. The extension clamps this to the model's own max-output ceiling before forwarding, so a conductor can safely pass any positive number without risking a provider rejection. The model enforces the (clamped) value as a hard cap — over-long output is truncated, not rejected. Omit to use the model default. |
 | `signal` | `AbortSignal?` | Abort signal from an `AbortController` you hold. Pass `controller.signal` here; call `controller.abort()` from `dispose()` so stale completions do not race back after the conductor is gone. |
 | `model` | `"current" \| string?` | `"current"` (default when omitted) = the user's live session model. A specific model id overrides — useful for a cheap distillation model distinct from the agent model. Rejects if unknown. |
 

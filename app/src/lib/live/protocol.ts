@@ -259,8 +259,11 @@ export interface CompleteRequestMessage {
 	/** The user-role content to operate on (e.g. aged context blocks to summarize). */
 	prompt: string;
 	/**
-	 * Soft cap on output tokens. The extension (and the model) may clamp this to their
-	 * own ceilings. Omit to use the extension default.
+	 * Requested cap on output tokens. The extension clamps this to the model's own
+	 * max-output ceiling before forwarding — so a conductor can safely pass any positive
+	 * number without risking a provider rejection. The model enforces the (clamped) value
+	 * as a hard cap; over-long output is truncated, not rejected. Omit to use the model
+	 * default.
 	 */
 	maxOutputTokens?: number;
 }
