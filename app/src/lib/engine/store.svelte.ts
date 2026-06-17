@@ -339,14 +339,18 @@ export class AccordionStore {
 	 *
 	 * FOLD FREEZE: a block the human already holds (`override !== null`) is untouched. A block
 	 * the conductor folds individually (via `autoFolded`/`subst`, `override === null`, NOT
-	 * inside a folded group) becomes `override:"folded"`, `by:"you"`, `subst` cleared → folds
-	 * to the engine digest, individually reversible. Members of a folded group are NOT
-	 * individually frozen here — the group itself IS the frozen view. This matters because
-	 * group collapse legitimately includes non-foldable kinds (`user`, `tool_call`) whose
-	 * individual `override:"folded"` would be an illegal state (the wire refuses non-foldable
-	 * per-block folds via `wireFoldable`) — exactly the view↔wire divergence this repo forbids.
-	 * A conductor-owned folded group is reassigned to `by:"you"` (just the provenance change —
-	 * no `frozen` flag needed, since the inherited tail prevents the snap-back that required it).
+	 * inside a folded group) becomes `override:"folded"`, `by:"you"`, individually reversible.
+	 * Members of a folded group are NOT individually frozen here — the group itself IS the
+	 * frozen view. This matters because group collapse legitimately includes non-foldable kinds
+	 * (`user`, `tool_call`) whose individual `override:"folded"` would be an illegal wire state.
+	 *
+	 * The conductor's `subst` is PRESERVED, not cleared, so the kill switch freezes the EXACT
+	 * on-screen view. For a digest-folding conductor (built-in / autopilot) `subst` is already
+	 * `undefined`, so the block freezes to the engine digest exactly as before. For a
+	 * `replace`-based conductor (naive compaction) `subst` carries the generated summary —
+	 * preserving it means detach keeps the summary visible rather than reverting to a generic
+	 * digest. A conductor-owned folded group is reassigned to `by:"you"` so
+	 * `clearConductorState` keeps it.
 	 * From then on the normal heal-and-prune invariant governs: if the HUMAN later grows the
 	 * protected tail over a detach-frozen fold or group, `healProtected`/`pruneProtectedGroups`
 	 * handles it as an ordinary human override — "position one."
@@ -373,7 +377,7 @@ export class AccordionStore {
 			if (this.inFoldedGroup(b.id)) continue;
 			b.override = "folded";
 			b.by = "you";
-			b.subst = undefined;
+			// `subst` is intentionally NOT cleared (see docstring) — freeze the exact view.
 			// State hygiene: the fold is now a human override, not a conductor auto-fold —
 			// clear the stale `autoFolded` left over from the conductor pass.
 			b.autoFolded = false;

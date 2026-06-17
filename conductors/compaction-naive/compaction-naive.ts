@@ -91,6 +91,32 @@ and filler. The output will be placed directly into the agent's context window.`
 export class NaiveCompactionConductor implements Conductor {
 	readonly id = "compaction-naive";
 	readonly label = "Naive compaction";
+
+	/**
+	 * Involvement locks (ADR 0011). This conductor takes EXCLUSIVE control of the two
+	 * STEERING controls — the human's hand fold/unfold/pin/group/reset and the agent's
+	 * `unfold` tool — so the user, the agent, and the conductor cannot fight over the same
+	 * blocks while a compaction pass is replacing them. Naive compaction reasons over a
+	 * deterministic aged region and rewrites it in place; a stray human unfold or agent
+	 * unfold mid-pass would desync its `compactedIds`/`summary` state from the live view.
+	 * Locking those two domains gives it the deterministic world the foil needs.
+	 *
+	 * It deliberately does NOT lock `tail-size`. Under that lock the host sets
+	 * `protectedFromIndex = view.blocks.length` (no host tail floor), which would make the
+	 * aged-region scan (`i < view.protectedFromIndex`) cover the WHOLE conversation — the
+	 * conductor would then compact the agent's live working tail. Mainstream compaction keeps
+	 * recent turns verbatim, so this conductor relies on the host's protected tail and leaves
+	 * `tail-size` unlocked: the human may still resize the tail (it merely reshapes the aged
+	 * region the conductor deterministically obeys), but cannot reach into the compacted blocks.
+	 * Edge: a human who drags the tail to 0 has explicitly opted out of a protected tail, so the
+	 * aged region then extends to the newest turn and compaction may summarize recent reasoning —
+	 * that is the human's own setting being honored, not a fight the conductor loses.
+	 *
+	 * Note on `agent-unfold`: because this conductor uses `replace` (no `{#code FOLDED}` tags),
+	 * the agent never has a fold code for a compacted block — so it could not `unfold` (or even
+	 * `recall`) one regardless. The lock is the honest declaration of intent ("the agent does
+	 * not steer here") and future-proofs against the agent unfolding any OTHER folded block.
+	 */
 	readonly locks = ["human-steering", "agent-unfold"] as const;
 
 	// ── instance state ─────────────────────────────────────────────────────────
@@ -214,10 +240,10 @@ export class NaiveCompactionConductor implements Conductor {
 		// async resolve handler uses the state it summarized, not a later view.
 		this.launchCompletion(agedBlocks, newlyAged, attemptKey);
 
-		// Return prior commands (hold existing summary) while the new one is in-flight.
-		// On the very first trip there is no prior summary, so return null — this is the
-		// ONE correct use of null: a completion IS in-flight and there is no prior state
-		// to hold (genuinely still thinking; nothing applied yet).
+		// Hold while the completion is in-flight: re-emit via buildCommands(view), which returns
+		// the existing summary's commands if one is already applied, or null on the very first
+		// trip (no prior summary yet — the ONE correct use of null: genuinely still thinking,
+		// nothing applied). Either way the in-flight completion is not relaunched.
 		return this.buildCommands(view);
 	}
 
