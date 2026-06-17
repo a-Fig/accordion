@@ -56,11 +56,12 @@ standalone HTML visualizer — not the focus; touch only if asked. Don't confuse
     protected heals back to live; `pin()` remains allowed because it keeps content open.
     `setProtect(n)` resizes the tail and re-folds — wired to an on-bar draggable handle
     on the composition strip (0–60k, step 2k; the real refold is deferred to pointer-release
-    so dragging doesn't re-fold continuously). **ADR 0011 forward-note:** under an exclusive
-    conductor holding the `tail-size` lock the host floor described above is lifted (the
-    conductor may fold into the tail, including to zero) and `setProtect` is locked from the
-    human. Today the tail is host-absolute as described — the conditional is **specced
-    ([ADR 0011](docs/adr/0011-conductor-involvement-locks.md)), not yet implemented.**
+    so dragging doesn't re-fold continuously). **ADR 0011 `tail-size` lock:** under an exclusive
+    conductor holding the `tail-size` lock the host floor described above is lifted (`protectedFromIndex`
+    returns `blocks.length`, collapsing the grid to one box) and `setProtect` is a no-op
+    — the conductor may fold any block, including recent reasoning. Absent the lock the tail is
+    host-absolute exactly as described. See `protectedFromIndex` / `setProtect` in `store.svelte.ts` and
+    [ADR 0011](docs/adr/0011-conductor-involvement-locks.md).
 - `tokens.ts` (chars/4 estimate) · `digest.ts` (what a kind collapses to when folded).
 
 Folding is **content substitution, never removal** — provider-safe and fully reversible.
@@ -121,8 +122,8 @@ every mode. "There's no agent on the other end, so anything goes" is a forbidden
 reasoning: the app is a source of truth, and a source of truth does not relax its rules
 when no one is watching. The foldability gate lives in ONE place (the engine) and is the
 single predicate shared by `fold()`/`isFolded`/`computeFoldOps` — never a stricter rule on
-the wire than in the view. Involvement locks ([ADR 0011](docs/adr/0011-conductor-involvement-locks.md), planned)
-will obey the same rule: a locked control is locked in every mode — preview and read-only are not
+the wire than in the view. Involvement locks ([ADR 0011](docs/adr/0011-conductor-involvement-locks.md))
+obey the same rule: a locked control is locked in every mode — preview and read-only are not
 exemptions.
 
 **Invariants (don't break):** discovery I/O is best-effort and **never blocks or alters
@@ -147,14 +148,13 @@ them unfolded (sticky, provenance `"agent"`), and the full content returns on th
 **next turn** (state-change-only; no content echo this cut). The agent can only unfold a
 block that is actually folded — it can't downgrade a human pin. Agent unfolds show in the
 activity log; the human can re-fold them. The skill `accordion-context-folding` is
-auto-exposed via `resources_discover` — no manual loading. **ADR 0011 specs a sibling agent
-tool `recall`** — an unblockable read that returns a folded block's full content as a tool
-result (like `read_file`) without mutating the standing view: no override is created, the
-block stays folded in context (vs `unfold`, which forces the block standing-open and is
-lockable under `agent-unfold`). Symmetry: **Peek : Human :: Recall : Agent.** The conductor
-then manages the resulting tool-result block like any other. `recall` would sit beside `unfold` in
-`extension/accordion.ts` and is **never lockable**. Both tools are kept for now; `unfold` is
-potentially transitional. **`recall` is specced, not yet implemented.**
+auto-exposed via `resources_discover` — no manual loading. **ADR 0011 ships a sibling agent tool `recall`** — an unblockable read that returns a folded
+block's full content as a tool result (like `read_file`) without mutating the standing view:
+no override is created, the block stays folded in context (vs `unfold`, which forces the block
+standing-open and is lockable under `agent-unfold`). Symmetry: **Peek : Human :: Recall : Agent.**
+The conductor then manages the resulting tool-result block like any other. `recall` sits beside
+`unfold` in `extension/accordion.ts` (see `resolveRecall` in `app/src/lib/live/plan.ts`) and is
+**never lockable**. Both tools are kept for now; `unfold` is potentially transitional.
 
 **Known characteristic:** the view syncs on pi's `context` hook, which fires *before*
 each model call — so an assistant reply is only seen at the *next* model call (i.e. the
@@ -173,11 +173,10 @@ lives in the top-level **`conductors/contract/`** (both halves dependency-free /
 re-exported by `conductors/contract/index.ts`, imported via the `$conductors` alias):
 `conductor.ts` (the in-process shape — `ConductorView`, `ViewBlock`, the `Command` union
 `fold·replace·group·restore·pin`, `ClampReport`, the `Conductor` interface) and `protocol.ts`
-(the WebSocket messages, `CONDUCTOR_PROTOCOL_VERSION = 2`, which *import* the `Command` /
+(the WebSocket messages, `CONDUCTOR_PROTOCOL_VERSION = 3`, which *import* the `Command` /
 `ViewBlock` types so there is one definition). The host enforces one unconditional floor —
 **provider-validity** (the message stays sendable); **human overrides win for every control
-the conductor did NOT lock** (see involvement locks below — until that ships, no conductor locks
-anything, so human overrides always win); an unsafe command is clamped to
+the conductor did NOT lock** (see involvement locks below); an unsafe command is clamped to
 nearest-safe and **reported**, never silently dropped (bug/UX rails, not protection against
 the conductor).
 
@@ -200,8 +199,10 @@ the conductor).
   `Conductor` interface gains an additive lock declaration (defaulting to locks-nothing); the
   wire bumps `CONDUCTOR_PROTOCOL_VERSION` 2 → 3 carrying the declaration in the `conductor/hello`
   handshake. Every existing conductor stays collaborative and the built-in golden test is
-  untouched. **Host enforcement + the consent gate + the freeze-on-detach kill switch are the
-  build that follows the spec — not yet implemented.**
+  untouched. Host enforcement, the consent gate, and the freeze-on-detach kill switch all
+  ship in this PR (ADR 0011). Known gap: remote conductors see the consent gate
+  post-handshake, after the first plan may have already applied — cancel triggers `detach()`
+  which cleanly freezes that state.
 
 - **One public view.** Every conductor — built-in included — receives the same pure-data
   `ConductorView`: top-level `budget`, `contextWindow`, `liveTokens`, `protectedFromIndex`,

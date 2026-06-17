@@ -171,6 +171,18 @@ host-floor; not reopened). The host's **only** remaining unconditional floor is
 lockable are the four sacred items (§2): **observation**, **budget**, the agent's **`recall`**,
 and **detach**.
 
+**Caveat — coarse live-wire backstop.** The above describes the engine (the view). On the
+live-WS path (`app/src/lib/live/mapping.ts`) the extension keeps an independent
+`PROTECT_RECENT_MSGS = 2` constant: `applyPlan` never removes the newest ~2 messages from the
+outgoing wire, regardless of the plan it receives, as a defence-in-depth guard against a buggy
+plan touching the very tip of the conversation. This is a coarser, message-level backstop — it
+does not align exactly with the engine's token-based tail boundary — and so the view and wire
+are not fully unified on the protected region yet. Reconciling these two floors into a single
+token-based source of truth is deferred to Slice 2 (see
+[docs/view-wire-unification.md](../view-wire-unification.md)). Until then, the claim that
+"provider-validity is the **only** remaining unconditional floor" is fully true for the engine;
+on the live wire there is also this coarse message backstop.
+
 ### 8. Host enforcement — the load-bearing change
 
 **"Human overrides always win" becomes "human overrides win for every control the conductor
@@ -227,9 +239,9 @@ What an **exclusive** conductor can and cannot lock:
 | The budget | always yours | always yours |
 | Detach (the kill switch) | always yours | always yours |
 
-## Implementation scope (for the build that follows this spec)
+## Implementation scope (shipped in PR #46)
 
-This ADR is the **spec**; the code is the next step. Confirmed scope:
+This ADR was the **spec**; the implementation shipped in PR #46. Delivered scope:
 
 - **`Conductor` interface** — add the lock declaration (names the claimed subset). Additive;
   defaults to locks-nothing. Lives in `conductors/contract/conductor.ts`.

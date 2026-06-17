@@ -82,7 +82,7 @@ Drag any session `.jsonl` onto the window, or use the bundled sample. Everything
   `{#code FOLDED}` handles the live agent can ask to unfold.
 
 Honest about what's **not** there yet: there is no autonomous Conductor on a live session,
-no agent-driven pinning, no involvement locks, no nested/hierarchical groups, no LLM-generated summaries, no
+no agent-driven pinning, no nested/hierarchical groups, no LLM-generated summaries, no
 replay — that's the build ahead. There's also an
 older terminal-only POC (`src/accordion.ts`, `/expand` · `/collapse` · `/accordion`) that
 predates the app.
@@ -116,11 +116,11 @@ setup, and platform gotchas) is in **[CONTRIBUTING.md](CONTRIBUTING.md)**.
 - [x] Live link to a running pi session + auto-discovery
 - [x] Opt-in live steering — apply the fold plan to what the agent is shown
 - [x] Agent-driven unfold from `{#code FOLDED}` tags
+- [x] Involvement locks — exclusive conductors, the consent gate, freeze-on-detach kill switch, and agent `recall`
 - [ ] LLM-generated summaries, computed once and cached
 - [ ] The Conductor — automatic fold/unfold between turns, based on context
 - [ ] Hierarchical folding — fold the folds, for million-turn sessions
-- [ ] Agent-driven unfold and pin
-- [ ] Involvement locks — exclusive conductors, the detach kill switch, and agent recall
+- [ ] Agent-driven pin
 - [ ] Replay — scrub how the context evolved across a session
 
 ---
