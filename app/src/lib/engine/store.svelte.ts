@@ -12,7 +12,7 @@
  * intent. Deterministic and explainable; the smarts come later.
  */
 import type { Block, Actor, SessionMeta, ParsedSession, Group } from "./types";
-import { digest, digestTokens, groupDigest, groupDigestTokens, substTokens } from "./digest";
+import { digest, digestTokens, groupDigest, groupDigestTokens, substTokens, wireFoldable } from "./digest";
 import { messageKey } from "./ids";
 import type { Conductor, ConductorView, Command, ClampReport, ClampReason, LockName } from "$conductors/contract";
 import { hasLock } from "$conductors/contract";
@@ -284,8 +284,8 @@ export class AccordionStore {
 		const w = this.groupWire.get(b.id);
 		if (w) return w.tokens;
 		if (!this.isFolded(b)) return b.tokens;
-		// Folded: a conductor's substitution (incl. "" = delete) costs its own length;
-		// otherwise the engine's per-kind digest.
+		// Folded: a conductor's (non-empty) substitution costs its own length; otherwise the
+		// engine's per-kind digest. (substOne normalizes an empty "" replace to the digest path.)
 		return b.subst !== undefined ? substTokens(b.subst) : digestTokens(b);
 	}
 	/** What a folded block renders / the agent receives: the conductor's substitution if any,
@@ -603,7 +603,9 @@ export class AccordionStore {
 	 * is no privileged richer input. Per-block flags fold the host's policy into plain bools
 	 * so a conductor needn't call any engine helper: `held` = a human override owns it,
 	 * `folded` = currently rendered folded, `protected` = inside the working tail, `grouped`
-	 * = member of a folded group, `foldedTokens` = the digest's token cost.
+	 * = member of a folded group, `foldedTokens` = the digest's token cost (or full `tokens`
+	 * for a non-foldable kind, which cannot shrink — so a conductor's `foldedTokens < tokens`
+	 * shrink test naturally skips `user`/`tool_call` and never proposes a fold the host clamps).
 	 */
 	private buildView(protectedFrom: number): ConductorView {
 		const blocks = this.blocks.map((b, i) => ({
@@ -612,7 +614,7 @@ export class AccordionStore {
 			turn: b.turn,
 			order: b.order,
 			tokens: b.tokens,
-			foldedTokens: digestTokens(b),
+			foldedTokens: wireFoldable(b) ? digestTokens(b) : b.tokens,
 			toolName: b.toolName,
 			callId: b.callId,
 			isError: b.isError,
@@ -666,7 +668,8 @@ export class AccordionStore {
 	/**
 	 * Fold/replace one block by content substitution. `content === undefined` (a fold with
 	 * no digest) marks it folded via the engine digest — byte-identical to the old
-	 * auto-folder; a string (incl. "") substitutes that exact content.
+	 * auto-folder; a non-empty string substitutes that exact content; an empty string `""`
+	 * can't be a wire content part, so it folds to the engine digest too (see the body).
 	 */
 	private substOne(id: string, content: string | undefined, by: Actor, kind: "fold" | "replace", reports: ClampReport[]): void {
 		const b = this.get(id);
@@ -676,8 +679,19 @@ export class AccordionStore {
 		// Protection is ABSOLUTE: a block in the working tail is never folded, by a conductor
 		// OR the user. Refuse and report rather than violate the safety pillar.
 		if (this.isProtected(b)) return void reports.push(clamp(kind, [id], "protected", `${label(b)} is in the protected working tail`));
+		// One foldability gate, shared with the wire (`wireFoldable`). A kind the wire would
+		// never fold — `user` (intent) or `tool_call` (folding it orphans its result) — is
+		// refused here and REPORTED, never silently applied. Without this a conductor's
+		// fold/replace on such a block sets `subst` (so the view recesses the tile and counts
+		// the saving) while `computeFoldOps` drops it on the wire — the agent gets the block
+		// whole. That is the exact divergence the host must make unrepresentable.
+		if (!wireFoldable(b)) return void reports.push(clamp(kind, [id], "not-foldable", `${label(b)} is a ${b.kind}; only text/thinking/tool_result fold on the wire`));
 		b.autoFolded = true;
-		b.subst = content;
+		// An empty replacement can't be represented on the wire — a fold must leave a non-empty
+		// content part (`computeFoldOps` drops an empty digest), so `subst=""` would recess the
+		// tile and count the saving while the agent still receives the block whole. Fall back to
+		// the engine digest (the smallest wire-safe form) so the view matches what the wire sends.
+		b.subst = content === "" ? undefined : content;
 		b.by = by;
 	}
 
@@ -774,6 +788,17 @@ export class AccordionStore {
 		return this.groupAt.get(id)?.folded ?? false;
 	}
 
+	/**
+	 * Can the human fold this block right now? The single predicate the UI consults to decide
+	 * whether to OFFER a Fold affordance — it mirrors EXACTLY the conditions under which
+	 * `fold()` will act, so the view never shows a dead/ineffective Fold control: the kind must
+	 * be wire-foldable, and the block must not be protected, already inside a folded group, or
+	 * human-pinned.
+	 */
+	canFold(b: Block): boolean {
+		return wireFoldable(b) && !this.isProtected(b) && !this.inFoldedGroup(b.id) && b.override !== "pinned";
+	}
+
 	fold(id: string, by: Actor = "you"): void {
 		// ADR 0011 `human-steering` lock: a human hand-fold is refused outright — no override
 		// written, no log, no onHumanOverride. There is no human override to "win" under the lock.
@@ -783,6 +808,10 @@ export class AccordionStore {
 		// Protected working tail is never folded — not even by an explicit user action.
 		// (Pin it or widen the budget instead; protection is the safety pillar.)
 		if (this.isProtected(b)) return;
+		// Shared foldability gate (`wireFoldable`, same predicate the wire enforces): a manual
+		// fold on a non-foldable kind (user / tool_call) is refused, so the view can never show
+		// a per-block fold the agent would still receive whole. Group collapse is a separate path.
+		if (!wireFoldable(b)) return;
 		b.override = "folded";
 		b.by = by;
 		// The human is taking control: drop any conductor substitution so this folds to the
