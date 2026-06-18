@@ -56,20 +56,20 @@ it a transport rather than a privileged channel.
 
 ## Decision
 
-### 1. `ConductorHost` injected via optional `init(host)`
+### 1. `ConductorHost` injected via optional `attach(host)`
 
 The `Conductor` interface in `conductors/contract/conductor.ts` gains two optional
 lifecycle methods:
 
 ```typescript
-init?(host: ConductorHost): void;
-dispose?(): void;
+attach?(host: ConductorHost): void;
+detach?(): void;
 ```
 
-`init` is called by the store once per `attach()` call, before the first `conduct()`.
-`dispose` is called by the store once per detach/swap, after the final `conduct()` of that
+`attach` is called by the store once per `attach()` call, before the first `conduct()`.
+`detach` is called by the store once per detach/swap, after the final `conduct()` of that
 instance's lifetime. Both are optional — a pure, stateless conductor (the built-in,
-cold-score) compiles and runs unchanged; `init` is not called if the method is absent.
+cold-score) compiles and runs unchanged; `attach` is not called if the method is absent.
 
 `ConductorHost` is the services handle:
 
@@ -79,7 +79,8 @@ interface ConductorHost {
     complete(req: CompletionRequest): Promise<CompletionResult>;
     countTokens(text: string): number;
     digestOf(id: string): string | null;
-    invalidate(): void;
+    setStatus(text: string | null, metrics?: Record<string, number | string | boolean>): void;
+    requestRerun(): void;
 }
 ```
 
@@ -89,7 +90,7 @@ and returns `false` from `can()` without one.
 
 `buildHost()` in `AccordionStore` (`app/src/lib/engine/store.svelte.ts`) constructs the
 host object once per `attach()` call. The object reads through the live store state,
-so a capability that becomes available after init — notably the `completer` being set
+so a capability that becomes available after attach — notably the `completer` being set
 when the socket opens — is reflected immediately without requiring a new host object.
 
 ### 2. `conduct()` stays synchronous and side-effect-free
@@ -107,19 +108,19 @@ A conductor that needs a model completion follows the async pattern documented i
    `host.complete(req)` in the background (store the promise on the instance), and return
    `null` immediately.
 2. When the promise resolves: stash the result in instance state, then call
-   `host.invalidate()`. This asks the host to re-run `conduct()` now.
+   `host.requestRerun()`. This asks the host to re-run `conduct()` now.
 3. On the next `conduct()` call: the stashed result is in instance state; emit the
    commands.
 
 This pattern mirrors exactly how `RemoteRunner` already works for out-of-process conductors
 (it holds the last `conductor/commands` batch and returns it synchronously while the remote
-is computing). `invalidate()` is the in-process analogue of the remote's
+is computing). `requestRerun()` is the in-process analogue of the remote's
 `poke store.refold()` after receiving fresh commands.
 
-`dispose()` is where an in-flight completion should be aborted — a conductor that calls
+`detach()` is where an in-flight completion should be aborted — a conductor that calls
 `host.complete()` should hold an `AbortController`, pass its `signal` in the
-`CompletionRequest`, and call `controller.abort()` from `dispose()` so stale completions
-do not call `host.invalidate()` after the conductor is gone.
+`CompletionRequest`, and call `controller.abort()` from `detach()` so stale completions
+do not call `host.requestRerun()` after the conductor is gone.
 
 ### 3. One host implementation, two transports
 
@@ -130,7 +131,7 @@ WebSocket to the pi extension opens (`liveClient.svelte.ts` line `session.store.
 Out-of-process conductors reach the same capability through the conductor wire. When a
 `RemoteRunner` receives a `cap/request { capability: "complete" }` message from the remote
 process, `serveCapability()` in `conductorClient.svelte.ts` calls `this.host.complete()` —
-the same host object the store injected via `init(host)`. The WS is a transport for the
+the same host object the store injected via `attach(host)`. The WS is a transport for the
 same service, not a separate implementation.
 
 ### 4. Fulfillment path: app → extension → pi-ai → user's model
@@ -147,7 +148,7 @@ When `host.complete(req)` is called by an in-process conductor:
 4. The extension sends back a `completeResult` message with the text, model id, and usage.
 5. `sendCompletion`'s promise resolves, and `liveClient` routes it to the pending promise
    map by `reqId`.
-6. The conductor's `.then()` handler fires, stashes the result, calls `host.invalidate()`,
+6. The conductor's `.then()` handler fires, stashes the result, calls `host.requestRerun()`,
    and the store re-runs `conduct()`.
 
 The extension is thin throughout: it runs exactly the completion it is handed and returns
@@ -163,10 +164,11 @@ the raw result. No folding decision, no strategy, no prompt rewriting.
 - **Demo session** (bundled sample): same — no live connection.
 - **Disconnected extension**: the live client sets `store.completer = null` on socket close.
 
-Conductors using `complete` must call `can("complete")` first and fall back gracefully.
-The naive compaction conductor (`conductors/compaction-naive/`) demonstrates the pattern:
-when `can("complete")` is false it falls back to a deterministic `group` command over the
-aged region, remaining useful in read-only contexts while losing the LLM quality.
+Conductors using `complete` must call `can("complete")` first and handle unavailability
+explicitly. The naive compaction conductor (`conductors/compaction-naive/`) demonstrates
+the visible-waiting pattern: when `can("complete")` is false it preserves any existing
+summary, leaves newly-aged blocks live, and calls `host.setStatus(...)` instead of
+silently switching to a deterministic grouping strategy.
 
 ### 6. Protocol versions
 
@@ -188,8 +190,8 @@ using the user's existing session model, with no credentials of its own. The pat
 four lines of instance state plus the async pattern above. The naive compaction conductor
 (`conductors/compaction-naive/`) is the first consumer and the reference example.
 
-**Backward compatibility.** The built-in and cold-score conductors omit `init` and
-`dispose`; they compile and run unchanged. The built-in golden test
+**Backward compatibility.** The built-in and cold-score conductors omit `attach` and
+`detach`; they compile and run unchanged. The built-in golden test
 (`conductor.builtin.test.ts`) is byte-identical. Old extensions that predate protocol v5
 ignore `completeRequest`; old WS conductors that predate protocol v3 never send the
 `complete` capability.
@@ -220,7 +222,7 @@ when the signal fires, and a late `completeResult` for that `reqId` is silently 
   an in-process strategy, and leaves in-process conductors without model access.
 - **WS-only capabilities, no in-process change.** Rejected: makes the escape-hatch path
   structurally richer than the primary path — the opposite of ADR 0008's stated goal. The
-  `ConductorHost` injected via `init` is the primary surface; the WS merely transports it.
+  `ConductorHost` injected via `attach` is the primary surface; the WS merely transports it.
 - **Passing the `ConductorView` enriched with a raw API key / client handle.** Rejected:
   the view is serializable data for the wire path; putting a callable into it would break
   that invariant and require two different view shapes for in-process vs. wire conductors.

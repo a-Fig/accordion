@@ -462,36 +462,36 @@ Some conductors need services only the host can provide: a tokenizer, access to 
 digest function, or — the most powerful one — the ability to run an out-of-band model
 completion to summarize aged context. The **`ConductorHost`** interface delivers these.
 
-## Receiving the host — `init(host)` and `dispose()`
+## Receiving the host — `attach(host)` and `detach()`
 
 The host injects its services via an optional lifecycle hook:
 
 ```ts
 interface Conductor {
-  init?(host: ConductorHost): void;   // called once, before the first conduct()
+  attach?(host: ConductorHost): void;   // called once, before the first conduct()
   conduct(view: ConductorView): Command[] | null;
-  dispose?(): void;                    // called when the conductor is detached/swapped
+  detach?(): void;                    // called when the conductor is detached/swapped
 }
 ```
 
-- **`init(host)`** is called once per conductor instance, before the first `conduct()` call.
-  A pure stateless conductor (the built-in) omits it entirely — `init` is not called if
+- **`attach(host)`** is called once per conductor instance, before the first `conduct()` call.
+  A pure stateless conductor (the built-in) omits it entirely — `attach` is not called if
   absent. Hold a reference to `host` on the instance.
-- **`dispose()`** is called when the conductor is detached or swapped out. Use it to cancel
+- **`detach()`** is called when the conductor is detached or swapped out. Use it to cancel
   in-flight async work (abort any outstanding `host.complete()` calls via the `AbortSignal`
-  you passed in the request, so stale completions do not call `host.invalidate()` after the
+  you passed in the request, so stale completions do not call `host.requestRerun()` after the
   conductor is gone). Optional.
 
 ## The `conduct()` contract stays synchronous
 
 `conduct()` **must remain synchronous**. A conductor that needs a model completion follows
-the fire-and-forget / invalidate pattern:
+the fire-and-forget / requestRerun pattern:
 
 1. From `conduct()`: detect that a completion is needed. If one is already in-flight, return
    `null` (hold — keep last state). If not, kick off `host.complete(req)` in the background
    (stash the promise on the instance) and return `null` immediately.
 2. When the promise resolves: stash the result in instance state, then call
-   `host.invalidate()`. This asks the host to schedule a fresh `conduct()` pass.
+   `host.requestRerun()`. This asks the host to schedule a fresh `conduct()` pass.
 3. On the **next** `conduct()` call: the result is already in instance state. Emit the
    commands based on it.
 
@@ -508,7 +508,8 @@ instance-state reads and command emission.
 | `complete` | `(req: CompletionRequest) => Promise<CompletionResult>` | Run an out-of-band model completion asynchronously. Not on the `conduct()` hot path — use the async pattern above. Rejects if `"complete"` is unavailable, the model id is unknown, or the `AbortSignal` fires. |
 | `countTokens` | `(text: string) => number` | Synchronous token estimate for `text` using the host's tokenizer (chars/4 for Accordion's default). Safe to call inside `conduct()`. |
 | `digestOf` | `(id: string) => string \| null` | The engine's per-kind folded digest for block `id` — the exact string the agent receives when that block is folded (including the `{#code FOLDED}` tag). Returns `null` if the block is unknown. Synchronous; safe inside `conduct()`. |
-| `invalidate` | `() => void` | Ask the host to re-run `conduct()` now. Call this from an async completion handler after stashing the result. Has no effect if the conductor is no longer attached (stale calls after `dispose()` are ignored). |
+| `setStatus` | `(text: string \| null, metrics?: Record<string, number \| string \| boolean>) => void` | Surface display-only conductor status to the human. `null`/empty clears it. This never steers context; it is for visible unavailable/working/error states. |
+| `requestRerun` | `() => void` | Ask the host to re-run `conduct()` now. Call this from an async completion handler after stashing the result. Has no effect if the conductor is no longer attached (stale calls after `detach()` are ignored). |
 
 `HostCapabilityId` is `"complete" | "countTokens" | "digest"`.
 
@@ -519,7 +520,7 @@ instance-state reads and command emission.
 | `prompt` | `string` | The user-role content to operate on (required). |
 | `system` | `string?` | Optional system instruction — e.g. a compaction persona or template. |
 | `maxOutputTokens` | `number?` | Requested cap on output tokens. The extension clamps this to the model's own max-output ceiling before forwarding, so a conductor can safely pass any positive number without risking a provider rejection. The model enforces the (clamped) value as a hard cap — over-long output is truncated, not rejected. Omit to use the model default. |
-| `signal` | `AbortSignal?` | Abort signal from an `AbortController` you hold. Pass `controller.signal` here; call `controller.abort()` from `dispose()` so stale completions do not race back after the conductor is gone. |
+| `signal` | `AbortSignal?` | Abort signal from an `AbortController` you hold. Pass `controller.signal` here; call `controller.abort()` from `detach()` so stale completions do not race back after the conductor is gone. |
 | `model` | `"current" \| string?` | `"current"` (default when omitted) = the user's live session model. A specific model id overrides — useful for a cheap distillation model distinct from the agent model. Rejects if unknown. |
 
 ## `CompletionResult` fields
@@ -539,9 +540,9 @@ instance-state reads and command emission.
 - The session is a **read-only Claude Code transcript** (`session.readOnly`).
 - The pi extension is **disconnected** or the model is currently unavailable.
 
-A conductor that depends on `"complete"` should always check `can` first and fall back
-gracefully — e.g. emit a `group` command using the host's engine-generated digest, or return
-`null` to hold the last state until the model link recovers.
+A conductor that depends on `"complete"` should always check `can` first and handle
+unavailability deliberately — e.g. emit an explicit non-LLM command set, or call
+`host.setStatus(...)` and hold/preserve the last state until the model link recovers.
 
 ## Minimal worked example
 
@@ -560,9 +561,9 @@ export class SummarizingConductor implements Conductor {
   private headId: string | null = null;
   private inflight: AbortController | null = null;
 
-  init(host: ConductorHost): void { this.host = host; }
+  attach(host: ConductorHost): void { this.host = host; }
 
-  dispose(): void {
+  detach(): void {
     this.inflight?.abort();
     this.inflight = null;
     this.host = null;
@@ -594,7 +595,7 @@ export class SummarizingConductor implements Conductor {
         this.inflight = null;
         this.summary = result.text;
         this.headId = target.id;
-        this.host?.invalidate();   // triggers a fresh conduct() pass
+        this.host?.requestRerun();   // triggers a fresh conduct() pass
       },
       _err => { this.inflight = null; }
     );

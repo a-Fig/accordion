@@ -109,7 +109,7 @@ first half of [`docs/conductor-protocol.md`](../docs/conductor-protocol.md).
 ## Calling a model from a conductor (host capabilities)
 
 A conductor can request an out-of-band model completion via the `ConductorHost` injected
-through the optional `init(host)` lifecycle hook. The full reference — the `ConductorHost`
+through the optional `attach(host)` lifecycle hook. The full reference — the `ConductorHost`
 method table, `CompletionRequest`/`CompletionResult` fields, `can()` availability, the wire
 transport for out-of-process conductors, and the version notes — is in
 [**Part 3 of `docs/conductor-protocol.md`**](../docs/conductor-protocol.md).
@@ -122,16 +122,17 @@ if (view.liveTokens > view.budget && !this.inflight && this.host?.can("complete"
   const ctrl = new AbortController();
   this.inflight = ctrl;
   this.host.complete({ prompt: buildPrompt(view), signal: ctrl.signal })
-    .then(r => { this.inflight = null; this.result = r.text; this.host?.invalidate(); },
+    .then(r => { this.inflight = null; this.result = r.text; this.host?.requestRerun(); },
           _  => { this.inflight = null; });
-  return null; // hold until invalidate() triggers the next conduct() pass
+  return null; // hold until requestRerun() triggers the next conduct() pass
 }
 ```
 
-**Degradation:** always check `host.can("complete")` before use. It returns `false` in
-browser dev mode, in read-only Claude Code transcript sessions, and whenever the pi
-extension is disconnected. Fall back to a `fold` or `group` command so the conductor
-stays useful even without a live model link. `compaction-naive/` shows the full pattern.
+**Unavailable completions:** always check `host.can("complete")` before use. It returns
+`false` in browser dev mode, in read-only Claude Code transcript sessions, and whenever
+the pi extension is disconnected. Either choose an explicit non-LLM strategy or surface a
+visible status with `host.setStatus(...)` and hold. `compaction-naive/` intentionally waits
+for the live model link instead of silently falling back to a deterministic group.
 
 ## Escape hatch: separate process / another language (WebSocket)
 

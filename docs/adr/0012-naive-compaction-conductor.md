@@ -54,8 +54,8 @@ as closely as possible within the conductor contract, so:
 `Conductor` and is registered in `IN_PROCESS_CONDUCTORS` (`conductors/index.ts`) alongside
 the built-in and cold-score conductors. It appears in the header switcher automatically.
 
-It uses `init(host)` and `dispose()` from ADR 0011 — `host.complete()` for the model call
-and `host.invalidate()` to re-enter after the async result arrives. No Svelte, no `$state`,
+It uses `attach(host)` and `detach()` from ADR 0011 — `host.complete()` for the model call
+and `host.requestRerun()` to re-enter after the async result arrives. No Svelte, no `$state`,
 no engine imports; types only from `../contract`.
 
 ### 2. Trigger: 95% of the token budget
@@ -136,34 +136,23 @@ non-empty if genuinely new blocks have been added since the failure. This preven
 model-hammering loop on a persistent failure — the conductor only retries when there is
 new work to do, not just because the context is still over budget.
 
-`dispose()` aborts any in-flight completion so stale results do not call `host.invalidate()`
+`detach()` aborts any in-flight completion so stale results do not call `host.requestRerun()`
 after the conductor is detached.
 
-### 7. Degradation when `can("complete")` is false
+### 7. Unavailable model link when `can("complete")` is false
 
 When there is no live model link (`host.can("complete")` returns false), the conductor
-behaviour depends on whether a prior LLM summary exists:
+does not silently switch strategies:
 
-- **If `this.summary !== null`:** the existing summary commands are re-emitted unchanged.
-  Clobbering a successful LLM summary with a host-generated group digest on a transient
-  model-link drop would replace richer prose with a lower-quality fallback and leave
-  internal state inconsistent. Instead the conductor preserves the summary and waits for
-  the link to recover; newly-aged blocks stay live in the meantime.
-- **If `this.summary === null` (no prior summary):** the conductor falls back to a
-  deterministic `group` command spanning the first-to-last aged block:
+- If `this.summary !== null`, the existing summary commands are re-emitted unchanged.
+  Newly-aged blocks stay live until the model link recovers.
+- If `this.summary === null`, it returns `[]` (raw) and launches no completion.
+- In both cases it calls `host.setStatus("Naive compaction unavailable — waiting for live
+  model link", ...)` so the limitation is visible in the normal conductor status strip.
 
-  ```typescript
-  return [{ kind: "group", ids: [firstId, lastId] }];
-  ```
-
-  This collapses the aged region into a host-generated group digest without any LLM call,
-  keeping the conductor useful in read-only contexts, browser dev mode, and Claude Code
-  transcript sessions.
-
-**Edge case.** The group fallback emits a command only when `agedBlocks.length >= 2`
-(groups require at least two members) and no interleaved grouped block sits between the
-first and last aged block (which would cause an `invalid-group` clamp). With fewer than
-two aged blocks, or with interleaved grouped blocks, the conductor returns `[]`.
+There is intentionally no deterministic `group` fallback. Naive compaction is the LLM
+summary baseline; substituting a host-generated group digest would hide that the proving
+use case is unavailable and would introduce a second strategy under the same selector.
 
 ### 8. System prompt for the compaction call
 

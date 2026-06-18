@@ -510,19 +510,12 @@ export default function accordionLive(pi: ExtensionAPI): void {
 							return;
 						}
 						try {
-							if (typeof req.prompt !== "string" || req.prompt.length === 0) {
-								reply({ type: "completeResult", reqId: req.reqId, ok: false, error: "invalid completion prompt" });
-								return;
-							}
 							const ctx = latestCtx;
 							const m = ctx?.model;
 							if (!ctx || !m) {
 								reply({ type: "completeResult", reqId: req.reqId, ok: false, error: "no model available" });
 								return;
 							}
-							const modelMaxTokens = typeof (m as any).maxTokens === "number" && Number.isFinite((m as any).maxTokens) && (m as any).maxTokens > 0 ? Math.floor((m as any).maxTokens) : null;
-							let maxTokens = typeof req.maxOutputTokens === "number" && Number.isFinite(req.maxOutputTokens) && req.maxOutputTokens > 0 ? Math.floor(req.maxOutputTokens) : undefined;
-							if (maxTokens !== undefined && modelMaxTokens !== null) maxTokens = Math.min(maxTokens, modelMaxTokens);
 							const auth = await ctx.modelRegistry.getApiKeyAndHeaders(m);
 							if (!auth.ok) {
 								reply({ type: "completeResult", reqId: req.reqId, ok: false, error: `could not resolve API key: ${(auth as any).error ?? "unknown"}` });

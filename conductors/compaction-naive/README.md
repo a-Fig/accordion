@@ -52,7 +52,7 @@ passes through verbatim — compacting live reasoning would destroy the agent's 
      with the engine's "tool_call is never folded → never orphans its result" invariant. The
      host's apply layer has no kind-check and would apply a replace to a tool_call verbatim,
      so the conductor must not emit one.
-   - Calls `host.invalidate()` to schedule a fresh `conduct()` pass that emits those
+   - Calls `host.requestRerun()` to schedule a fresh `conduct()` pass that emits those
      commands immediately.
 
 **Recursive path:** if a prior summary already exists, the compaction prompt is:
@@ -69,11 +69,11 @@ The originals already compressed into the prior summary are intentionally absent
 conductor only sees what was previously fed to the LLM, not the raw history. This is the
 recursive amnesia at the centre of the baseline.
 
-**Degradation (no model link):** if `host.can("complete")` returns `false` (browser dev
-mode, read-only Claude Code transcript session, or extension disconnected), the conductor
-falls back to a deterministic `group` command over the contiguous aged region — collapsing it
-into the host's engine-generated digest. This keeps the conductor usable in sessions where
-no model is connected, while making the limitation visible.
+**Unavailable model link:** if `host.can("complete")` returns `false` (browser dev mode,
+read-only Claude Code transcript session, or extension disconnected), the conductor does
+**not** fall back to deterministic grouping. It preserves any existing LLM summary, leaves
+newly-aged blocks live, and surfaces a visible "waiting for live model link" status until
+completion is available again.
 
 ## Selecting it
 

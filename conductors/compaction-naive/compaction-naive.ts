@@ -169,6 +169,7 @@ export class NaiveCompactionConductor implements Conductor {
 			this.inflight.abort();
 			this.inflight = null;
 		}
+		this.host?.setStatus(null);
 		this.host = null;
 	}
 
@@ -208,6 +209,7 @@ export class NaiveCompactionConductor implements Conductor {
 		const needSummary = view.liveTokens >= threshold && newlyAged.length > 0;
 
 		if (!needSummary) {
+			this.host.setStatus(null);
 			// Conductor has a definite synchronous answer: nothing to compact right now.
 			// Return the existing summary commands if we have one; otherwise clear to raw.
 			// Do NOT return null here — null means "still thinking / in-flight", which
@@ -221,8 +223,13 @@ export class NaiveCompactionConductor implements Conductor {
 		// baseline, so if the host cannot complete we wait visibly rather than silently
 		// switching strategies.
 		if (!this.host.can("complete")) {
+			this.host.setStatus("Naive compaction unavailable — waiting for live model link", {
+				aged: agedBlocks.length,
+				fullness: Math.round((view.liveTokens / view.budget) * 100),
+			});
 			return this.summary !== null ? this.buildCommands(view) : [];
 		}
+		this.host.setStatus(null);
 
 		// FIX 3: Gate the launch on a stable signature of the NEWLY AGED set being attempted
 		// (not the full aged set). This prevents:
