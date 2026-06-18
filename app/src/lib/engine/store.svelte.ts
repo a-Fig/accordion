@@ -119,6 +119,11 @@ export class AccordionStore {
 	 * the wire layer. Only ever fired for human ("you") actions; null ⇒ nobody is listening.
 	 */
 	onHumanOverride: ((ids: string[], action: string) => void) | null = null;
+	/** Display-only status from the active in-process conductor. */
+	conductorStatus = $state<{ text: string; metrics: Record<string, number | string | boolean> }>({
+		text: "",
+		metrics: {},
+	});
 
 	/**
 	 * Optional completion backend injected by the live layer. The live client sets this
@@ -216,6 +221,7 @@ export class AccordionStore {
 		this.detachConductorHost(this.conductor);
 		this.conductorEpoch++;
 		this.conductorRerunQueuedFor = null;
+		this.clearConductorStatus();
 		this.conductor = c;
 		// Mirror the new conductor's locks (and tailTokens) into the reactive snapshots BEFORE
 		// any gate reads them (releaseLockedDomains → isLocked, the refold's protectedFromIndex
@@ -253,6 +259,7 @@ export class AccordionStore {
 		this.detachConductorHost(oldConductor);
 		this.conductorEpoch++;
 		this.conductorRerunQueuedFor = null;
+		this.clearConductorStatus();
 		this.conductor = null;
 		// Kill switch unlocks every control — clear the reactive lock snapshot to match the now-null
 		// conductor (otherwise stale locks would keep the gates closed and the UI showing "locked").
@@ -402,6 +409,11 @@ export class AccordionStore {
 		for (let i = 0; i < this.blocks.length; i++) this.index.set(this.blocks[i].id, i);
 	}
 
+	private clearConductorStatus(): void {
+		this.conductorStatus.text = "";
+		this.conductorStatus.metrics = {};
+	}
+
 	/**
 	 * Build the host-capabilities object the store hands to a conductor on attach.
 	 *
@@ -429,6 +441,11 @@ export class AccordionStore {
 			digestOf(id: string): string | null {
 				const b = store.get(id);
 				return b ? digest(b) : null;
+			},
+			setStatus(text: string | null, metrics: Record<string, number | string | boolean> = {}): void {
+				if (store.conductor !== forConductor || store.conductorEpoch !== epoch) return;
+				store.conductorStatus.text = text ?? "";
+				store.conductorStatus.metrics = text ? metrics : {};
 			},
 			requestRerun: () => store.requestConductorRerun(forConductor, epoch),
 		};

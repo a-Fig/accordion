@@ -109,6 +109,8 @@ class MockHost implements ConductorHost {
 	requestRerunCalls = 0;
 	countTokensCalls = 0;
 	digestOfCalls: string[] = [];
+	statusText = "";
+	statusMetrics: Record<string, number | string | boolean> = {};
 
 	/** Pending in-flight completions. Pop and resolve/reject from tests. */
 	pending: PendingCompletion[] = [];
@@ -143,6 +145,11 @@ class MockHost implements ConductorHost {
 	digestOf(id: string): string | null {
 		this.digestOfCalls.push(id);
 		return `{#digest FOLDED} digest of ${id}`;
+	}
+
+	setStatus(text: string | null, metrics: Record<string, number | string | boolean> = {}): void {
+		this.statusText = text ?? "";
+		this.statusMetrics = text ? metrics : {};
 	}
 
 	requestRerun(): void {
@@ -613,6 +620,7 @@ describe("NaiveCompactionConductor — unavailable path (can(complete)===false)"
 
 		expect(host.completeCalls).toHaveLength(0);
 		expect(result).toEqual([]);
+		expect(host.statusText).toContain("waiting for live model link");
 	});
 
 	it("does not fall back to a deterministic group command", () => {

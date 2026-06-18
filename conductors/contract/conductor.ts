@@ -296,6 +296,8 @@ export interface ConductorHost {
 	countTokens(text: string): number;
 	/** The engine's per-kind folded digest for block `id`, or `null` if unknown. */
 	digestOf(id: string): string | null;
+	/** Surface display-only conductor status to the human; `null`/empty clears it. */
+	setStatus(text: string | null, metrics?: Record<string, number | string | boolean>): void;
 	/** Ask the host to re-run `conduct()` after async work completes. */
 	requestRerun(): void;
 }

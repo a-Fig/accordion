@@ -568,3 +568,33 @@ describe("AccordionStore host — complete() request forwarding", () => {
 		expect(receivedReqs[0].model).toBe("test-model");
 	});
 });
+
+// ── 9. setStatus() display telemetry ────────────────────────────────────────
+
+describe("AccordionStore host — setStatus()", () => {
+	it("surfaces and clears display-only status from the attached conductor", () => {
+		const s = makeStore([blk(0)]);
+		const conductor = new TrackingConductor();
+		s.attach(conductor);
+
+		conductor.capturedHost!.setStatus("waiting for live model link", { aged: 3 });
+		expect(s.conductorStatus.text).toBe("waiting for live model link");
+		expect(s.conductorStatus.metrics.aged).toBe(3);
+
+		conductor.capturedHost!.setStatus(null);
+		expect(s.conductorStatus.text).toBe("");
+		expect(s.conductorStatus.metrics).toEqual({});
+	});
+
+	it("ignores setStatus() from a stale detached conductor host", () => {
+		const s = makeStore([blk(0)]);
+		const c1 = new TrackingConductor("c1");
+		const c2 = new TrackingConductor("c2");
+		s.attach(c1);
+		const oldHost = c1.capturedHost!;
+		s.attach(c2);
+
+		oldHost.setStatus("stale");
+		expect(s.conductorStatus.text).toBe("");
+	});
+});
