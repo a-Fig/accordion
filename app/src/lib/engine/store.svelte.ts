@@ -448,7 +448,7 @@ export class AccordionStore {
 			// default recap → groupDigestTokens. Non-carrier collapsed members always 0.
 			let summaryTok = 0;
 			if (c.carrier) {
-				if (g.digest === null || g.digest === "") summaryTok = 0; // drop group
+				if (this.isDropGroup(g)) summaryTok = 0; // drop group
 				else if (typeof g.digest === "string") summaryTok = estTokens(g.digest) + BLOCK_OVERHEAD; // custom literal
 				else summaryTok = groupDigestTokens(g, c.collapsedMembers); // default recap
 			}
