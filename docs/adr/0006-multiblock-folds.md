@@ -230,9 +230,19 @@ minimum-member constraint:
 - `digest === undefined` → default recap summary + `{#code FOLDED}` tag. **Byte-identical to
   existing behavior**; no existing conductor is affected.
 - `digest === null` (or `""`) → **DROP**: the run is removed from the wire and NO replacement
-  is inserted. The agent never sees those blocks. `recall` and `unfold` cannot recover a
-  dropped block — it is gone from the model's message array by design. Phase A (tool-pair
-  balancing) still runs, so no orphaned tool pairs can result.
+  is inserted. The agent never sees those blocks, and **the agent cannot recover them** —
+  `recall`/`unfold` have no handle to a dropped run. Phase A (tool-pair balancing) still runs,
+  so no orphaned tool pairs can result. **"Permanent" is scoped, not destructive:** the app
+  never destroys the block — it stays in the engine (shown as the folded drop-group tile) and
+  is merely *withheld* from the model's message array. While a drop group stands it is
+  irrecoverable by the agent, and by the human too if a conductor holds `human-steering`. The
+  one escape hatch is the kill switch: after **detach**, `freezeForDetach` reassigns the drop
+  group to the human (keeping `digest: null`, so it still drops), `human-steering` unlocks, and
+  the human may `deleteGroup` it — which returns the blocks to live and re-admits them to the
+  agent on the next pass. That is consistent with ADR 0011 ("detach freezes the view and folds
+  remain human-reversible") and with this repo's source-of-truth stance (Accordion withholds
+  context, it does not delete history). If a future requirement needs deletion to survive
+  detach, that is a deliberate change to the kill-switch contract, not a bug here.
 - Non-empty string → that exact string is used as the summary verbatim (like `FoldCommand.digest`,
   no tag added).
 
@@ -277,5 +287,7 @@ engine, which always sends `null` for a drop.
 `conductors/drop-oldest/` replaces `conductors/sliding-window/`. When live tokens exceed ~90%
 of budget it issues `group` commands with `digest: null` to remove the oldest non-`user` blocks
 (skipping user messages, which stay live) until the estimate falls to ~70%. It locks
-`human-steering` + `agent-unfold` (NOT `tail-size`) because it irreversibly discards content
-— human override or agent unfold cannot recover what was sent as DROP.
+`human-steering` + `agent-unfold` (NOT `tail-size`) so that, while attached, neither a human
+override nor an agent `unfold` can re-admit content it dropped — recovery is only via the
+detach kill switch (see the DROP bullet above). It leaves `tail-size` unlocked so the human
+keeps the protected-tail dial.

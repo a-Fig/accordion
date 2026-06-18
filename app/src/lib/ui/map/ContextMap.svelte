@@ -358,7 +358,7 @@
 		const savedStr = saved > 0 ? ` · saves ${k(saved)} tok` : "";
 		const stragStr = strag > 0 ? ` · ${strag} kept live` : "";
 		if (store.isDropGroup(g)) {
-			return `drop group · ${members.length} blocks · ${k(full)} tok removed\n${turns}\nThe agent does not see this block\nclick to inspect`;
+			return `drop group · ${members.length} blocks · ${k(saved)} tok removed${stragStr}\n${turns}\nThe agent does not see this block\nclick to inspect`;
 		}
 		return `group · ${members.length} blocks · ${k(full)} tok full${savedStr}${stragStr}\n${turns}\nclick to peek · double-click to collapse`;
 	}
