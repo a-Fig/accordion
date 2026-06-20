@@ -4,7 +4,6 @@
   "private": true,
   "type": "module",
   "description": "Thermocline conductor for Accordion — layers block significance and manages multi-tier context folding.",
-  "main": "thermocline.mjs",
   "scripts": {
     "start": "node thermocline.mjs",
     "test": "node --test"
