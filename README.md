@@ -43,16 +43,6 @@ And folds nest: cold turns fold into **groups**, groups into bigger groups, so a
 
 → Full details, capability matrix, and a walkthrough: **[VISION.md](VISION.md)**
 
-## See it: the visualizer
-
-There's a working **[visualizer demo](visualizer/)** — a standalone window that renders a real agent context window and lets you fold, unfold, pin, and peek it, with the automatic **Conductor** keeping the live context inside a token budget. It loads real saved sessions from **Claude Code**, **pi**, or **OMP**.
-
-```bash
-cd visualizer && node serve.js   # then open http://localhost:8080
-```
-
-Drag any session `.jsonl` onto the window, or use the bundled sample. Everything runs locally — nothing is uploaded. See [visualizer/README.md](visualizer/README.md).
-
 ## Why it's different
 
 | | Sliding window | `/compact` | Black-box memory | 🪗 Accordion |
@@ -83,9 +73,8 @@ Drag any session `.jsonl` onto the window, or use the bundled sample. Everything
 
 Honest about what's **not** there yet: there is no autonomous Conductor on a live session,
 no agent-driven pinning, no nested/hierarchical groups, no LLM-generated summaries, no
-replay — that's the build ahead. There's also an
-older terminal-only POC (`src/accordion.ts`, `/expand` · `/collapse` · `/accordion`) that
-predates the app.
+replay — that's the build ahead. (An older terminal-only POC — `src/accordion.ts`,
+`/expand` · `/collapse` · `/accordion` — predated the app and has since been removed.)
 
 ### Try it
 
