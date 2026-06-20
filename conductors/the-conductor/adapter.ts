@@ -43,7 +43,9 @@ function toContextBlock(b: ViewBlock): ContextBlock {
 		toolName: b.toolName,
 		callId: b.callId,
 		isError: b.isError,
-		source: { messageIndex: -1 },
+		// `source` drove message mutation, which the host now owns — vestigial here. We still set
+		// the required `field` so the type is satisfied (no message is ever indexed by it).
+		source: { messageIndex: -1, field: "content" },
 	};
 }
 

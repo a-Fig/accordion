@@ -6,7 +6,7 @@
  * This conductor keeps its STRATEGY verbatim (`strategy.ts`, vendored from
  * the_conductor/src/conductor.ts) — the self-calibrating fold-target band, graduated
  * Full/Trim/Digest/Group levels, three-stage relevance (keyword → embeddings → cross-encoder
- * rerank), risk-aware unfold floors, and conductor pins — and replaces only its I/O ends:
+ * rerank), and risk-aware unfold floors — and replaces only its I/O ends:
  *
  *   - INPUT:  Accordion's `ConductorView` (linearized blocks) → `ParsedContext`  (adapter.ts)
  *   - OUTPUT: per-block fold levels → `fold`/`replace`/`group` commands               (commands.ts)
@@ -16,9 +16,12 @@
  * Accordion dials in. It is COLLABORATIVE (declares no locks): human and agent overrides always
  * win, and the host's protected tail is absolute.
  *
+ * Per-connection state (cache, calibration, fold levels) lives in `ConnState` and is reset on
+ * each new connection — there is no cross-reconnect persistence (a reconnect is a cold start).
+ *
  * Run:  node the-conductor.ts   (Node ≥ 23.6, or ≥ 22.18 with --experimental-strip-types).
- *       Phase 1 ships deterministic-only: keyword relevance + deterministic digests. Embeddings,
- *       cross-encoder rerank, and LLM summaries are wired in later phases via `deps`.
+ *       Deterministic out of the box (keyword relevance + deterministic digests); embeddings,
+ *       cross-encoder rerank, and LLM digests activate via the optional dep + env (.env.example).
  */
 import { WebSocketServer } from "ws";
 import { mkdirSync, writeFileSync, renameSync, rmSync } from "node:fs";
@@ -79,7 +82,6 @@ const EMBEDDINGS_DISABLED = process.env.ACCORDION_EMBEDDINGS === "0" || process.
 
 let embeddingProvider: EmbeddingProvider | null = null;
 let embeddingInit: Promise<void> | null = null;
-let embeddingWarmedOnce = false;
 let rerankProvider: RerankProvider | null = null;
 let rerankInitAttempted = false;
 
@@ -150,20 +152,27 @@ function advertise(): void {
 	writeFileSync(tmp, JSON.stringify(entry, null, 2));
 	renameSync(tmp, REG_FILE);
 }
-advertise();
-const heartbeat = setInterval(advertise, 5_000);
 
-function shutdown(): void {
-	clearInterval(heartbeat);
-	try {
-		rmSync(REG_FILE, { force: true });
-	} catch {
-		/* already gone */
+// Advertise only AFTER the server is actually listening (see wss "listening"/"error" below) so a
+// port clash never leaves discovery pointing at a dead URL.
+let heartbeat: ReturnType<typeof setInterval> | undefined;
+let advertised = false; // did WE write the registry file? (don't delete a sibling's on a port clash)
+
+function shutdown(code = 0): void {
+	if (heartbeat) clearInterval(heartbeat);
+	// Only remove the registry file if this process actually advertised it — otherwise a failed
+	// duplicate launch (EADDRINUSE) would delete the healthy instance's advertisement.
+	if (advertised) {
+		try {
+			rmSync(REG_FILE, { force: true });
+		} catch {
+			/* already gone */
+		}
 	}
-	process.exit(0);
+	process.exit(code);
 }
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
+process.on("SIGINT", () => shutdown(0));
+process.on("SIGTERM", () => shutdown(0));
 
 interface View {
 	blocks: ViewBlock[];
@@ -180,19 +189,24 @@ interface ConnState {
 	deps: ConductorDependencies;
 	lastSig: string | null;
 	lastView: View | null;
-	pendingRev: number;
 	warmInFlight: boolean;
+	/** This connection has completed at least one embedding warm (its cache is no longer empty).
+	 *  Per-connection (NOT module-global): a reconnect starts cold and must get the generous
+	 *  first-warm budget, or a full re-embed would time out and silently fall back to keyword. */
+	warmedOnce: boolean;
+	/** Set on ws close: stop scheduling work and let the per-connection state be GC'd. */
+	closed: boolean;
 }
 
 function freshState(): ConnState {
 	return {
 		accState: createAccordionState(),
-		// Phase 3 injects summaryProvider; embeddings/rerank warm the state caches directly.
 		deps: { log },
 		lastSig: null,
 		lastView: null,
-		pendingRev: -1,
 		warmInFlight: false,
+		warmedOnce: false,
+		closed: false,
 	};
 }
 
@@ -201,20 +215,26 @@ function freshState(): ConnState {
  *  extension flow: `warmEmbeddings(all blocks + prompt)` then `warmRerank(prompt, folded shortlist)`.
  *  Best-effort and bounded — `computeFoldPlan` reads whatever landed and otherwise falls back. */
 function maybeWarm(ws: import("ws").WebSocket, state: ConnState): void {
-	if (state.warmInFlight || !state.lastView || EMBEDDINGS_DISABLED) return;
+	if (state.warmInFlight || state.closed || !state.lastView || EMBEDDINGS_DISABLED) return;
 	const view = state.lastView;
+	const warmRev = view.rev; // the snapshot we're warming; used to coalesce to the latest below
 	const prompt = latestPrompt(view.blocks);
 	const blocks = viewToParsed(view.blocks).blocks;
 	state.warmInFlight = true;
 	void (async () => {
 		await ensureEmbeddingProvider();
+		if (state.closed) return;
 		if (embeddingProvider) {
 			state.deps.embeddingProvider = embeddingProvider;
-			const timeoutMs = embeddingWarmedOnce ? 2000 : 10_000;
+			// Generous budget on this CONNECTION's first warm (a full re-embed of a cold cache),
+			// short budget once its cache is primed and warms are incremental.
+			const timeoutMs = state.warmedOnce ? 2000 : 10_000;
 			await warmEmbeddings(blocks, prompt, embeddingProvider, state.accState, timeoutMs);
-			embeddingWarmedOnce = true;
+			if (state.closed) return;
+			state.warmedOnce = true;
 		}
 		await ensureRerankProvider();
+		if (state.closed) return;
 		if (rerankProvider) {
 			const foldedSet = new Set(state.accState.foldedBlockIds);
 			const candidates = blocks.filter((b) => foldedSet.has(b.id)).map((b) => b.text);
@@ -226,12 +246,15 @@ function maybeWarm(ws: import("ws").WebSocket, state: ConnState): void {
 				}
 			}
 		}
-		pruneEmbeddingCache(state.accState, blocks, prompt);
 	})()
 		.catch((e) => log(`warm failed: ${e?.message ?? e}`))
 		.finally(() => {
 			state.warmInFlight = false;
+			if (state.closed) return;
 			recomputeAndSend(ws, state, state.lastView?.rev ?? -1);
+			// Coalesce-to-latest: if newer views arrived while we were warming, the vectors we just
+			// computed are for a stale snapshot — warm once more to catch up to the current view.
+			if (state.lastView && state.lastView.rev !== warmRev) maybeWarm(ws, state);
 		});
 }
 
@@ -239,7 +262,7 @@ function maybeWarm(ws: import("ws").WebSocket, state: ConnState): void {
  *  (holding otherwise keeps the agent's prompt prefix cache-warm). */
 function recomputeAndSend(ws: import("ws").WebSocket, state: ConnState, rev: number): void {
 	const view = state.lastView;
-	if (!view || ws.readyState !== ws.OPEN) return;
+	if (!view || state.closed || ws.readyState !== ws.OPEN) return;
 
 	const prompt = latestPrompt(view.blocks);
 	const parsed = viewToParsed(view.blocks);
@@ -257,6 +280,10 @@ function recomputeAndSend(ws: import("ws").WebSocket, state: ConnState, rev: num
 	// Persist the chosen levels so the NEXT pass sees them as prior (hysteresis / proactive-unfold).
 	applyPlanToState(state.accState, plan);
 
+	// Bound the caches every pass — even when embeddings are off (no warm runs), so summaryCache /
+	// rerankCache can't grow unbounded. Prunes embedding/rerank/summary caches to the live set.
+	pruneEmbeddingCache(state.accState, parsed.blocks, prompt);
+
 	sendStatus(ws, state, view, plan, parsed.blocks, prompt);
 
 	const sig = planSignature(plan);
@@ -265,7 +292,6 @@ function recomputeAndSend(ws: import("ws").WebSocket, state: ConnState, rev: num
 	const commands = buildCommands(plan, parsed.blocks, state.accState, state.deps, prompt);
 	ws.send(JSON.stringify({ type: "conductor/commands", rev, commands }));
 	state.lastSig = sig;
-	state.pendingRev = rev;
 	log(
 		`plan: ${commands.length} cmds · target ${(plan.foldTarget * 100).toFixed(0)}% · ` +
 			`assembled ~${plan.assembledTokens.toLocaleString()}/${view.budget.toLocaleString()} tok`,
@@ -354,6 +380,7 @@ wss.on("connection", (ws) => {
 		log,
 		summaryProvider,
 		onSummary: () => {
+			if (state.closed) return; // a late summary on a dead connection: drop it
 			state.lastSig = null;
 			recomputeAndSend(ws, state, state.lastView?.rev ?? -1);
 		},
@@ -411,12 +438,36 @@ wss.on("connection", (ws) => {
 		maybeWarm(ws, state);
 	});
 
-	ws.on("close", () => log("Accordion disconnected"));
+	ws.on("close", () => {
+		// Stop scheduling work for this connection. In-flight warms/summaries can't be aborted
+		// mid-inference (the providers take no AbortSignal), but the `closed` guards stop every
+		// downstream recompute/re-warm, so once those promises drain nothing references `state`
+		// and the whole AccordionState (incl. the embedding cache) is GC'd. Clear the big caches
+		// now too, to release memory promptly if no warm is in flight.
+		state.closed = true;
+		state.deps.onSummary = undefined;
+		state.accState.embeddingCache = {};
+		state.accState.rerankCache = {};
+		state.accState.summaryCache = {};
+		log("Accordion disconnected");
+	});
 });
 
-log(`${LABEL} listening on ${URL}`);
-log(
-	`advertised at ${REG_FILE} · relevance: keyword` +
-		`${EMBEDDINGS_DISABLED ? "" : " → embeddings"}${RERANK_ENABLED ? " → rerank" : ""}` +
-		` · summaries: ${summaryProvider ? "on" : "deterministic"}`,
-);
+wss.on("listening", () => {
+	advertise();
+	advertised = true;
+	heartbeat = setInterval(advertise, 5_000);
+	log(`${LABEL} listening on ${URL}`);
+	log(
+		`advertised at ${REG_FILE} · relevance: keyword` +
+			`${EMBEDDINGS_DISABLED ? "" : " → embeddings"}${RERANK_ENABLED ? " → rerank" : ""}` +
+			` · summaries: ${summaryProvider ? "on" : "deterministic"}`,
+	);
+});
+
+wss.on("error", (e: Error) => {
+	// e.g. EADDRINUSE on a port clash: we never advertised (advertise runs on "listening"), so no
+	// dead URL is left behind. Clean up any stale registry file and exit nonzero.
+	log(`server error: ${e?.message ?? e}`);
+	shutdown(1);
+});
