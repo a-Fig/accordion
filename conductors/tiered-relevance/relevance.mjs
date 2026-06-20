@@ -144,11 +144,12 @@ export function tailText(blocks, cap = TAIL_TEXT_CAP) {
 }
 
 export class RelevanceEngine {
-	constructor({ embeddingProvider = null, summaryProvider = null, log = () => {}, embeddingModel = EMBEDDING_MODEL } = {}) {
+	constructor({ embeddingProvider = null, summaryProvider = null, log = () => {}, embeddingModel = EMBEDDING_MODEL, onSemantic = null } = {}) {
 		this.embed = embeddingProvider; // async (texts, isQuery) => vectors, or null
 		this.summaryProvider = summaryProvider; // async ({prompt, context}) => string, or null
 		this.log = log;
 		this.embeddingModel = embeddingModel; // label only — which model relevance WOULD use
+		this.onSemantic = onSemantic; // called once when embeddings first activate (forces L1 trim re-emit)
 		this.everEmbedded = false; // flips true after the first successful embed (model is live)
 		this.embedDim = 0; // vector dimension observed from the first embed
 		this._loggedActive = false;
@@ -179,6 +180,10 @@ export class RelevanceEngine {
 			this.recentPrompts.push(p);
 			if (this.recentPrompts.length > MAX_RECENT_PROMPTS) this.recentPrompts.shift();
 		}
+		// Set goal/traj synchronously so keyword relevance is prompt-aware on the FIRST re-tier
+		// (before warm() runs). warm() overwrites with the same values + any LLM task-summary.
+		this.goalText = `${p}\n${this.taskSummary(blocks)}`.trim();
+		this.trajText = tailText(blocks);
 		if (this.summaryProvider && p !== this.lastSummarizedPrompt && !this.summaryInFlight) {
 			this.lastSummarizedPrompt = p;
 			this.summaryInFlight = true;
@@ -244,10 +249,13 @@ export class RelevanceEngine {
 				if (dv[0]?.length) this.embedDim = dv[0].length;
 			}
 			// First successful embed → the semantic path is now live. Log it once, loudly.
+			// onSemantic() nulls lastSentSig so L1 trim excerpts (now query-aware rather than
+			// keyword-quality) are re-sent on the post-warm recomputeAndSend.
 			if (!this._loggedActive && this.embedDim > 0) {
 				this._loggedActive = true;
 				this.everEmbedded = true;
 				this.log(`embeddings ACTIVE: ${this.embeddingModel} (${this.embedDim}d) — relevance is now SEMANTIC`);
+				this.onSemantic?.();
 			}
 		} catch (e) {
 			this.log(`embed warm incomplete: ${e.message}`);

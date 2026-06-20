@@ -198,6 +198,9 @@ const wss = new WebSocketServer({ host: "127.0.0.1", port: PORT });
 
 wss.on("connection", (ws) => {
 	const state = freshState();
+	// When embeddings first activate, L1 trim excerpts improve from keyword to semantic —
+	// null lastSentSig so the post-warm recomputeAndSend re-sends with the better content.
+	state.relevance.onSemantic = () => { state.lastSentSig = null; };
 	log("Accordion connected");
 
 	// Wire the shared models into this connection's engines (async, non-blocking).

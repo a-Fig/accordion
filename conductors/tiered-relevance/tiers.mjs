@@ -108,7 +108,10 @@ export function computeTiers(view, relevanceOf, summaryFor, prev, cfg = DEFAULT_
 			while (lvl < 2 && rendered > lowTok) {
 				const next = lvl < 1 && trimEligible(u.blocks[0]) && u.blocks.length === 1 ? 1 : 2;
 				const saving = cost(u, lvl) - cost(u, next);
-				if (saving <= 0) { lvl = 2; levels.set(u.id, 2); break; }
+				if (saving <= 0) {
+					if (next < 2) { lvl = next; continue; } // Trim was no-op; try Digest
+					break; // Digest also can't save (oversized digest); leave at current level
+				}
 				lvl = next;
 				levels.set(u.id, lvl);
 				rendered -= saving;
@@ -117,7 +120,7 @@ export function computeTiers(view, relevanceOf, summaryFor, prev, cfg = DEFAULT_
 
 		// Still over? Collapse contiguous runs of ≥groupMinUnits Digest units into Groups.
 		if (rendered > lowTok) {
-			groups = formGroups(candidates, levels, C.groupMinUnits, (u, lvl) => cost(u, lvl), () => rendered, (delta) => { rendered -= delta; }, lowTok);
+			groups = formGroups(blocks, candidates, levels, C.groupMinUnits, (u, lvl) => cost(u, lvl), () => rendered, (delta) => { rendered -= delta; }, lowTok);
 		}
 	} else {
 		// Headroom. Float a folded unit up ONE tier only when it now OUT-RANKS something live —
@@ -163,13 +166,23 @@ function effectiveFloor(unit, summaryFor, C) {
 	return Math.max(C.riskFloorMin, C.floatFloor - riskBonus * C.riskFloorBonus);
 }
 
-/** Collapse contiguous runs of Digest (L2) candidate units into groups. Runs are by
- *  conversation order; a non-candidate or non-L2 unit breaks the run. Mutates `levels` is not
- *  needed (grouped members are emitted via the group command), but we account the savings. */
-function formGroups(candidates, levels, minUnits, costFn, getRendered, subtract, lowTok) {
-	const ordered = [...candidates].sort((a, b) => a.order - b.order);
+/** Collapse contiguous runs of Digest (L2) candidate units into groups. Contiguity is
+ *  checked against the FULL block sequence: any non-candidate block (user turn, held block,
+ *  etc.) between two L2 candidates breaks the run. The host's group span is first→last and
+ *  sweeps every block between them — so gaps must be detected here, not just in candidates. */
+function formGroups(blocks, candidates, levels, minUnits, costFn, getRendered, subtract, lowTok) {
+	// Map each block id to its candidate unit if the unit is at L2.
+	const blockToUnit = new Map();
+	for (const u of candidates) {
+		if (levels.get(u.id) === 2) {
+			for (const id of u.blockIds) blockToUnit.set(id, u);
+		}
+	}
+
 	const groups = [];
 	let run = [];
+	const seen = new Set(); // unit ids already in current run (multi-block units appear once)
+
 	const flush = () => {
 		if (run.length >= minUnits && getRendered() > lowTok) {
 			const head = run[0];
@@ -183,11 +196,17 @@ function formGroups(candidates, levels, minUnits, costFn, getRendered, subtract,
 			});
 		}
 		run = [];
+		seen.clear();
 	};
-	for (const u of ordered) {
+
+	for (const b of blocks) { // walk full conversation order so any gap is visible
 		if (getRendered() <= lowTok) break;
-		if (levels.get(u.id) === 2) run.push(u);
-		else flush();
+		const u = blockToUnit.get(b.id);
+		if (u) {
+			if (!seen.has(u.id)) { seen.add(u.id); run.push(u); }
+		} else {
+			flush(); // non-candidate block (user turn, held, protected) interrupts the run
+		}
 	}
 	flush();
 	return groups;

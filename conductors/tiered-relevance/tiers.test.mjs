@@ -134,6 +134,31 @@ test("tier signature includes upgraded digest text for stable L2 blocks", () => 
 	assert.notEqual(after, before, "summary cache upgrade changes the send signature");
 });
 
+test("group does not sweep interleaved non-candidate blocks (user turns, held blocks)", () => {
+	order = turn = 0;
+	const t0 = block("t0", "text", 0.01, 200);
+	const t1 = block("t1", "text", 0.01, 200);
+	const uMid = block("uMid", "user", 0.0, 20); // user block between two cold L2 candidates
+	const t2 = block("t2", "text", 0.01, 200);
+	const t3 = block("t3", "text", 0.01, 200);
+	const budget = 200; // brutal — compress everything, then group
+	const r = computeTiers(view([t0, t1, uMid, t2, t3], budget), relOf, noSummary, null, { ...DEFAULT_CFG, groupMinUnits: 2 });
+	for (const g of r.groups) {
+		assert.ok(!g.blockIds.includes("uMid"), `group must not include user block (got ${JSON.stringify(g.blockIds)})`);
+	}
+});
+
+test("compress saving<=0 skips a unit whose digest is larger than the original", () => {
+	order = turn = 0;
+	// A tiny block (5 words) whose foldedTokens > tokens represents an oversized digest.
+	const tiny = block("tiny", "text", 0.01, 5, { foldedTokens: 999 });
+	const big = block("big", "text", 0.01, 400);
+	const budget = Math.round((tiny.tokens + big.tokens) / 2);
+	const r = computeTiers(view([tiny, big], budget), relOf, noSummary, null, DEFAULT_CFG);
+	// tiny should NOT be set to L2 (folded would cost more)
+	assert.ok((r.levels.get("tiny") ?? 0) < 2, "tiny block with oversized digest is not set to Digest");
+});
+
 test("protected + held blocks are never candidates", () => {
 	order = turn = 0;
 	const prot = block("p", "text", 0.0, 300, { protected: true });
