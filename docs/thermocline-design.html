@@ -448,7 +448,7 @@
     </div>
     <div class="reset"><span style="font-size:15px">↩︎</span>
       <span><b style="color:var(--text)">Any re-warm resets to Full:</b> the probe re-attends · the agent unfolds/recalls · ever-warm units need <b>2K</b>, not K.
-        Float-up (a thrash-free margin guard) re-surfaces a folded unit when its fresh temperature clearly out-ranks the live floor.</span></div>
+        Float-up is <b>epoch-granular</b>: each epoch re-plans folds from current temperatures, so a unit whose attention recovered is simply not re-folded — it returns to full at the next commit. No continuous re-surfacing (that would violate the epoch model).</span></div>
     <div class="cap"><b>Why a behavioral second gate</b> — gate ① is a 0.5B proxy with known recency bias; betting an irreversible step on it alone is unsafe.
       Gate ② is the agent's own conduct: it had the digest and the recovery tag in front of it and chose not to pull the content back.</div>
   </div>
@@ -502,7 +502,7 @@
       <tr><td>relevance signal</td><td class="yes">attention</td><td class="no">age only</td><td class="yes">attention + agent behavior</td></tr>
       <tr><td>recursive amnesia</td><td class="yes">n/a</td><td class="no">linear, over everything</td><td class="mid">bounded-log, coldest only</td></tr>
       <tr><td>agent can recover content</td><td class="yes">unfold</td><td class="no">no</td><td class="yes">unfold (L1/L2) · recall (any)</td></tr>
-      <tr><td>can re-surface a block</td><td class="no">no</td><td class="no">no</td><td class="yes">float-up</td></tr>
+      <tr><td>can re-surface a block</td><td class="no">no</td><td class="no">no</td><td class="yes">yes · epoch re-plan</td></tr>
       <tr><td>survives reconnect</td><td class="no">raw</td><td class="no">raw</td><td class="yes">deep zone persisted</td></tr>
       <tr><td>posture</td><td class="yes">collaborative</td><td class="no">locks agent out</td><td class="mid">exclusive, agent keeps veto</td></tr>
     </tbody>

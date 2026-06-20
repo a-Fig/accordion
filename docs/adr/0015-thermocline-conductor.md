@@ -252,5 +252,8 @@ The engine, the wire protocol, and all in-process conductors are untouched.
   re-select the conductor.
 - Per-section quality heuristics or re-summarization on timeout.
 - Model-spend accounting (`inputTokens`/`outputTokens`).
-- Float-up (re-surfacing a folded unit when its attention score recovers). The design
-  document describes it; the current implementation does not yet include it.
+- Continuous, relevance-margin float-up (tiered-relevance style). Re-surfacing IS present,
+  but only at epoch granularity: each epoch re-plans folds from current temperatures, so a
+  unit whose attention recovered is not re-folded and returns to full at the next commit
+  (plus the agent's `unfold`). A continuous mechanism is intentionally omitted — it would
+  violate the epoch model.
