@@ -1041,7 +1041,7 @@
 											     the cocoa owns peek/collapse via data-group, like the old group tile). -->
 											<div class="fold-cluster" data-cluster-ids={item.members.map((m) => m.id).join(",")}>
 												<div
-													class="cell face f{store.isDropGroup(g) ? 0 : faceFor(store.groupLiveTokens(g))} summary-tile"
+													class="cell face f{store.isDropGroup(g) ? 0 : faceFor(store.groupLiveTokens(g))} summary-tile group-cocoa"
 													class:drop-group={store.isDropGroup(g)}
 													class:sel={selectedId === g.id}
 													style:width="{cell}px"
@@ -1673,25 +1673,22 @@
 	/* The collapsed group tile in tile grids is now drawn on canvas (no DOM .group-tile
 	   needed there). Only .group-tile-open (the dull parent inside the band) remains DOM. */
 	.group-tile {
-		/* Kept for .group-tile-open which also uses this base. Folded group = a solid
-		   recessed CHESTNUT brown (--group), matching the canvas group tile. */
+		/* Kept for .group-tile-open which also uses this base. Folded group = a plain
+		   chestnut brown square — same shape as any other cell (3px radius, 1px inset
+		   edge shadow). No bevel, no heavy ring — only the color differs. */
 		background: var(--group);
-		box-shadow:
-			inset 0 0 0 1px var(--group-edge),
-			inset 2px 2px 0 -1px color-mix(in srgb, #fff 16%, transparent),
-			inset -3px -3px 4px -2px rgba(0, 0, 0, 0.5);
+		box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.22);
 		cursor: pointer;
-		border-radius: 4px;
+		border-radius: 3px;
 	}
 	.group-tile:hover {
-		filter: brightness(1.16);
+		filter: brightness(1.22);
+		box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.3);
+		z-index: 2;
 	}
 	.group-tile.sel {
-		box-shadow:
-			inset 0 0 0 2px var(--group-accent),
-			inset 0 0 0 3px rgba(0, 0, 0, 0.55),
-			inset -3px -3px 4px -2px rgba(0, 0, 0, 0.5);
-		filter: brightness(1.14);
+		box-shadow: inset 0 0 0 2px var(--accent), inset 0 0 0 3px rgba(0, 0, 0, 0.55);
+		filter: brightness(1.18);
 		z-index: 3;
 		animation: pop var(--dur-fast) var(--ease-spring);
 	}
@@ -1797,16 +1794,14 @@
 		flex: 0 0 auto;
 	}
 
-	/* Summary tile: stands in for the whole folded run; recessed charcoal signals synthesis.
-	   Reuses .cell.face.fN for dice pips (::before pseudo, no extra markup needed).
+	/* Summary tile: stands in for a single folded block's digest; recessed charcoal signals
+	   synthesis. Reuses .cell.face.fN for dice pips (::before pseudo, no extra markup needed).
 	   --k-summary (#2A2A2A) is a neutral dark tile — a single folded block's digest, NOT a
-	   multiblock group, so it deliberately stays grey while a group is chestnut (--group).
-	   The summary carries a thin SMOKE-grey rim (--group-accent) — a flat, light-edged
-	   synthesized tile vs the group's heavy beveled brown with its dark --group-edge ring. */
+	   multiblock group, so it deliberately stays grey. Normal-square shape (3px radius, 1px
+	   inset edge) same as any other cell — only the fill differs. */
 	.summary-tile {
 		background: var(--k-summary);
-		box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--group-accent) 38%, transparent),
-		            inset 0 0 0 2px rgba(255, 255, 255, 0.05);
+		box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.22);
 		flex: 0 0 auto;
 		cursor: pointer;
 	}
@@ -1820,6 +1815,13 @@
 		filter: brightness(1.18);
 		z-index: 3;
 		animation: pop var(--dur-fast) var(--ease-spring);
+	}
+
+	/* Group cocoa in sliver mode: same square shape as a normal cell but chestnut brown
+	   (--group), matching the Map canvas group tile exactly. Overrides the grey --k-summary
+	   fill from .summary-tile. The .sel / :hover states inherit from .summary-tile above. */
+	.summary-tile.group-cocoa {
+		background: var(--group);
 	}
 
 	/* Sliver: the original folded block squeezed to an 8px-wide vertical bar.

@@ -46,7 +46,6 @@ export type Palette = {
   accent: string;
   accentDim: string;
   group: string;
-  groupEdge: string;
   groupAccent: string;
 };
 
@@ -91,7 +90,6 @@ export function readPalette(): Palette {
     accent: v("--accent") || "#E8E8E8",
     accentDim: v("--accent-dim") || "#2d4a7a",
     group: v("--group") || "#7C5230",
-    groupEdge: v("--group-edge") || "#0A0A0A",
     groupAccent: v("--group-accent") || "#E8E8E8",
   };
 }
@@ -440,7 +438,7 @@ export function drawTile(
   opts: { hovered: boolean; dpr?: number } = { hovered: false },
 ): void {
   const { x, y, w, h } = rect;
-  const r = 3; // border-radius: 3px (cells), 4px (group-tile) — use 3 for most
+  const r = 3; // border-radius: 3px (uniform for all tiles including groups)
 
   // ---- vacated: transparent, 1px dashed accent ring, no fill ----
   if (spec.kind === "vacated") {
@@ -494,16 +492,8 @@ export function drawTile(
   // ---- base rounded rect fill ----
   ctx.save();
 
-  if (isGroup) {
-    // Folded group = a solid recessed CHESTNUT brown tile (palette.group). The
-    // bevel + edge ring below give it the "stacked, folded-away" depth; brown
-    // reads as its own object, distinct from the four spectrum kind hues.
-    ctx.fillStyle = baseColor;
-    roundRectFill(ctx, x, y, w, h, 4);
-  } else {
-    ctx.fillStyle = baseColor;
-    roundRectFill(ctx, x, y, w, h, r);
-  }
+  ctx.fillStyle = baseColor;
+  roundRectFill(ctx, x, y, w, h, r);
 
   // ---- folded hatch — blit the baked sprite (no per-tile clip()/loop) ----
   if (spec.folded) {
@@ -518,36 +508,7 @@ export function drawTile(
   if (!spec.folded || opts.hovered) {
     ctx.strokeStyle = "rgba(0,0,0,0.22)";
     ctx.lineWidth = 1;
-    roundRect(ctx, x + 0.5, y + 0.5, w - 1, h - 1, isGroup ? 4 : r);
-    ctx.stroke();
-  }
-
-  // ---- group bevel: inset lighter top-left, darker bottom-right ----
-  if (isGroup) {
-    // Light top-left highlight
-    ctx.strokeStyle = hexWithAlpha("#ffffff", 0.16);
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    // top edge + left edge (partial bevel)
-    ctx.moveTo(x + 4, y + 1);
-    ctx.lineTo(x + w - 4, y + 1);
-    ctx.moveTo(x + 1, y + 4);
-    ctx.lineTo(x + 1, y + h - 4);
-    ctx.stroke();
-    // Dark bottom-right shadow
-    ctx.strokeStyle = "rgba(0,0,0,0.4)";
-    ctx.lineWidth = 3;
-    ctx.beginPath();
-    ctx.moveTo(x + w - 4, y + h - 1);
-    ctx.lineTo(x + 4, y + h - 1);
-    ctx.moveTo(x + w - 1, y + h - 4);
-    ctx.lineTo(x + w - 1, y + 4);
-    ctx.stroke();
-
-    // Group edge inset ring
-    ctx.strokeStyle = palette.groupEdge;
-    ctx.lineWidth = 1;
-    roundRect(ctx, x + 0.5, y + 0.5, w - 1, h - 1, 4);
+    roundRect(ctx, x + 0.5, y + 0.5, w - 1, h - 1, r);
     ctx.stroke();
   }
 
@@ -595,7 +556,7 @@ export function drawTile(
   }
 
   // ---- selected: inset 2px accent, inset 3px dark, brightness overlay ----
-  if (spec.selected && !isGroup) {
+  if (spec.selected) {
     // brightness ~1.18: translucent white overlay
     ctx.fillStyle = "rgba(255,255,255,0.12)";
     roundRectFill(ctx, x, y, w, h, r);
@@ -608,26 +569,15 @@ export function drawTile(
     ctx.lineWidth = 2;
     roundRect(ctx, x + 1, y + 1, w - 2, h - 2, Math.max(0, r - 1));
     ctx.stroke();
-  } else if (spec.selected && isGroup) {
-    ctx.strokeStyle = "rgba(0,0,0,0.55)";
-    ctx.lineWidth = 3;
-    roundRect(ctx, x + 1.5, y + 1.5, w - 3, h - 3, 3);
-    ctx.stroke();
-    ctx.strokeStyle = palette.groupAccent;
-    ctx.lineWidth = 2;
-    roundRect(ctx, x + 1, y + 1, w - 2, h - 2, 3);
-    ctx.stroke();
-    ctx.fillStyle = "rgba(255,255,255,0.08)";
-    roundRectFill(ctx, x, y, w, h, 4);
   }
 
   // ---- hovered (non-folded): brightness ~1.22 overlay + inset 1px white ring ----
   if (opts.hovered && !spec.folded) {
     ctx.fillStyle = "rgba(255,255,255,0.16)";
-    roundRectFill(ctx, x, y, w, h, isGroup ? 4 : r);
+    roundRectFill(ctx, x, y, w, h, r);
     ctx.strokeStyle = "rgba(255,255,255,0.3)";
     ctx.lineWidth = 1;
-    roundRect(ctx, x + 0.5, y + 0.5, w - 1, h - 1, isGroup ? 4 : r);
+    roundRect(ctx, x + 0.5, y + 0.5, w - 1, h - 1, r);
     ctx.stroke();
   }
 
