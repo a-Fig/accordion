@@ -165,9 +165,6 @@ export class Bear2HybridConductor implements Conductor {
 	 */
 	private failed: boolean = false;
 
-	/** Count of distinct blocks that hard-failed Bear-2 — surfaced in the loud failure status. */
-	private failureCount: number = 0;
-
 	// ── lifecycle ──────────────────────────────────────────────────────────────
 
 	attach(host: ConductorHost): void {
@@ -184,7 +181,6 @@ export class Bear2HybridConductor implements Conductor {
 		this.bear2InFlight = new Set();
 		this.bear2Retries = new Map();
 		this.failed = false;
-		this.failureCount = 0;
 		this.host = host;
 	}
 
@@ -209,7 +205,7 @@ export class Bear2HybridConductor implements Conductor {
 		// HARD-FAILED: freeze. Hold whatever was last applied, emit nothing new. The loud status
 		// is re-asserted so it stays visible. Only attach() clears `failed`.
 		if (this.failed) {
-			this.host.setStatus("⛔ Bear-2 FAILED — conductor halted", { failures: this.failureCount });
+			this.host.setStatus("⛔ Bear-2 FAILED — conductor halted");
 			return null;
 		}
 
@@ -454,10 +450,7 @@ export class Bear2HybridConductor implements Conductor {
 					if (next >= BEAR2_MAX_RETRIES) {
 						// HARD failure: this block failed twice. Freeze the whole conductor.
 						this.failed = true;
-						this.failureCount += 1;
-						host.setStatus("⛔ Bear-2 FAILED — conductor halted", {
-							failures: this.failureCount,
-						});
+						host.setStatus("⛔ Bear-2 FAILED — conductor halted");
 					}
 					// Else: TRANSIENT. Leave the block uncached so a later pass retries it once.
 					host.requestRerun();
