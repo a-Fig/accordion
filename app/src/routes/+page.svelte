@@ -19,6 +19,7 @@
 	import Inspector from "$lib/ui/map/Inspector.svelte";
 	import ConductorActivity from "$lib/ui/map/ConductorActivity.svelte";
 	import Icon from "$lib/ui/Icon.svelte";
+	import Logo from "$lib/ui/Logo.svelte";
 
 	let selectedId = $state<string | null>(null);
 	let manualPort = $state(DEFAULT_PORT);
@@ -199,32 +200,35 @@
 			{@const s = session.store}
 			<div class="app">
 				<header class="topbar">
+					<!-- Brand lockup: logo + wordmark -->
 					<div class="brand">
 						<span class="brand-icon">
-							<Icon name="accordion" size={20} stroke={1.75} />
+							<Logo size={20} />
 						</span>
 						<span class="wordmark">Accordion</span>
 						{#if foldAlarm.active}
 							<span class="alarm-dot" title={foldAlarm.detail || "View ↔ wire fold mismatch — the screen disagrees with what the agent would receive"}></span>
 						{/if}
-						<div class="divider"></div>
-						<div class="session-meta">
-							<span class="meta-title tnum">
-								{session.filePath ? baseName(session.filePath) : s.meta.title}
-							</span>
-							{#if isLive}
-								<span class="live-chip" class:steering={folding.enabled}>
-									<span class="live-dot" title={folding.enabled ? "Connected to pi; actively steering the agent's context" : "Connected to pi; passively watching the session"}></span>
-									<span class="live-label">{folding.enabled ? "listening & steering" : "listening"}</span>
-								</span>
-							{:else if isWatching}
-								<span class="live-chip">
-									<span class="live-dot" title="Tailing a read-only transcript; folds are a local lens"></span>
-									<span class="live-label">watching</span>
-								</span>
-							{/if}
-						</div>
 					</div>
+					<!-- Session identity: title + live/watching status -->
+					<div class="session-cluster">
+						<div class="divider"></div>
+						<span class="session-title">
+							{session.filePath ? baseName(session.filePath) : s.meta.title}
+						</span>
+						{#if isLive}
+							<span class="live-chip" class:steering={folding.enabled}>
+								<span class="live-dot" title={folding.enabled ? "Connected to pi; actively steering the agent's context" : "Connected to pi; passively watching the session"}></span>
+								<span class="live-label">{folding.enabled ? "steering" : "live"}</span>
+							</span>
+						{:else if isWatching}
+							<span class="live-chip">
+								<span class="live-dot" title="Tailing a read-only transcript; folds are a local lens"></span>
+								<span class="live-label">watching</span>
+							</span>
+						{/if}
+					</div>
+					<!-- Data readout: model · cwd · blocks (mono, smoke — these are metrics not prose) -->
 					<div class="meta-row">
 						<span class="meta-chip mono tnum">{s.meta.model || s.meta.format}</span>
 						{#if s.meta.cwd}
@@ -234,6 +238,7 @@
 						<span class="meta-sep">·</span>
 						<span class="meta-chip mono tnum">{s.blocks.length} blocks</span>
 					</div>
+					<!-- Nav actions -->
 					<div class="nav-row">
 						<button
 							class="nav-btn"
@@ -247,12 +252,12 @@
 						</button>
 						{#if live.status === "connected"}
 							<button class="nav-btn" onclick={disconnectLive}>
-								<Icon name="x" size={13} />
+								<Icon name="x" size={12} />
 								Disconnect
 							</button>
 						{:else if isTauriEnv}
 							<button class="nav-btn" onclick={openFile}>
-								<Icon name="folder" size={13} />
+								<Icon name="folder" size={12} />
 								Open…
 							</button>
 						{/if}
@@ -281,52 +286,64 @@
 			</div>
 		{:else}
 			<div class="fallback">
-				<div class="hero-plate">
-					<Icon name="accordion" size={40} stroke={1.5} />
-				</div>
-				<h1 class="hero-title">Accordion</h1>
-				<p class="sub">
-					{#if isTauriEnv}
-						{#if discovery.sessions.length}
-							Pick a live pi session on the left to watch its context.
+				<!-- Spectrum hairline wash — the brand's only color on the empty state -->
+				<div class="hero-spectrum" aria-hidden="true"></div>
+
+				<div class="hero-body">
+					<!-- Logo lockup: icon + wordmark as a unit -->
+					<div class="hero-lockup">
+						<span class="hero-logo"><Logo size={32} /></span>
+						<span class="hero-wordmark">Accordion</span>
+					</div>
+
+					<!-- The brand headline — large, confident, -2% tracking -->
+					<h1 class="hero-headline">Your session, intact.</h1>
+
+					<!-- Quiet sub-line: grounded, factual -->
+					<p class="hero-sub">
+						{#if isTauriEnv}
+							{#if discovery.sessions.length}
+								A live session is waiting on the left. Pick it to watch its context unfold.
+							{:else}
+								Fold old context. Keep momentum. Nothing in your session is deleted.
+							{/if}
 						{:else}
-							Context-window visualizer for pi and Claude Code sessions.
+							Fold old context. Keep momentum. Nothing in your session is deleted.
 						{/if}
-					{:else}
-						Context-window visualizer for pi and Claude Code sessions.
-					{/if}
-				</p>
-				{#if isTauriEnv}
-					<div class="action-group">
-						<button class="btn-primary" onclick={openFile}>
-							<Icon name="folder" size={14} />
-							Open session file…
-						</button>
-					</div>
-					<p class="hint">Or try the <strong>Demo session</strong> at the bottom of the sidebar.</p>
-				{:else}
-					<p class="hint">
-						Live session discovery is a desktop feature — run <code>npm run tauri dev</code>. In the browser you can
-						dial a known port or load the sample.
 					</p>
-					<div class="port-row">
-						<input class="port" type="number" min="1" max="65535" bind:value={manualPort} aria-label="pi port" />
-						<button
-							class="btn-primary"
-							onclick={() => connectLive(manualPort)}
-							disabled={live.status === "connecting"}
-						>
-							<Icon name="activity" size={14} />
-							{live.status === "connecting" ? "Connecting…" : "Connect to port"}
+
+					<!-- Primary + secondary actions -->
+					{#if isTauriEnv}
+						<div class="action-group">
+							<button class="btn-primary" onclick={openFile}>
+								<Icon name="folder" size={14} />
+								Open session file…
+							</button>
+						</div>
+						<p class="hint">Or open the <strong>Demo session</strong> at the bottom of the sidebar.</p>
+					{:else}
+						<p class="hint">
+							Live session discovery is a desktop feature — run <code>npm run tauri dev</code>. In the browser you can dial a known port or load the sample.
+						</p>
+						<div class="port-row">
+							<input class="port" type="number" min="1" max="65535" bind:value={manualPort} aria-label="pi port" />
+							<button
+								class="btn-primary"
+								onclick={() => connectLive(manualPort)}
+								disabled={live.status === "connecting"}
+							>
+								<Icon name="activity" size={14} />
+								{live.status === "connecting" ? "Connecting…" : "Connect to port"}
+							</button>
+						</div>
+						<button class="btn-secondary" onclick={loadSample}>
+							<Icon name="file-text" size={13} />
+							Load sample (982 blocks)
 						</button>
-					</div>
-					<button class="btn-ghost" onclick={loadSample}>
-						<Icon name="file-text" size={13} />
-						Load sample (982 blocks)
-					</button>
-				{/if}
-				{#if live.status === "error"}<p class="err">{live.detail}</p>{/if}
-				{#if session.error}<p class="err">{session.error}</p>{/if}
+					{/if}
+					{#if live.status === "error"}<p class="err">{live.detail}</p>{/if}
+					{#if session.error}<p class="err">{session.error}</p>{/if}
+				</div>
 			</div>
 		{/if}
 	</div>
@@ -353,70 +370,88 @@
 	}
 
 	/* ── Topbar ───────────────────────────────────────────────── */
+	/* Calm single-row chrome: brand lockup · divider · session title · status | data readout | nav */
 	.topbar {
+		position: relative;
 		display: flex;
 		align-items: center;
 		gap: var(--sp-3);
-		padding: 0 var(--sp-4);
+		padding: 0 var(--sp-5);
 		height: 44px;
 		border-bottom: 1px solid var(--line-soft);
 		background: var(--panel);
 		box-shadow: var(--shadow-1);
 		flex: 0 0 auto;
 	}
+	/* Smoky spectrum hairline along the bottom edge — brand spectrum kept low-key:
+	   1px tall, 20% opacity, faded at both ends so it's a wash, never a hard rainbow bar. */
+	.topbar::after {
+		content: "";
+		position: absolute;
+		left: 0;
+		right: 0;
+		bottom: 0;
+		height: 1px;
+		background: var(--gradient-spectrum);
+		opacity: 0.20;
+		-webkit-mask-image: linear-gradient(90deg, transparent, #000 15%, #000 85%, transparent);
+		mask-image: linear-gradient(90deg, transparent, #000 15%, #000 85%, transparent);
+		pointer-events: none;
+	}
 
-	/* Brand cluster: icon + wordmark + divider + session title */
+	/* Brand lockup: icon + wordmark (sits on the left, flex-shrink:0) */
 	.brand {
 		display: flex;
 		align-items: center;
 		gap: var(--sp-2);
-		min-width: 0;
-		flex: 1;
+		flex: 0 0 auto;
 	}
 	.brand-icon {
 		color: var(--accent);
 		display: flex;
 		align-items: center;
-		flex: 0 0 auto;
 	}
 	.wordmark {
+		font-family: var(--sans);
 		font-size: var(--fs-md);
 		font-weight: 700;
 		color: var(--text);
 		letter-spacing: -0.02em;
-		flex: 0 0 auto;
 		line-height: 1;
+	}
+
+	/* Session identity cluster: divider + title + live/watching chip.
+	   Fills available space, truncates title gracefully. */
+	.session-cluster {
+		display: flex;
+		align-items: center;
+		gap: var(--sp-2);
+		flex: 1;
+		min-width: 0;
 	}
 	.divider {
 		width: 1px;
 		height: 16px;
 		background: var(--line);
 		flex: 0 0 auto;
-		margin: 0 var(--sp-1);
 	}
-	.session-meta {
-		display: flex;
-		align-items: center;
-		gap: var(--sp-2);
-		min-width: 0;
-	}
-	.meta-title {
+	.session-title {
 		font-size: var(--fs-sm);
 		font-weight: 500;
 		color: var(--muted);
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
-		max-width: 38vw;
+		min-width: 0;
 	}
 
 	/* Live / Watching chip — colour driven by --chip so both states share one rule.
-	   Preview (default) and Watching = blue; Steering (folding armed) = green. */
+	   Preview + Watching = neutral accent; Steering (folding armed) = green (--ok). */
 	.live-chip {
 		--chip: var(--accent);
 		display: inline-flex;
 		align-items: center;
-		gap: 4px;
+		gap: 5px;
 		flex: 0 0 auto;
 	}
 	.live-chip.steering {
@@ -430,8 +465,8 @@
 	.live-dot {
 		position: relative;
 		display: inline-block;
-		width: 7px;
-		height: 7px;
+		width: 6px;
+		height: 6px;
 		border-radius: 50%;
 		background: var(--chip);
 		flex: 0 0 auto;
@@ -446,16 +481,18 @@
 		pointer-events: none;
 	}
 	.live-label {
-		font-size: var(--fs-xs);
+		font-family: var(--mono);
+		font-size: var(--fs-2xs);
 		font-weight: 600;
 		color: var(--chip);
-		letter-spacing: 0.06em;
+		letter-spacing: 0.10em;
+		text-transform: uppercase;
 		line-height: 1;
 	}
 
 	/* View↔wire fold-mismatch alarm — a single header dot, exempt from the grid
-	   perf rule (that's about the 982-tile grid, not a lone indicator). Kept
-	   compositor-only (transform + opacity) like .live-dot; slower 3s pulse. */
+	   perf rule (about the 982-tile canvas, not a lone indicator).
+	   Compositor-only (transform + opacity); slower 3s pulse. */
 	@keyframes alarmpulse {
 		0% { transform: scale(1); opacity: 0.5; }
 		70%, 100% { transform: scale(2.6); opacity: 0; }
@@ -463,8 +500,8 @@
 	.alarm-dot {
 		position: relative;
 		display: inline-block;
-		width: 7px;
-		height: 7px;
+		width: 6px;
+		height: 6px;
 		border-radius: 50%;
 		background: var(--danger);
 		flex: 0 0 auto;
@@ -479,7 +516,7 @@
 		pointer-events: none;
 	}
 
-	/* Meta chips row (model · cwd · blocks) */
+	/* Data readout: model · cwd · blocks — mono, smoke; these are metrics not prose */
 	.meta-row {
 		display: flex;
 		align-items: center;
@@ -494,11 +531,11 @@
 	.meta-sep {
 		font-size: var(--fs-xs);
 		color: var(--faint);
-		opacity: 0.5;
+		opacity: 0.4;
 		user-select: none;
 	}
 
-	/* Nav buttons */
+	/* Nav buttons — outline secondary: transparent bg, --line-strong border */
 	.nav-row {
 		display: flex;
 		align-items: center;
@@ -508,14 +545,14 @@
 	.nav-btn {
 		display: inline-flex;
 		align-items: center;
-		gap: var(--sp-1);
-		font-size: var(--fs-sm);
+		gap: 5px;
+		font-size: var(--fs-xs);
 		font-weight: 500;
 		color: var(--muted);
-		background: var(--panel-3);
-		border: 1px solid var(--line);
+		background: transparent;
+		border: 1px solid var(--line-strong);
 		border-radius: var(--radius-sm);
-		padding: 5px var(--sp-3);
+		padding: 4px var(--sp-3);
 		cursor: pointer;
 		white-space: nowrap;
 		transition: color var(--dur-fast) var(--ease-out),
@@ -524,8 +561,8 @@
 	}
 	.nav-btn:hover {
 		color: var(--text);
-		background: var(--panel-4);
-		border-color: var(--line-strong);
+		background: var(--accent-soft);
+		border-color: var(--accent);
 	}
 	.nav-btn.active {
 		color: var(--accent);
@@ -557,55 +594,85 @@
 	}
 
 	/* ── Fallback / empty state ───────────────────────────────── */
+	/* Full-height centered layout. The spectrum wash sits at bottom via absolute. */
 	.fallback {
+		position: relative;
 		height: 100%;
 		display: flex;
 		flex-direction: column;
 		align-items: center;
 		justify-content: center;
-		gap: var(--sp-3);
-		padding: var(--sp-5);
+		padding: var(--sp-7) var(--sp-5);
 		text-align: center;
+		overflow: hidden;
 	}
 
-	/* Hero icon plate */
-	.hero-plate {
-		width: 80px;
-		height: 80px;
-		border-radius: var(--radius-lg);
-		background: var(--accent-soft);
-		border: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
+	/* Smoky spectrum wash — the ONLY color on the empty state.
+	   Placed at the bottom of the viewport, fading toward near-zero opacity at the top.
+	   Blurs slightly to keep it from being a hard stripe. Never more than ~18% opacity. */
+	.hero-spectrum {
+		position: absolute;
+		left: 0;
+		right: 0;
+		bottom: 0;
+		height: 220px;
+		background: var(--gradient-spectrum);
+		opacity: 0.10;
+		-webkit-mask-image: linear-gradient(to top, rgba(0,0,0,0.55) 0%, transparent 100%);
+		mask-image: linear-gradient(to top, rgba(0,0,0,0.55) 0%, transparent 100%);
+		filter: blur(24px);
+		pointer-events: none;
+	}
+
+	/* Inner body: logo lockup → headline → sub → actions — centered column */
+	.hero-body {
+		position: relative;  /* above the spectrum wash */
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: var(--sp-4);
+		max-width: 480px;
+	}
+
+	/* Logo lockup: icon + wordmark inline, like page-01 of the brand guidelines */
+	.hero-lockup {
+		display: inline-flex;
+		align-items: center;
+		gap: var(--sp-3);
+	}
+	.hero-logo {
+		color: var(--accent);
 		display: flex;
 		align-items: center;
-		justify-content: center;
-		color: var(--accent);
-		box-shadow: var(--shadow-2);
-		margin-bottom: var(--sp-1);
 	}
-
-	.hero-title {
-		font-size: var(--fs-2xl);
+	.hero-wordmark {
+		font-family: var(--sans);
+		font-size: var(--fs-xl);
 		font-weight: 700;
 		color: var(--text);
-		letter-spacing: -0.03em;
-		margin: 0;
-		line-height: 1.1;
+		letter-spacing: -0.02em;
+		line-height: 1;
 	}
-	.sub {
+
+	/* The headline — large, confident, -2% tracking. Scale above --fs-2xl (24px).
+	   This is the brand moment: "Your session, intact." as per page-01. */
+	.hero-headline {
+		font-family: var(--sans);
+		font-size: clamp(var(--fs-2xl), 4vw, 40px);
+		font-weight: 600;
+		color: var(--text);
+		letter-spacing: -0.02em;
+		line-height: 1.08;
+		margin: 0;
+	}
+
+	/* Quiet sub-line — calm, factual, never hype */
+	.hero-sub {
 		font-size: var(--fs-base);
 		color: var(--muted);
 		margin: 0;
-		max-width: 400px;
+		max-width: 360px;
 		line-height: 1.55;
-	}
-	.hint code {
-		font-family: var(--mono);
-		font-size: var(--fs-xs);
-		background: var(--panel-2);
-		color: var(--muted);
-		padding: 1px 5px;
-		border-radius: var(--radius-sm);
-		border: 1px solid var(--line);
 	}
 
 	/* Action group */
@@ -616,52 +683,53 @@
 		margin-top: var(--sp-1);
 	}
 
-	/* Primary CTA */
+	/* Primary CTA — Paper solid: white surface, Ink text (brand's one bright affordance) */
 	.btn-primary {
 		display: inline-flex;
 		align-items: center;
 		gap: var(--sp-2);
-		background: var(--accent-soft);
-		color: var(--accent);
-		border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
-		padding: 9px var(--sp-4);
+		background: var(--paper);
+		color: var(--ink);
+		border: 1px solid var(--paper);
+		padding: 10px var(--sp-5);
 		border-radius: var(--radius-sm);
+		font-family: var(--sans);
 		font-size: var(--fs-md);
 		font-weight: 600;
 		cursor: pointer;
 		transition: background var(--dur-fast) var(--ease-out),
-		            border-color var(--dur-fast) var(--ease-out),
-		            color var(--dur-fast) var(--ease-out);
+		            border-color var(--dur-fast) var(--ease-out);
 	}
 	.btn-primary:hover {
-		background: color-mix(in srgb, var(--accent) 22%, transparent);
-		border-color: color-mix(in srgb, var(--accent) 50%, transparent);
-		color: var(--accent-hover);
+		background: #ffffff;
+		border-color: #ffffff;
 	}
 	.btn-primary:disabled {
 		opacity: 0.45;
 		cursor: default;
 	}
 
-	/* Ghost secondary */
-	.btn-ghost {
+	/* Secondary — outline: transparent bg, --line-strong border */
+	.btn-secondary {
 		display: inline-flex;
 		align-items: center;
 		gap: var(--sp-1);
 		background: transparent;
-		border: 1px solid var(--line);
-		color: var(--faint);
-		padding: 7px var(--sp-3);
+		border: 1px solid var(--line-strong);
+		color: var(--muted);
+		padding: 9px var(--sp-4);
 		border-radius: var(--radius-sm);
 		font-size: var(--fs-sm);
 		font-weight: 500;
 		cursor: pointer;
 		transition: color var(--dur-fast) var(--ease-out),
+		            background var(--dur-fast) var(--ease-out),
 		            border-color var(--dur-fast) var(--ease-out);
 	}
-	.btn-ghost:hover {
-		color: var(--muted);
-		border-color: var(--line-strong);
+	.btn-secondary:hover {
+		color: var(--text);
+		background: var(--accent-soft);
+		border-color: var(--accent);
 	}
 
 	/* Port row (browser dev mode) */
@@ -691,6 +759,15 @@
 	.hint strong {
 		color: var(--muted);
 		font-weight: 600;
+	}
+	.hint code {
+		font-family: var(--mono);
+		font-size: var(--fs-xs);
+		background: var(--panel-2);
+		color: var(--muted);
+		padding: 1px 5px;
+		border-radius: var(--radius-xs);
+		border: 1px solid var(--line);
 	}
 
 	.fallback .err {

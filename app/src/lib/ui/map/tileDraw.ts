@@ -46,7 +46,6 @@ export type Palette = {
   accent: string;
   accentDim: string;
   group: string;
-  groupEdge: string;
   groupAccent: string;
 };
 
@@ -82,17 +81,16 @@ export function readPalette(): Palette {
   const v = (name: string) => s.getPropertyValue(name).trim();
   return {
     kindColors: {
-      user: v("--k-user") || "#6ea8fe",
-      text: v("--k-text") || "#aab2c2",
-      thinking: v("--k-thinking") || "#b483e0",
-      tool_call: v("--k-tool_call") || "#34d3c2",
-      tool_result: v("--k-tool_result") || "#f0a35e",
+      user: v("--k-user") || "#044EFF",
+      text: v("--k-text") || "#1AA6E8",
+      thinking: v("--k-thinking") || "#B480DF",
+      tool_call: v("--k-tool_call") || "#21D4C1",
+      tool_result: v("--k-tool_result") || "#E19C7D",
     },
-    accent: v("--accent") || "#6ea8fe",
+    accent: v("--accent") || "#E8E8E8",
     accentDim: v("--accent-dim") || "#2d4a7a",
-    group: v("--group") || "#6f4a32",
-    groupEdge: v("--group-edge") || "#9c6b43",
-    groupAccent: v("--group-accent") || "#d39455",
+    group: v("--group") || "#7C5230",
+    groupAccent: v("--group-accent") || "#E8E8E8",
   };
 }
 
@@ -270,13 +268,27 @@ export function getSprites(): Map<number, HTMLCanvasElement> | null {
 // no clip(), no line loop in the hot path.
 // ---------------------------------------------------------------------------
 
-/** Memoized saturate(0.5) — keyed by source hex. At most ~6 entries. */
-const _desatMemo = new Map<string, string>();
-function desaturateCached(hex: string): string {
-  let v = _desatMemo.get(hex);
+/**
+ * Folded "color-drain" (the #1 brand signal — see reface-spec / page-14).
+ *
+ * A folded block recedes to a near-black, recessed square carrying only the
+ * FAINTEST ghost of its kind hue. We blend ~`mix` of the kind color over a
+ * near-black Ink base (`DRAIN_BASE`) — the result lands around #151515–#1A1A1A
+ * with just enough hue to read which kind it was, never the old "0.4 alpha of
+ * full saturation." Done here in JS (memoized, ≤6 entries) so the hot draw loop
+ * stays a flat fill — NO ctx.filter, NO per-tile gradient. */
+const DRAIN_BASE: [number, number, number] = [0x14, 0x14, 0x14]; // Ink-ish #141414
+const DRAIN_MIX = 0.15; // ghost of the hue: ~15% kind color over near-black
+const _drainMemo = new Map<string, string>();
+function drainCached(hex: string): string {
+  let v = _drainMemo.get(hex);
   if (v === undefined) {
-    v = desaturate(hex, 0.5);
-    _desatMemo.set(hex, v);
+    const [r, g, b] = parseHex(hex);
+    const nr = DRAIN_BASE[0] + (r - DRAIN_BASE[0]) * DRAIN_MIX;
+    const ng = DRAIN_BASE[1] + (g - DRAIN_BASE[1]) * DRAIN_MIX;
+    const nb = DRAIN_BASE[2] + (b - DRAIN_BASE[2]) * DRAIN_MIX;
+    v = toRgb(nr, ng, nb);
+    _drainMemo.set(hex, v);
   }
   return v;
 }
@@ -426,7 +438,7 @@ export function drawTile(
   opts: { hovered: boolean; dpr?: number } = { hovered: false },
 ): void {
   const { x, y, w, h } = rect;
-  const r = 3; // border-radius: 3px (cells), 4px (group-tile) — use 3 for most
+  const r = 3; // border-radius: 3px (uniform for all tiles including groups)
 
   // ---- vacated: transparent, 1px dashed accent ring, no fill ----
   if (spec.kind === "vacated") {
@@ -469,24 +481,19 @@ export function drawTile(
     ? palette.group
     : palette.kindColors[spec.kind as BlockKind];
 
-  // Folded: desaturate — but restore full saturation on hover (matches old CSS
-  // `.cell.folded:hover { filter: saturate(1) brightness(1.1) }`).
+  // Folded: color-DRAIN to a near-black recessed square (the brand signal —
+  // the color drained out). On hover, restore the full vivid kind color so the
+  // human can momentarily "light up" a folded block to read which kind it was.
   let baseColor = rawColor;
-  if (spec.folded && !opts.hovered) {
-    baseColor = desaturateCached(rawColor);
+  if (spec.folded && !isGroup) {
+    baseColor = opts.hovered ? rawColor : drainCached(rawColor);
   }
 
   // ---- base rounded rect fill ----
   ctx.save();
 
-  if (spec.folded) {
-    // folded: recessed but still legibly COLORED (live=1.0, so this still reads
-    // as dimmer/recessed); full brightness on hover.
-    ctx.globalAlpha = opts.hovered ? 0.85 : 0.46;
-  }
-
   ctx.fillStyle = baseColor;
-  roundRectFill(ctx, x, y, w, h, isGroup ? 4 : r);
+  roundRectFill(ctx, x, y, w, h, r);
 
   // ---- folded hatch — blit the baked sprite (no per-tile clip()/loop) ----
   if (spec.folded) {
@@ -501,36 +508,7 @@ export function drawTile(
   if (!spec.folded || opts.hovered) {
     ctx.strokeStyle = "rgba(0,0,0,0.22)";
     ctx.lineWidth = 1;
-    roundRect(ctx, x + 0.5, y + 0.5, w - 1, h - 1, isGroup ? 4 : r);
-    ctx.stroke();
-  }
-
-  // ---- group bevel: inset lighter top-left, darker bottom-right ----
-  if (isGroup) {
-    // Light top-left highlight
-    ctx.strokeStyle = hexWithAlpha("#ffffff", 0.16);
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    // top edge + left edge (partial bevel)
-    ctx.moveTo(x + 4, y + 1);
-    ctx.lineTo(x + w - 4, y + 1);
-    ctx.moveTo(x + 1, y + 4);
-    ctx.lineTo(x + 1, y + h - 4);
-    ctx.stroke();
-    // Dark bottom-right shadow
-    ctx.strokeStyle = "rgba(0,0,0,0.4)";
-    ctx.lineWidth = 3;
-    ctx.beginPath();
-    ctx.moveTo(x + w - 4, y + h - 1);
-    ctx.lineTo(x + 4, y + h - 1);
-    ctx.moveTo(x + w - 1, y + h - 4);
-    ctx.lineTo(x + w - 1, y + 4);
-    ctx.stroke();
-
-    // Group edge inset ring
-    ctx.strokeStyle = palette.groupEdge;
-    ctx.lineWidth = 1;
-    roundRect(ctx, x + 0.5, y + 0.5, w - 1, h - 1, 4);
+    roundRect(ctx, x + 0.5, y + 0.5, w - 1, h - 1, r);
     ctx.stroke();
   }
 
@@ -541,8 +519,11 @@ export function drawTile(
   const spriteCanvas = sprites.get(spec.face);
   if (spriteCanvas) {
     if (spec.folded) {
+      // Drained tiles read as near-black recessed squares — keep the pips a faint
+      // ghost (the weight is still legible up close) so the tile doesn't sprout
+      // loud white dots that fight the drain. Hover relights toward full.
       ctx.save();
-      ctx.globalAlpha = opts.hovered ? 0.75 : 0.55;
+      ctx.globalAlpha = opts.hovered ? 0.7 : 0.22;
       ctx.drawImage(spriteCanvas, x, y, w, h);
       ctx.restore();
     } else {
@@ -560,7 +541,7 @@ export function drawTile(
 
   // ---- inrange: group-accent ring + group-accent fill tint ----
   if (spec.inrange) {
-    // Warm fill tint (~30% group-accent over the tile)
+    // Smoke-grey fill tint (~30% group-accent over the tile)
     ctx.fillStyle = hexWithAlpha(palette.groupAccent, 0.3);
     roundRectFill(ctx, x, y, w, h, r);
     // Double inset ring: 3px dark then 2px group-accent
@@ -575,7 +556,7 @@ export function drawTile(
   }
 
   // ---- selected: inset 2px accent, inset 3px dark, brightness overlay ----
-  if (spec.selected && !isGroup) {
+  if (spec.selected) {
     // brightness ~1.18: translucent white overlay
     ctx.fillStyle = "rgba(255,255,255,0.12)";
     roundRectFill(ctx, x, y, w, h, r);
@@ -588,26 +569,15 @@ export function drawTile(
     ctx.lineWidth = 2;
     roundRect(ctx, x + 1, y + 1, w - 2, h - 2, Math.max(0, r - 1));
     ctx.stroke();
-  } else if (spec.selected && isGroup) {
-    ctx.strokeStyle = "rgba(0,0,0,0.55)";
-    ctx.lineWidth = 3;
-    roundRect(ctx, x + 1.5, y + 1.5, w - 3, h - 3, 3);
-    ctx.stroke();
-    ctx.strokeStyle = palette.groupAccent;
-    ctx.lineWidth = 2;
-    roundRect(ctx, x + 1, y + 1, w - 2, h - 2, 3);
-    ctx.stroke();
-    ctx.fillStyle = "rgba(255,255,255,0.08)";
-    roundRectFill(ctx, x, y, w, h, 4);
   }
 
   // ---- hovered (non-folded): brightness ~1.22 overlay + inset 1px white ring ----
   if (opts.hovered && !spec.folded) {
     ctx.fillStyle = "rgba(255,255,255,0.16)";
-    roundRectFill(ctx, x, y, w, h, isGroup ? 4 : r);
+    roundRectFill(ctx, x, y, w, h, r);
     ctx.strokeStyle = "rgba(255,255,255,0.3)";
     ctx.lineWidth = 1;
-    roundRect(ctx, x + 0.5, y + 0.5, w - 1, h - 1, isGroup ? 4 : r);
+    roundRect(ctx, x + 0.5, y + 0.5, w - 1, h - 1, r);
     ctx.stroke();
   }
 
@@ -674,6 +644,6 @@ function hexWithAlpha(hex: string, alpha: number): string {
     const [r, g, b] = parseHex(hex);
     return `rgba(${r},${g},${b},${alpha})`;
   } catch {
-    return `rgba(110,168,254,${alpha})`;
+    return `rgba(232,232,232,${alpha})`;
   }
 }

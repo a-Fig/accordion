@@ -35,7 +35,7 @@
 		border: 1px solid var(--line);
 		border-radius: var(--radius-sm);
 		padding: 3px;
-		gap: 3px;
+		gap: 2px;
 		flex: 0 0 auto;
 	}
 	.seg-pill {
@@ -45,12 +45,13 @@
 		background: transparent;
 		border: none;
 		color: var(--muted);
+		font-family: var(--sans);
 		font-size: var(--fs-xs);
 		font-weight: 500;
 		line-height: 1.4;
 		letter-spacing: 0.01em;
-		padding: var(--sp-1) var(--sp-2);
-		border-radius: calc(var(--radius-sm) - 2px);
+		padding: var(--sp-1) var(--sp-3);
+		border-radius: calc(var(--radius-sm) - 3px);
 		transition:
 			background var(--dur-fast) var(--ease-out),
 			color var(--dur-fast) var(--ease-out),
@@ -60,7 +61,6 @@
 	}
 	.seg-pill:hover {
 		color: var(--text);
-		background: var(--panel-3);
 	}
 	.seg-pill.on {
 		background: var(--panel-4);

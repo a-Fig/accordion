@@ -5,7 +5,6 @@
 	import type { BlockKind } from "../../engine/types";
 	import { ghosts } from "../../live/ghostState.svelte";
 	import { nextVacated } from "./drain";
-	import AnimatedNumber from "$lib/ui/AnimatedNumber.svelte";
 	import { buildDisplay, segmentDisplay, buildLane, type DisplayRow } from "$lib/engine/display";
 	import { settings } from "$lib/settings.svelte";
 	import Icon from "$lib/ui/Icon.svelte";
@@ -59,6 +58,17 @@
 	] as const;
 	// Use the canonical faceFor from tileDraw (single source of truth).
 	const faceFor = faceForLib;
+
+	// Color = kind legend (toolbar). Each block kind owns one spectrum hue (--k-*);
+	// this names them so the grid's colours are self-explaining. Order follows the
+	// conversation grammar: you → reply → thinking → tool call → tool result.
+	const KINDS: { kind: BlockKind; lbl: string }[] = [
+		{ kind: "user", lbl: "user" },
+		{ kind: "text", lbl: "reply" },
+		{ kind: "thinking", lbl: "thinking" },
+		{ kind: "tool_call", lbl: "tool call" },
+		{ kind: "tool_result", lbl: "tool result" },
+	];
 	// Legend hover: reveal a face's token range the instant the cursor crosses a die
 	// (pointerenter per die — no native-title delay), so values surface even mid-move.
 	let hoveredFace = $state<number | null>(null);
@@ -74,10 +84,6 @@
 	const protectedFrom = $derived(store.protectedFromIndex);
 	const olderTiles = $derived(tiles.slice(0, protectedFrom));
 	const protectedTiles = $derived(tiles.slice(protectedFrom));
-	// live (effective) token weight in each box — shown as a vertical tally on the
-	// box's left rail. The protected tail never folds, so its eff == full.
-	const olderTok = $derived(olderTiles.reduce((s, t) => s + store.effTokens(t.b), 0));
-	const protTok = $derived(protectedTiles.reduce((s, t) => s + t.b.tokens, 0));
 
 	// ---- PEEK: pure UI-local "open for viewing" state (the redesign). -------------
 	// A group id in `peeked` renders its members OPEN-but-DULL while the group stays
@@ -856,6 +862,19 @@
 				</div>
 			</div>
 
+			<div class="tb-divider"></div>
+
+			<!-- Color = kind legend: what each block colour means. Sits beside the WEIGHT
+			     dice so the two grammars (colour = kind, pips = weight) read together. -->
+			<div class="kinds">
+				<span class="tlbl">KIND</span>
+				{#each KINDS as kd}
+					<span class="kind-pair" title={kd.lbl}>
+						<i class="ksw k-{kd.kind}"></i><span class="ksw-lbl">{kd.lbl}</span>
+					</span>
+				{/each}
+			</div>
+
 			<span class="grow"></span>
 
 			<!-- Range-select chip / hint.
@@ -977,9 +996,6 @@
 			<div class="boxes" style:--cell="{cell}px" style:--cols={cols}>
 				{#if olderTiles.length}
 					<section class="box older">
-						<div class="rail" title="{olderTok.toLocaleString()} live tokens · foldable">
-							<span class="tok"><AnimatedNumber value={olderTok} format={k} /></span>
-						</div>
 						<div class="stack">
 							{#each segments as seg, segIdx (seg.kind === "band" ? "band-" + seg.row.group.id : "tiles-" + (seg.rows[0].type === "block" ? seg.rows[0].block.id : seg.rows[0].group.id))}
 								{#if seg.kind === "tiles"}
@@ -1025,7 +1041,7 @@
 											     the cocoa owns peek/collapse via data-group, like the old group tile). -->
 											<div class="fold-cluster" data-cluster-ids={item.members.map((m) => m.id).join(",")}>
 												<div
-													class="cell face f{store.isDropGroup(g) ? 0 : faceFor(store.groupLiveTokens(g))} summary-tile"
+													class="cell face f{store.isDropGroup(g) ? 0 : faceFor(store.groupLiveTokens(g))} summary-tile group-cocoa"
 													class:drop-group={store.isDropGroup(g)}
 													class:sel={selectedId === g.id}
 													style:width="{cell}px"
@@ -1083,12 +1099,8 @@
 				{/if}
 				{#if protSpecs.length}
 				<section class="box prot">
-					<div class="rail" title="{protTok.toLocaleString()} tokens · protected working tail">
-						<span class="tok"><AnimatedNumber value={protTok} format={k} /></span>
-					</div>
 					<!-- Single canvas for prot box: vacated placeholders + protected tiles + ghosts.
-					     The wrapper div takes flex: 1 (matching the old .grid) so the canvas
-					     fills the box horizontally after the token rail. -->
+					     The wrapper div takes flex: 1 so the canvas fills the box horizontally. -->
 					<div class="canvas-fill">
 						<TileCanvas
 							bind:this={canvasRefs["prot"]}
@@ -1218,12 +1230,42 @@
 		gap: var(--sp-2);
 	}
 	.tlbl {
+		font-family: var(--mono);
 		font-size: var(--fs-2xs);
-		font-weight: 600;
-		letter-spacing: 0.07em;
+		letter-spacing: 0.12em;
 		color: var(--faint);
 		text-transform: uppercase;
 	}
+	/* ---- color = kind legend ---- */
+	.kinds {
+		display: inline-flex;
+		align-items: center;
+		gap: var(--sp-2);
+		min-width: 0;
+	}
+	.kind-pair {
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
+		white-space: nowrap;
+	}
+	.ksw {
+		width: 10px;
+		height: 10px;
+		border-radius: 3px;
+		flex: 0 0 auto;
+		box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.25);
+	}
+	.ksw.k-user { background: var(--k-user); }
+	.ksw.k-text { background: var(--k-text); }
+	.ksw.k-thinking { background: var(--k-thinking); }
+	.ksw.k-tool_call { background: var(--k-tool_call); }
+	.ksw.k-tool_result { background: var(--k-tool_result); }
+	.ksw-lbl {
+		font-size: var(--fs-xs);
+		color: var(--muted);
+	}
+
 	/* bare dice — no surrounding bubble; anchors the hover tooltip. gap(4)+die(16)=20px
 	   step, which the .die-pop left offset mirrors. */
 	.tier-strip {
@@ -1302,7 +1344,10 @@
 		gap: 5px;
 	}
 	.sw-lbl {
-		font-size: var(--fs-xs);
+		font-family: var(--mono);
+		font-size: var(--fs-2xs);
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
 		color: var(--faint);
 	}
 	.sw {
@@ -1310,12 +1355,18 @@
 		height: 9px;
 		border-radius: 2px;
 		display: inline-block;
-		background: var(--k-thinking);
 		flex: 0 0 auto;
 	}
+	/* live swatch: a vivid full-saturation kind pop (teal = the live-context hue). */
+	.sw.solid {
+		background: var(--k-tool_call);
+	}
+	/* folded swatch: the color-DRAIN — near-black with the faintest ghost of hue,
+	   plus the faint hatch. Mirrors a folded tile (DRAIN_MIX = 0.15). */
 	.sw.hatch {
-		opacity: 0.55;
-		background-image: repeating-linear-gradient(45deg, rgba(0, 0, 0, 0.55) 0 1.5px, transparent 1.5px 4px);
+		background-color: color-mix(in srgb, var(--k-tool_call) 15%, #141414);
+		background-image: repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.06) 0 1px, transparent 1px 5px);
+		box-shadow: inset 0 0 0 1px var(--line-soft);
 	}
 
 	/* ---- density control ---- */
@@ -1361,13 +1412,13 @@
 		color: var(--muted);
 	}
 
-	/* ---- range selection toolbar affordances — warm amber "building" chip ---- */
+	/* ---- range selection toolbar affordances — smoke-grey "building" chip ---- */
 	.range-bar {
 		display: inline-flex;
 		align-items: center;
 		gap: var(--sp-2);
 	}
-	/* Counter chip: pill shape, amber family, signals "forming a new object". */
+	/* Counter chip: pill shape, group-accent (smoke) family, signals "forming a new object". */
 	.range-chip {
 		display: inline-flex;
 		align-items: center;
@@ -1394,36 +1445,37 @@
 	.range-bar.err .range-chip {
 		border-color: color-mix(in srgb, var(--danger) 60%, transparent);
 	}
+	/* Primary action — the brand Paper-solid button (white-on-ink, weight 600). */
 	.group-btn {
-		background: var(--group-accent);
-		color: var(--group-ink);
-		border: none;
+		background: var(--paper);
+		color: var(--ink);
+		border: 1px solid var(--paper);
 		border-radius: var(--radius-sm);
 		font-size: var(--fs-xs);
-		font-weight: 700;
+		font-weight: 600;
 		padding: 4px 12px;
 		cursor: pointer;
-		transition: filter var(--dur-fast) var(--ease-out);
+		transition: background var(--dur-fast) var(--ease-out);
 	}
 	.group-btn:hover {
-		filter: brightness(1.1);
+		background: #fff;
 	}
+	/* Secondary action — outline button per the brand button system. */
 	.range-clear {
 		display: flex;
 		align-items: center;
 		justify-content: center;
 		background: transparent;
-		border: 1px solid var(--line);
-		color: var(--muted);
+		border: 1px solid var(--line-strong);
+		color: var(--text);
 		border-radius: var(--radius-sm);
 		padding: 4px 6px;
 		cursor: pointer;
-		transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+		transition: background var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out);
 	}
 	.range-clear:hover {
-		color: var(--text);
-		background: var(--panel-3);
-		border-color: var(--line-strong);
+		border-color: var(--accent);
+		background: var(--accent-soft);
 	}
 	.range-hint {
 		font-size: var(--fs-xs);
@@ -1473,35 +1525,8 @@
 		background: var(--panel-2);
 		padding: var(--sp-3);
 		display: flex;
+		flex-direction: column;
 		align-items: stretch;
-		gap: var(--sp-2);
-	}
-	/* left rail: a small vertical token tally for the box */
-	.rail {
-		flex: 0 0 auto;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		writing-mode: vertical-rl;
-		transform: rotate(180deg);
-		font-variant-numeric: tabular-nums;
-		font-size: var(--fs-2xs);
-		font-weight: 600;
-		letter-spacing: 0.06em;
-		text-transform: uppercase;
-		color: var(--faint);
-		user-select: none;
-		gap: 4px;
-	}
-	.rail .tok {
-		font-weight: 700;
-		font-size: var(--fs-xs);
-		letter-spacing: 0.04em;
-		text-transform: none;
-	}
-	/* prot rail uses an accent tint to signal the protected-tail identity */
-	.box.prot .rail {
-		color: color-mix(in srgb, var(--accent) 65%, var(--muted));
 	}
 	/* the protected box: meaningfully thicker, accented frame = protection signal.
 	   Keep this visually distinct — it's a key part of the visual grammar. */
@@ -1546,15 +1571,32 @@
 	.cell.k-thinking { background: var(--k-thinking); }
 	.cell.k-tool_call { background: var(--k-tool_call); }
 	.cell.k-tool_result { background: var(--k-tool_result); }
+	/* Folded band members mirror the canvas color-DRAIN: a near-black recessed
+	   square carrying only the faintest ghost of the kind hue (~15% over Ink,
+	   matching DRAIN_MIX in tileDraw.ts). No opacity/saturate dimming of full
+	   color — the drained fill IS the recession. Hover relights to full kind. */
 	.cell.folded {
-		opacity: 0.36;
-		filter: saturate(0.5);
 		background-image: repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.06) 0 1px, transparent 1px 5px);
 	}
+	.cell.folded.k-user { background-color: color-mix(in srgb, var(--k-user) 15%, #141414); }
+	.cell.folded.k-text { background-color: color-mix(in srgb, var(--k-text) 15%, #141414); }
+	.cell.folded.k-thinking { background-color: color-mix(in srgb, var(--k-thinking) 15%, #141414); }
+	.cell.folded.k-tool_call { background-color: color-mix(in srgb, var(--k-tool_call) 15%, #141414); }
+	.cell.folded.k-tool_result { background-color: color-mix(in srgb, var(--k-tool_result) 15%, #141414); }
+	/* On a drained tile the dice pips read as a faint ghost (weight still legible
+	   up close) rather than loud white dots; hover relights them. Mirrors the
+	   folded-pip alpha in tileDraw.ts (0.22 → 0.7 on hover). */
+	.cell.folded.face::before { opacity: 0.22; }
+	.cell.folded.face:hover::before { opacity: 0.7; }
 	.cell.folded:hover {
-		opacity: 0.85;
-		filter: saturate(1) brightness(1.1);
+		filter: none;
+		background-image: none;
 	}
+	.cell.folded.k-user:hover { background-color: var(--k-user); }
+	.cell.folded.k-text:hover { background-color: var(--k-text); }
+	.cell.folded.k-thinking:hover { background-color: var(--k-thinking); }
+	.cell.folded.k-tool_call:hover { background-color: var(--k-tool_call); }
+	.cell.folded.k-tool_result:hover { background-color: var(--k-tool_result); }
 	.cell.pinned {
 		box-shadow: inset 0 0 0 2px #fff;
 	}
@@ -1631,24 +1673,22 @@
 	/* The collapsed group tile in tile grids is now drawn on canvas (no DOM .group-tile
 	   needed there). Only .group-tile-open (the dull parent inside the band) remains DOM. */
 	.group-tile {
-		/* Kept for .group-tile-open which also uses this base. */
+		/* Kept for .group-tile-open which also uses this base. Folded group = a plain
+		   chestnut brown square — same shape as any other cell (3px radius, 1px inset
+		   edge shadow). No bevel, no heavy ring — only the color differs. */
 		background: var(--group);
-		box-shadow:
-			inset 0 0 0 1px var(--group-edge),
-			inset 2px 2px 0 -1px color-mix(in srgb, #fff 16%, transparent),
-			inset -3px -3px 4px -2px rgba(0, 0, 0, 0.5);
+		box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.22);
 		cursor: pointer;
-		border-radius: 4px;
+		border-radius: 3px;
 	}
 	.group-tile:hover {
-		filter: brightness(1.16);
+		filter: brightness(1.22);
+		box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.3);
+		z-index: 2;
 	}
 	.group-tile.sel {
-		box-shadow:
-			inset 0 0 0 2px var(--group-accent),
-			inset 0 0 0 3px rgba(0, 0, 0, 0.55),
-			inset -3px -3px 4px -2px rgba(0, 0, 0, 0.5);
-		filter: brightness(1.14);
+		box-shadow: inset 0 0 0 2px var(--accent), inset 0 0 0 3px rgba(0, 0, 0, 0.55);
+		filter: brightness(1.18);
 		z-index: 3;
 		animation: pop var(--dur-fast) var(--ease-spring);
 	}
@@ -1676,7 +1716,8 @@
 	/* ---- open group row: its own full-width band between tile grids (a flex child of .stack,
 	   NOT a grid item) so it takes natural height and can never overflow a fixed cell-height
 	   track and overlap the tiles below. The accented LEFT edge signals "this whole row is one
-	   group." Opening/closing only inserts/removes this band — the tile grids stay uniform. ---- */
+	   group." Opening/closing only inserts/removes this band — the tile grids stay uniform.
+	   The accent is now monochrome smoke (--group-accent), not the old amber. ---- */
 	.group-band {
 		width: 100%;
 		box-sizing: border-box;
@@ -1690,7 +1731,7 @@
 		gap: 8px;
 		flex-wrap: wrap;
 	}
-	/* UNFOLDED (live): a stronger warm edge — the members are really in the model's context. */
+	/* UNFOLDED (live): a stronger smoke edge — the members are really in the model's context. */
 	.group-band.live {
 		background: color-mix(in srgb, var(--group-accent) 11%, transparent);
 		border-left-color: var(--group-accent);
@@ -1753,13 +1794,14 @@
 		flex: 0 0 auto;
 	}
 
-	/* Summary tile: stands in for the whole folded run; cocoa color signals synthesis.
-	   Reuses .cell.face.fN for dice pips (::before pseudo, no extra markup needed).
-	   No dashed outline — the cocoa color alone carries the "synthesized" signal. */
+	/* Summary tile: stands in for a single folded block's digest; recessed charcoal signals
+	   synthesis. Reuses .cell.face.fN for dice pips (::before pseudo, no extra markup needed).
+	   --k-summary (#2A2A2A) is a neutral dark tile — a single folded block's digest, NOT a
+	   multiblock group, so it deliberately stays grey. Normal-square shape (3px radius, 1px
+	   inset edge) same as any other cell — only the fill differs. */
 	.summary-tile {
 		background: var(--k-summary);
-		box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.22),
-		            inset 0 0 0 2px rgba(255, 255, 255, 0.06);
+		box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.22);
 		flex: 0 0 auto;
 		cursor: pointer;
 	}
@@ -1773,6 +1815,13 @@
 		filter: brightness(1.18);
 		z-index: 3;
 		animation: pop var(--dur-fast) var(--ease-spring);
+	}
+
+	/* Group cocoa in sliver mode: same square shape as a normal cell but chestnut brown
+	   (--group), matching the Map canvas group tile exactly. Overrides the grey --k-summary
+	   fill from .summary-tile. The .sel / :hover states inherit from .summary-tile above. */
+	.summary-tile.group-cocoa {
+		background: var(--group);
 	}
 
 	/* Sliver: the original folded block squeezed to an 8px-wide vertical bar.
