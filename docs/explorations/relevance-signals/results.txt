@@ -1,0 +1,46 @@
+==============================================================================
+SAMPLE SESSION
+==============================================================================
+blocks=981  est_tokens=133,631  kinds={'user': 18, 'thinking': 252, 'tool_call': 239, 'tool_result': 239, 'text': 233}
+protected tail: blocks[779:981] = 202 blocks, 20,041 tok (target 20,000)
+foldable unfold-candidates (older than tail): 576
+
+==============================================================================
+A. MODEL-FREE: is content-relevance-to-tail decoupled from recency?
+==============================================================================
+Pearson(content_relevance, distance_to_tail) = +0.007
+  (~0 => relevance and recency are decoupled; recency is a poor proxy
+   for relevance, so a recency-biased in-place scorer mis-ranks unfold)
+
+Top-20 MOST relevant-to-tail blocks — where do they live?
+  in OLDER half of pre-tail history: 9/20
+  median distance-to-tail among top-20: 387 blocks
+  max distance-to-tail among top-20:    599 blocks
+  -> these are exactly the blocks a recency/in-place scorer assigns
+     near-zero weight, yet they are the most on-topic for 'right now'.
+
+==============================================================================
+B. DECISION CHANGE: in-place attention vs relocated attention (top-K unfold)
+==============================================================================
+position model: recency lam=47, primacy lam=23 (illustrative U-curve)
+top-20 picks — overlap between age/in-place and relevance ranking: 4/20  (disagree on 16)
+
+Relevant-but-FAR blocks relocation surfaces that in-place buries (16 of top-20):
+  [tool_result] rel=0.611  dist= 490  in-place_rank= 109  |  Opponent board: 1 2 3 4 5 6 7 8 9 10 A O O O O O X O . . . B . . . . . X . . . . C . . 
+  [tool_result] rel=0.611  dist= 367  in-place_rank= 110  |  Waiting for your turn... Opponent board: 1 2 3 4 5 6 7 8 9 10 A O . . . . . . . . . B .
+  [tool_result] rel=0.611  dist= 454  in-place_rank= 111  |  Waiting for your turn... Opponent board: 1 2 3 4 5 6 7 8 9 10 A O O O O O X O . . . B O
+  [tool_result] rel=0.599  dist= 458  in-place_rank= 113  |  Waiting for your turn... Opponent board: 1 2 3 4 5 6 7 8 9 10 A O O O O O X O . . . B O
+  [tool_result] rel=0.598  dist= 359  in-place_rank= 114  |  Opponent board: 1 2 3 4 5 6 7 8 9 10 A O . . . . . . . . . B . . O . . . . . . . C X X 
+  [tool_result] rel=0.596  dist= 116  in-place_rank=  43  |  Waiting for your turn... Opponent board: 1 2 3 4 5 6 7 8 9 10 A . . . . . . . . . . B .
+  [tool_result] rel=0.595  dist= 486  in-place_rank= 115  |  Opponent board: 1 2 3 4 5 6 7 8 9 10 A O O O O O X O . . . B . . . . . X . . . . C . . 
+  [tool_result] rel=0.594  dist= 494  in-place_rank= 116  |  Opponent board: 1 2 3 4 5 6 7 8 9 10 A O O O O O X O . . . B . . . . . X . . . . C . . 
+
+==============================================================================
+TAKEAWAY
+==============================================================================
+Pearson ~ 0 and a low top-K overlap mean 'how recent' and 'how relevant
+to now' are different questions. Age/recency folders (and in-place attention)
+answer the first; a relevance/contribution-aware folder answers the second.
+So there is real headroom for a better FOLD signal over plain recency. (This
+does NOT rescue unfolding — see README.md for why these signals are
+retrospective and belong to folding + offline labeling, not admission.)

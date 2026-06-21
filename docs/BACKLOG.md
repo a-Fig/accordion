@@ -2,6 +2,29 @@
 
 Parked ideas with enough context to pick up cold. Newest first.
 
+## Relevance signals for fold/unfold — perplexity/attention probe (explored 2026-06-21)
+
+**Pointer, not the work.** Full write-up + a reproducible lite test in
+[docs/explorations/relevance-signals/](explorations/relevance-signals/README.md).
+
+Explored "measure relevance to the newest tokens to decide what to **unfold**" (relocate an old
+block above the tail; read attention, or — cleaner — *perplexity reduction*). Conclusion: these
+are **retrospective** signals ("what got used"), so they fit **folding** (block is live; the tail
+was produced with it present) and **offline labeling/training**, but **not unfolding** (the
+folded block was absent when the tail was produced, so the signal measures redundancy with the
+path already taken, not prospective need). Unfold/admission is served by **retrieval** against
+the newest exogenous input (already in `tiered-relevance`/`the-conductor`/`cold-score`) + the
+agent's own `recall`/`unfold`.
+
+**If picked up:** build the **counterfactual labeler first** (offline ablation on the replay
+corpus → ground truth for "which folds were actually free"), then measure whether any cheap
+signal (recency, ACT-R, attention, perplexity-proxy) beats near-free recency *before* writing a
+conductor — that labeled corpus is also the training data an ML conductor would want. Durable
+evidence from the lite test: content-relevance-to-now is ~uncorrelated with recency (Pearson
++0.007 on the sample session), so recency-folding leaves real headroom. Capability gap: a
+clearly-winning folder wants the **agent's own logprobs**, which `host.complete` (text-only) does
+not expose — see imaginarium #8.
+
 ## Slice 1.1 review — deferred low-severity cleanup (deferred 2026-06-17)
 
 The PR #45 max-effort review fixed the four substantive items (Inspector `canFold`, honest
