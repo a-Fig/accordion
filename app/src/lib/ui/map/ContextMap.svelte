@@ -977,8 +977,13 @@
 			<div class="boxes" style:--cell="{cell}px" style:--cols={cols}>
 				{#if olderTiles.length}
 					<section class="box older">
-						<div class="rail" title="{olderTok.toLocaleString()} live tokens · foldable">
-							<span class="tok"><AnimatedNumber value={olderTok} format={k} /></span>
+						<div class="box-eyebrow" title="{olderTok.toLocaleString()} live tokens · foldable">
+							<span class="eb-label">FOLDED · OLDER</span>
+							<span class="eb-meta">
+								<span class="eb-tok"><AnimatedNumber value={olderTok} format={k} /></span>
+								<span class="eb-sep">·</span>
+								{olderTiles.length} blocks
+							</span>
 						</div>
 						<div class="stack">
 							{#each segments as seg, segIdx (seg.kind === "band" ? "band-" + seg.row.group.id : "tiles-" + (seg.rows[0].type === "block" ? seg.rows[0].block.id : seg.rows[0].group.id))}
@@ -1083,12 +1088,15 @@
 				{/if}
 				{#if protSpecs.length}
 				<section class="box prot">
-					<div class="rail" title="{protTok.toLocaleString()} tokens · protected working tail">
-						<span class="tok"><AnimatedNumber value={protTok} format={k} /></span>
+					<div class="box-eyebrow" title="{protTok.toLocaleString()} live tokens · protected working tail">
+						<span class="eb-label">PROTECTED TAIL · <span class="eb-live">LIVE</span></span>
+						<span class="eb-meta">
+							<span class="eb-tok"><AnimatedNumber value={store.protectTokens} format={k} /></span>
+							reserved
+						</span>
 					</div>
 					<!-- Single canvas for prot box: vacated placeholders + protected tiles + ghosts.
-					     The wrapper div takes flex: 1 (matching the old .grid) so the canvas
-					     fills the box horizontally after the token rail. -->
+					     The wrapper div takes flex: 1 so the canvas fills the box horizontally. -->
 					<div class="canvas-fill">
 						<TileCanvas
 							bind:this={canvasRefs["prot"]}
@@ -1218,9 +1226,9 @@
 		gap: var(--sp-2);
 	}
 	.tlbl {
+		font-family: var(--mono);
 		font-size: var(--fs-2xs);
-		font-weight: 600;
-		letter-spacing: 0.07em;
+		letter-spacing: 0.12em;
 		color: var(--faint);
 		text-transform: uppercase;
 	}
@@ -1302,7 +1310,10 @@
 		gap: 5px;
 	}
 	.sw-lbl {
-		font-size: var(--fs-xs);
+		font-family: var(--mono);
+		font-size: var(--fs-2xs);
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
 		color: var(--faint);
 	}
 	.sw {
@@ -1310,12 +1321,18 @@
 		height: 9px;
 		border-radius: 2px;
 		display: inline-block;
-		background: var(--k-thinking);
 		flex: 0 0 auto;
 	}
+	/* live swatch: a vivid full-saturation kind pop (teal = the live-context hue). */
+	.sw.solid {
+		background: var(--k-tool_call);
+	}
+	/* folded swatch: the color-DRAIN — near-black with the faintest ghost of hue,
+	   plus the faint hatch. Mirrors a folded tile (DRAIN_MIX = 0.15). */
 	.sw.hatch {
-		opacity: 0.55;
-		background-image: repeating-linear-gradient(45deg, rgba(0, 0, 0, 0.55) 0 1.5px, transparent 1.5px 4px);
+		background-color: color-mix(in srgb, var(--k-tool_call) 15%, #141414);
+		background-image: repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.06) 0 1px, transparent 1px 5px);
+		box-shadow: inset 0 0 0 1px var(--line-soft);
 	}
 
 	/* ---- density control ---- */
@@ -1394,36 +1411,37 @@
 	.range-bar.err .range-chip {
 		border-color: color-mix(in srgb, var(--danger) 60%, transparent);
 	}
+	/* Primary action — the brand Paper-solid button (white-on-ink, weight 600). */
 	.group-btn {
-		background: var(--group-accent);
-		color: var(--group-ink);
-		border: none;
+		background: var(--paper);
+		color: var(--ink);
+		border: 1px solid var(--paper);
 		border-radius: var(--radius-sm);
 		font-size: var(--fs-xs);
-		font-weight: 700;
+		font-weight: 600;
 		padding: 4px 12px;
 		cursor: pointer;
-		transition: filter var(--dur-fast) var(--ease-out);
+		transition: background var(--dur-fast) var(--ease-out);
 	}
 	.group-btn:hover {
-		filter: brightness(1.1);
+		background: #fff;
 	}
+	/* Secondary action — outline button per the brand button system. */
 	.range-clear {
 		display: flex;
 		align-items: center;
 		justify-content: center;
 		background: transparent;
-		border: 1px solid var(--line);
-		color: var(--muted);
+		border: 1px solid var(--line-strong);
+		color: var(--text);
 		border-radius: var(--radius-sm);
 		padding: 4px 6px;
 		cursor: pointer;
-		transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+		transition: background var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out);
 	}
 	.range-clear:hover {
-		color: var(--text);
-		background: var(--panel-3);
-		border-color: var(--line-strong);
+		border-color: var(--accent);
+		background: var(--accent-soft);
 	}
 	.range-hint {
 		font-size: var(--fs-xs);
@@ -1471,37 +1489,49 @@
 		border-radius: var(--radius-lg);
 		border: 1px solid var(--line);
 		background: var(--panel-2);
-		padding: var(--sp-3);
+		padding: var(--sp-3) var(--sp-4) var(--sp-4);
 		display: flex;
+		flex-direction: column;
 		align-items: stretch;
-		gap: var(--sp-2);
+		gap: var(--sp-3);
 	}
-	/* left rail: a small vertical token tally for the box */
-	.rail {
+	/* box eyebrow: the signature mono UPPERCASE micro-label (left) + a mono data
+	   readout (right). Replaces the old rotated vertical token rail. */
+	.box-eyebrow {
 		flex: 0 0 auto;
 		display: flex;
-		align-items: center;
-		justify-content: center;
-		writing-mode: vertical-rl;
-		transform: rotate(180deg);
-		font-variant-numeric: tabular-nums;
-		font-size: var(--fs-2xs);
-		font-weight: 600;
-		letter-spacing: 0.06em;
-		text-transform: uppercase;
-		color: var(--faint);
+		align-items: baseline;
+		justify-content: space-between;
+		gap: var(--sp-3);
 		user-select: none;
-		gap: 4px;
 	}
-	.rail .tok {
-		font-weight: 700;
+	.eb-label {
+		font-family: var(--mono);
+		text-transform: uppercase;
+		letter-spacing: 0.12em;
+		font-size: var(--fs-2xs);
+		color: var(--faint);
+		white-space: nowrap;
+	}
+	.eb-meta {
+		font-family: var(--mono);
 		font-size: var(--fs-xs);
-		letter-spacing: 0.04em;
-		text-transform: none;
+		letter-spacing: 0.02em;
+		color: var(--faint);
+		font-variant-numeric: tabular-nums;
+		white-space: nowrap;
 	}
-	/* prot rail uses an accent tint to signal the protected-tail identity */
-	.box.prot .rail {
-		color: color-mix(in srgb, var(--accent) 65%, var(--muted));
+	.eb-tok {
+		color: var(--muted);
+		font-weight: 600;
+	}
+	.eb-sep {
+		opacity: 0.5;
+		margin: 0 2px;
+	}
+	/* the protected box's LIVE state, tinted tool-call teal (the live-context hue). */
+	.eb-live {
+		color: var(--k-tool_call);
 	}
 	/* the protected box: meaningfully thicker, accented frame = protection signal.
 	   Keep this visually distinct — it's a key part of the visual grammar. */
@@ -1509,6 +1539,10 @@
 		border: 3px solid var(--accent-dim);
 		background: var(--panel);
 		box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 18%, transparent), var(--shadow-1);
+	}
+	/* the protected box's data readout reads as live, not faint — tint toward accent. */
+	.box.prot .eb-meta {
+		color: var(--muted);
 	}
 
 	/* canvas-fill: flex wrapper for TileCanvas inside a box (fills the space after the rail). */
@@ -1546,15 +1580,32 @@
 	.cell.k-thinking { background: var(--k-thinking); }
 	.cell.k-tool_call { background: var(--k-tool_call); }
 	.cell.k-tool_result { background: var(--k-tool_result); }
+	/* Folded band members mirror the canvas color-DRAIN: a near-black recessed
+	   square carrying only the faintest ghost of the kind hue (~15% over Ink,
+	   matching DRAIN_MIX in tileDraw.ts). No opacity/saturate dimming of full
+	   color — the drained fill IS the recession. Hover relights to full kind. */
 	.cell.folded {
-		opacity: 0.36;
-		filter: saturate(0.5);
 		background-image: repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.06) 0 1px, transparent 1px 5px);
 	}
+	.cell.folded.k-user { background-color: color-mix(in srgb, var(--k-user) 15%, #141414); }
+	.cell.folded.k-text { background-color: color-mix(in srgb, var(--k-text) 15%, #141414); }
+	.cell.folded.k-thinking { background-color: color-mix(in srgb, var(--k-thinking) 15%, #141414); }
+	.cell.folded.k-tool_call { background-color: color-mix(in srgb, var(--k-tool_call) 15%, #141414); }
+	.cell.folded.k-tool_result { background-color: color-mix(in srgb, var(--k-tool_result) 15%, #141414); }
+	/* On a drained tile the dice pips read as a faint ghost (weight still legible
+	   up close) rather than loud white dots; hover relights them. Mirrors the
+	   folded-pip alpha in tileDraw.ts (0.22 → 0.7 on hover). */
+	.cell.folded.face::before { opacity: 0.22; }
+	.cell.folded.face:hover::before { opacity: 0.7; }
 	.cell.folded:hover {
-		opacity: 0.85;
-		filter: saturate(1) brightness(1.1);
+		filter: none;
+		background-image: none;
 	}
+	.cell.folded.k-user:hover { background-color: var(--k-user); }
+	.cell.folded.k-text:hover { background-color: var(--k-text); }
+	.cell.folded.k-thinking:hover { background-color: var(--k-thinking); }
+	.cell.folded.k-tool_call:hover { background-color: var(--k-tool_call); }
+	.cell.folded.k-tool_result:hover { background-color: var(--k-tool_result); }
 	.cell.pinned {
 		box-shadow: inset 0 0 0 2px #fff;
 	}

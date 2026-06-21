@@ -102,45 +102,57 @@
 		<!-- ── Header ─────────────────────────────────────────────── -->
 		<header class="insp-header">
 			<span class="group-dot"></span>
-			<span class="group-label">group · {gMembers.length} blocks</span>
+			<span class="eyebrow group-eyebrow">Group</span>
+			<span class="header-count mono">{gMembers.length} blocks</span>
 			<span class="grow"></span>
-			<span class="turn-badge tnum">{gTurnLabel()}</span>
+			<span class="turn-badge mono">{gTurnLabel()}</span>
 			<button class="close-btn" onclick={onclose} aria-label="Close inspector" title="Close">
 				<Icon name="x" size={16} />
 			</button>
 		</header>
 
-		<!-- ── Meta row ───────────────────────────────────────────── -->
-		<div class="meta-row">
-			<div class="meta-pills">
-				{#if group.folded}
-					<span class="pill pill-warn">
-						<span class="pill-dot"></span>folded
-					</span>
-				{:else}
-					<span class="pill pill-ok">
-						<span class="pill-dot"></span>live
-					</span>
-				{/if}
-				<span class="tok-count tnum">
-					full <strong class="tok-eff">{fmt(gFullTok)}</strong>
-					<span class="tok-sep">→</span>
-					live <strong class="tok-eff">{fmt(gLiveTok)}</strong>
-					<span class="tok-unit">tok</span>
-					{#if gSavedTok > 0}
-						<span class="tok-saved"> · saves {fmt(gSavedTok)}</span>
+		<!-- ── Meta section ───────────────────────────────────────── -->
+		<div class="meta-section">
+			<span class="eyebrow">Status</span>
+			<div class="meta-row">
+				<div class="meta-pills">
+					{#if group.folded}
+						<span class="pill pill-warn">
+							<span class="pill-dot"></span>folded
+						</span>
+					{:else}
+						<span class="pill pill-ok">
+							<span class="pill-dot"></span>live
+						</span>
 					{/if}
-				</span>
-				{#if gStrag > 0}
-					<span class="pill pill-accent" title="{gStrag} member(s) kept live (split tool pair)">
-						{gStrag} kept live
+					{#if gStrag > 0}
+						<span class="pill pill-accent" title="{gStrag} member(s) kept live (split tool pair)">
+							{gStrag} kept live
+						</span>
+					{/if}
+				</div>
+				<!-- Token data row: tabular mono -->
+				<div class="tok-table mono">
+					<span class="tok-row">
+						<span class="tok-key">full</span>
+						<span class="tok-val">{fmt(gFullTok)}</span>
 					</span>
-				{/if}
+					<span class="tok-sep-char">→</span>
+					<span class="tok-row">
+						<span class="tok-key">live</span>
+						<span class="tok-val">{fmt(gLiveTok)}</span>
+					</span>
+					{#if gSavedTok > 0}
+						<span class="tok-saved mono">saves {fmt(gSavedTok)}</span>
+					{/if}
+				</div>
 			</div>
-			<div class="meta-actions">
+
+			<!-- Actions -->
+			<div class="action-row">
 				{#if group.folded}
 					<button
-						class="action-btn action-primary-group"
+						class="action-btn action-primary"
 						class:action-disabled={steerLocked}
 						disabled={steerLocked}
 						aria-disabled={steerLocked}
@@ -163,7 +175,7 @@
 					</button>
 				{:else}
 					<button
-						class="action-btn"
+						class="action-btn action-outline"
 						class:action-disabled={steerLocked}
 						disabled={steerLocked}
 						aria-disabled={steerLocked}
@@ -190,20 +202,19 @@
 
 		<!-- ── Body: group digest ─────────────────────────────────── -->
 		<div class="body-wrap">
+			<span class="eyebrow section-eyebrow">
+				{gIsDropGroup ? "Drop group" : "Digest — shown to agent"}
+			</span>
 			{#if gIsDropGroup}
 				<div class="digest-callout digest-callout-drop">
 					<div class="digest-label digest-label-drop">
 						<Icon name="chevrons-down-up" size={12} stroke={2} />
-						Drop group — removed from wire
+						Removed from wire
 					</div>
 					<p class="drop-note">The agent does not see this block</p>
 				</div>
 			{:else}
 				<div class="digest-callout">
-					<div class="digest-label">
-						<Icon name="chevrons-down-up" size={12} stroke={2} />
-						Group digest — shown to agent when folded
-					</div>
 					<pre class="digest-text mono">{gDigest}</pre>
 				</div>
 			{/if}
@@ -214,56 +225,74 @@
 	<aside class="insp" transition:fly={{ x: 24, duration: 200, easing: cubicOut, opacity: 0 }}>
 		<!-- ── Header ─────────────────────────────────────────────── -->
 		<header class="insp-header">
+			<!-- Kind spine accent -->
 			<span class="kind-dot k-{block.kind}"></span>
-			<span class="kind-label k-{block.kind}">{KIND_LABEL[block.kind]}</span>
+			<!-- Kind eyebrow — tinted with the spectrum hue -->
+			<span class="eyebrow kind-eyebrow k-{block.kind}">{KIND_LABEL[block.kind]}</span>
 			{#if block.toolName}
 				<span class="tool-name mono">{block.toolName}</span>
 			{/if}
 			{#if inGroup}
 				<button class="group-link" onclick={() => onselect(inGroup.id)} title="Go to group">
 					<Icon name="layers" size={11} />
-					part of a group
+					group
 				</button>
 			{/if}
 			<span class="grow"></span>
-			<span class="turn-badge tnum">turn {block.turn}</span>
+			<span class="turn-badge mono">turn {block.turn}</span>
 			<button class="close-btn" onclick={onclose} aria-label="Close inspector" title="Close">
 				<Icon name="x" size={16} />
 			</button>
 		</header>
 
-		<!-- ── Meta row ───────────────────────────────────────────── -->
-		<div class="meta-row">
-			<div class="meta-pills">
-				{#if folded}
-					<span class="pill pill-warn">
-						<span class="pill-dot"></span>folded
-					</span>
-				{:else}
-					<span class="pill pill-ok">
-						<span class="pill-dot"></span>live
-					</span>
-				{/if}
-				{#if protect}
-					<span class="pill pill-accent" title="In the protected working tail — never folded">
-						<Icon name="lock" size={10} stroke={2} />
-						protected
-					</span>
-				{/if}
-				<span class="tok-count tnum">
+		<!-- ── Meta section ───────────────────────────────────────── -->
+		<div class="meta-section">
+			<span class="eyebrow">Block data</span>
+			<div class="meta-row">
+				<div class="meta-pills">
 					{#if folded}
-						<s class="tok-orig">{fmt(block.tokens)}</s>
-						<span class="tok-sep">→</span>
-						<strong class="tok-eff">{fmt(store.effTokens(block))}</strong>
-						<span class="tok-unit">tok</span>
+						<span class="pill pill-warn">
+							<span class="pill-dot"></span>folded
+						</span>
 					{:else}
-						{fmt(block.tokens)}<span class="tok-unit"> tok</span>
+						<span class="pill pill-ok">
+							<span class="pill-dot"></span>live
+						</span>
 					{/if}
-				</span>
+					{#if protect}
+						<span class="pill pill-accent" title="In the protected working tail — never folded">
+							<Icon name="lock" size={10} stroke={2} />
+							protected
+						</span>
+					{/if}
+				</div>
+				<!-- Token data: tabular mono -->
+				<div class="tok-table mono">
+					{#if folded}
+						<span class="tok-row">
+							<span class="tok-key">full</span>
+							<span class="tok-val tok-struck">{fmt(block.tokens)}</span>
+						</span>
+						<span class="tok-sep-char">→</span>
+						<span class="tok-row">
+							<span class="tok-key">live</span>
+							<span class="tok-val tok-live">{fmt(store.effTokens(block))}</span>
+						</span>
+					{:else}
+						<span class="tok-row">
+							<span class="tok-key">tokens</span>
+							<span class="tok-val tok-live">{fmt(block.tokens)}</span>
+						</span>
+					{/if}
+				</div>
 			</div>
-			<div class="meta-actions">
+
+			<!-- Actions -->
+			<div class="action-row">
 				<button
 					class="action-btn"
+					class:action-primary={folded}
+					class:action-outline={!folded && canFoldBlock}
 					class:action-disabled={steerLocked || (!folded && !canFoldBlock)}
 					disabled={steerLocked || (!folded && !canFoldBlock)}
 					aria-disabled={steerLocked}
@@ -285,6 +314,7 @@
 				</button>
 				<button
 					class="action-btn"
+					class:action-outline={!pinned}
 					class:action-active={pinned}
 					class:action-disabled={steerLocked}
 					disabled={steerLocked}
@@ -301,16 +331,15 @@
 		<!-- ── Body ───────────────────────────────────────────────── -->
 		<div class="body-wrap">
 			{#if folded}
+				<span class="eyebrow section-eyebrow">Digest — shown to agent</span>
 				<div class="digest-callout">
-					<div class="digest-label">
-						<Icon name="chevrons-down-up" size={12} stroke={2} />
-						Folded — showing digest
-					</div>
 					<pre class="digest-text mono">{store.digestOf(block)}</pre>
 				</div>
 				<div class="body-divider">
-					<span class="body-divider-label">Full content</span>
+					<span class="body-divider-label eyebrow">Full content</span>
 				</div>
+			{:else}
+				<span class="eyebrow section-eyebrow">Content</span>
 			{/if}
 
 			<pre
@@ -319,7 +348,7 @@
 			>{bd.text}</pre>
 
 			{#if bd.clipped}
-				<p class="clip-note tnum">
+				<p class="clip-note mono">
 					showing first {fmt(CAP)} of {fmt(bd.clipped)} chars
 				</p>
 			{/if}
@@ -329,16 +358,18 @@
 		{#if partner}
 			<div class="partner-section">
 				<div class="partner-header">
-					<span class="partner-label">
-						{partner.kind === "tool_result" ? "Result it produced" : "Call that produced this"}
+					<span class="eyebrow">
+						{partner.kind === "tool_result" ? "Result produced" : "Call that produced this"}
 					</span>
-					<span class="partner-meta tnum">
+					<span class="partner-meta mono">
 						{partnerFolded ? "folded" : "live"} · {fmt(store.effTokens(partner))} tok
 					</span>
 				</div>
 
 				<button
-					class="action-btn partner-toggle"
+					class="action-btn"
+					class:action-outline={!partnerFolded && canFoldPartner}
+					class:action-primary={partnerFolded}
 					class:action-disabled={steerLocked || (!partnerFolded && !canFoldPartner)}
 					disabled={steerLocked || (!partnerFolded && !canFoldPartner)}
 					aria-disabled={steerLocked}
@@ -377,6 +408,18 @@
 		overflow-y: auto;
 	}
 
+	/* ── Mono eyebrow — brand signature device ───────────────── */
+	.eyebrow {
+		font-family: var(--mono);
+		font-size: var(--fs-2xs);
+		font-weight: 400;
+		text-transform: uppercase;
+		letter-spacing: 0.12em;
+		color: var(--faint);
+		line-height: 1;
+		white-space: nowrap;
+	}
+
 	/* ── Header ─────────────────────────────────────────────── */
 	.insp-header {
 		display: flex;
@@ -399,11 +442,24 @@
 		flex: 0 0 auto;
 	}
 
-	.kind-label {
-		font-size: var(--fs-sm);
-		font-weight: 600;
+	/* Kind eyebrow inherits brand eyebrow style but is tinted with the spectrum hue */
+	.kind-eyebrow {
 		color: var(--kc);
-		letter-spacing: .01em;
+		font-weight: 500;
+		letter-spacing: 0.1em;
+	}
+
+	/* Group header eyebrow */
+	.group-eyebrow {
+		color: var(--group-accent);
+		font-weight: 500;
+		letter-spacing: 0.1em;
+	}
+
+	.header-count {
+		font-size: var(--fs-xs);
+		color: var(--faint);
+		letter-spacing: 0.06em;
 	}
 
 	.tool-name {
@@ -422,9 +478,11 @@
 		flex: 1;
 	}
 
+	/* Turn badge: data → mono */
 	.turn-badge {
 		font-size: var(--fs-xs);
 		color: var(--faint);
+		letter-spacing: 0.06em;
 	}
 
 	.close-btn {
@@ -436,6 +494,7 @@
 		color: var(--muted);
 		padding: var(--sp-1);
 		border-radius: var(--radius-sm);
+		cursor: pointer;
 		transition: background var(--dur-fast) var(--ease-out),
 		            color var(--dur-fast) var(--ease-out);
 	}
@@ -451,14 +510,20 @@
 	.k-tool_call   { --kc: var(--k-tool_call); }
 	.k-tool_result { --kc: var(--k-tool_result); }
 
-	/* ── Meta row ────────────────────────────────────────────── */
+	/* ── Meta section ────────────────────────────────────────── */
+	.meta-section {
+		display: flex;
+		flex-direction: column;
+		gap: var(--sp-3);
+		padding: var(--sp-3) var(--sp-4) var(--sp-4);
+		border-bottom: 1px solid var(--line-soft);
+	}
+
 	.meta-row {
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
 		gap: var(--sp-3);
-		padding: var(--sp-2) var(--sp-4);
-		border-bottom: 1px solid var(--line-soft);
 	}
 
 	.meta-pills {
@@ -503,83 +568,140 @@
 		gap: 5px;
 	}
 
-	.tok-count {
+	/* Token table: tabular mono data display */
+	.tok-table {
+		display: flex;
+		align-items: baseline;
+		gap: var(--sp-2);
 		font-size: var(--fs-xs);
 		color: var(--muted);
-		display: inline-flex;
+		flex-shrink: 0;
+	}
+	.tok-row {
+		display: flex;
 		align-items: baseline;
-		gap: 3px;
+		gap: 4px;
 	}
-
-	.tok-orig {
+	.tok-key {
 		color: var(--faint);
-		text-decoration: line-through;
+		font-size: var(--fs-2xs);
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
 	}
-
-	.tok-sep {
-		color: var(--faint);
-	}
-
-	.tok-eff {
+	.tok-val {
 		color: var(--text);
 		font-weight: 600;
 	}
-
-	.tok-unit {
+	.tok-live {
+		color: var(--text);
+	}
+	.tok-struck {
 		color: var(--faint);
+		text-decoration: line-through;
+	}
+	.tok-sep-char {
+		color: var(--faint);
+		font-size: var(--fs-xs);
+	}
+	.tok-saved {
+		color: var(--ok);
+		font-size: var(--fs-xs);
 	}
 
-	.meta-actions {
+	/* Action row: buttons laid out in a flex row */
+	.action-row {
 		display: flex;
 		align-items: center;
 		gap: var(--sp-2);
-		flex-shrink: 0;
+		flex-wrap: wrap;
 	}
 
-	/* ── Shared action button ───────────────────────────────── */
+	/* ── Button system (brand spec) ─────────────────────────── */
+
+	/* Base action button — secondary/outline variant */
 	.action-btn {
 		display: inline-flex;
 		align-items: center;
 		gap: var(--sp-1);
-		background: var(--panel-3);
-		border: 1px solid var(--line);
+		background: transparent;
+		border: 1px solid var(--line-strong);
 		color: var(--text);
-		padding: 4px var(--sp-2);
+		padding: 5px var(--sp-3);
 		border-radius: var(--radius-sm);
 		font-size: var(--fs-xs);
 		font-weight: 500;
+		cursor: pointer;
 		transition: background var(--dur-fast) var(--ease-out),
 		            border-color var(--dur-fast) var(--ease-out),
 		            color var(--dur-fast) var(--ease-out);
 	}
-
 	.action-btn:hover {
-		background: var(--panel-4);
-		border-color: var(--line-strong);
+		border-color: var(--accent);
+		background: var(--accent-soft);
 	}
 
+	/* Primary: Paper solid — white-on-ink, main positive CTA */
+	.action-btn.action-primary {
+		background: var(--paper);
+		color: var(--ink);
+		border-color: var(--paper);
+		font-weight: 600;
+	}
+	.action-btn.action-primary:hover {
+		background: #ffffff;
+		border-color: #ffffff;
+	}
+
+	/* Outline: explicit secondary */
+	.action-btn.action-outline {
+		background: transparent;
+		border-color: var(--line-strong);
+		color: var(--text);
+	}
+	.action-btn.action-outline:hover {
+		border-color: var(--accent);
+		background: var(--accent-soft);
+	}
+
+	/* Active / pinned state */
 	.action-btn.action-active {
 		background: var(--accent-soft);
-		border-color: var(--accent-dim);
+		border-color: color-mix(in srgb, var(--accent) 50%, transparent);
 		color: var(--accent);
 	}
-
 	.action-btn.action-active:hover {
-		background: color-mix(in srgb, var(--accent) 22%, transparent);
+		background: color-mix(in srgb, var(--accent) 18%, transparent);
 		border-color: var(--accent);
 	}
 
+	/* Disabled */
 	.action-btn.action-disabled,
 	.action-btn:disabled {
-		opacity: 0.45;
+		opacity: 0.4;
 		cursor: not-allowed;
 	}
-
 	.action-btn.action-disabled:hover,
 	.action-btn:disabled:hover {
-		background: var(--panel-3);
-		border-color: var(--line);
+		background: transparent;
+		border-color: var(--line-strong);
 		color: var(--text);
+	}
+
+	/* Danger variant: revealed on hover */
+	.action-btn.action-danger {
+		border-color: var(--line);
+		color: var(--muted);
+	}
+	.action-btn.action-danger:hover {
+		color: var(--danger);
+		border-color: color-mix(in srgb, var(--danger) 55%, transparent);
+		background: color-mix(in srgb, var(--danger) 10%, transparent);
+	}
+	.action-btn.action-danger.action-disabled:hover,
+	.action-btn.action-danger:disabled:hover {
+		color: var(--muted);
+		border-color: var(--line);
+		background: transparent;
 	}
 
 	/* ── Body ────────────────────────────────────────────────── */
@@ -588,6 +710,11 @@
 		display: flex;
 		flex-direction: column;
 		gap: var(--sp-3);
+	}
+
+	.section-eyebrow {
+		display: block;
+		margin-bottom: var(--sp-1);
 	}
 
 	/* Folded digest callout */
@@ -601,12 +728,13 @@
 		gap: var(--sp-2);
 	}
 
-	/* Drop group variant: muted/faint palette — content is gone, not just summarised. */
+	/* Drop group variant: muted palette */
 	.digest-callout-drop {
 		border-left-color: var(--faint);
 		opacity: 0.75;
 	}
 
+	/* In group mode the callout has no separate label row — eyebrow is above */
 	.digest-label {
 		display: flex;
 		align-items: center;
@@ -644,6 +772,7 @@
 		display: flex;
 		align-items: center;
 		gap: var(--sp-2);
+		margin: var(--sp-1) 0;
 	}
 
 	.body-divider::before,
@@ -655,11 +784,6 @@
 	}
 
 	.body-divider-label {
-		font-size: var(--fs-xs);
-		color: var(--faint);
-		text-transform: uppercase;
-		letter-spacing: .05em;
-		font-weight: 500;
 		white-space: nowrap;
 	}
 
@@ -685,7 +809,7 @@
 		margin: 0;
 		font-size: var(--fs-xs);
 		color: var(--faint);
-		font-family: var(--mono);
+		letter-spacing: 0.04em;
 	}
 
 	/* ── Partner section ────────────────────────────────────── */
@@ -700,25 +824,14 @@
 	.partner-header {
 		display: flex;
 		align-items: baseline;
+		justify-content: space-between;
 		gap: var(--sp-2);
-	}
-
-	.partner-label {
-		font-size: var(--fs-xs);
-		font-weight: 600;
-		color: var(--faint);
-		text-transform: uppercase;
-		letter-spacing: .05em;
 	}
 
 	.partner-meta {
 		font-size: var(--fs-xs);
 		color: var(--faint);
-		font-weight: 400;
-	}
-
-	.partner-toggle {
-		align-self: flex-start;
+		letter-spacing: 0.04em;
 	}
 
 	.partner-preview {
@@ -744,41 +857,6 @@
 		flex: 0 0 auto;
 	}
 
-	.group-label {
-		font-size: var(--fs-sm);
-		font-weight: 600;
-		color: var(--group-accent);
-		letter-spacing: .01em;
-	}
-
-	.tok-saved {
-		color: var(--ok);
-		font-size: var(--fs-xs);
-	}
-
-	/* Primary group action — warm amber (same family as the group accent) */
-	.action-btn.action-primary-group {
-		background: color-mix(in srgb, var(--group-accent) 22%, var(--panel-3));
-		border-color: color-mix(in srgb, var(--group-accent) 55%, transparent);
-		color: var(--group-accent);
-		font-weight: 600;
-	}
-	.action-btn.action-primary-group:hover {
-		background: color-mix(in srgb, var(--group-accent) 32%, var(--panel-3));
-		border-color: var(--group-accent);
-	}
-
-	/* Danger action button (Delete) */
-	.action-btn.action-danger {
-		opacity: 0.65;
-	}
-	.action-btn.action-danger:hover {
-		opacity: 1;
-		color: var(--danger);
-		border-color: color-mix(in srgb, var(--danger) 55%, transparent);
-		background: color-mix(in srgb, var(--danger) 10%, var(--panel-3));
-	}
-
 	/* "Part of a group" chip in block mode header */
 	.group-link {
 		display: inline-flex;
@@ -787,8 +865,11 @@
 		background: color-mix(in srgb, var(--group-accent) 12%, var(--panel-2));
 		border: 1px solid color-mix(in srgb, var(--group-accent) 40%, transparent);
 		color: var(--group-accent);
-		font-size: var(--fs-xs);
-		font-weight: 500;
+		font-family: var(--mono);
+		font-size: var(--fs-2xs);
+		font-weight: 400;
+		letter-spacing: 0.1em;
+		text-transform: uppercase;
 		border-radius: var(--radius-pill);
 		padding: 2px 8px;
 		cursor: pointer;

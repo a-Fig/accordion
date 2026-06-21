@@ -282,13 +282,27 @@ export function getSprites(): Map<number, HTMLCanvasElement> | null {
 // no clip(), no line loop in the hot path.
 // ---------------------------------------------------------------------------
 
-/** Memoized saturate(0.5) — keyed by source hex. At most ~6 entries. */
-const _desatMemo = new Map<string, string>();
-function desaturateCached(hex: string): string {
-  let v = _desatMemo.get(hex);
+/**
+ * Folded "color-drain" (the #1 brand signal — see reface-spec / page-14).
+ *
+ * A folded block recedes to a near-black, recessed square carrying only the
+ * FAINTEST ghost of its kind hue. We blend ~`mix` of the kind color over a
+ * near-black Ink base (`DRAIN_BASE`) — the result lands around #151515–#1A1A1A
+ * with just enough hue to read which kind it was, never the old "0.4 alpha of
+ * full saturation." Done here in JS (memoized, ≤6 entries) so the hot draw loop
+ * stays a flat fill — NO ctx.filter, NO per-tile gradient. */
+const DRAIN_BASE: [number, number, number] = [0x14, 0x14, 0x14]; // Ink-ish #141414
+const DRAIN_MIX = 0.15; // ghost of the hue: ~15% kind color over near-black
+const _drainMemo = new Map<string, string>();
+function drainCached(hex: string): string {
+  let v = _drainMemo.get(hex);
   if (v === undefined) {
-    v = desaturate(hex, 0.5);
-    _desatMemo.set(hex, v);
+    const [r, g, b] = parseHex(hex);
+    const nr = DRAIN_BASE[0] + (r - DRAIN_BASE[0]) * DRAIN_MIX;
+    const ng = DRAIN_BASE[1] + (g - DRAIN_BASE[1]) * DRAIN_MIX;
+    const nb = DRAIN_BASE[2] + (b - DRAIN_BASE[2]) * DRAIN_MIX;
+    v = toRgb(nr, ng, nb);
+    _drainMemo.set(hex, v);
   }
   return v;
 }
@@ -481,21 +495,16 @@ export function drawTile(
     ? palette.group
     : palette.kindColors[spec.kind as BlockKind];
 
-  // Folded: desaturate — but restore full saturation on hover (matches old CSS
-  // `.cell.folded:hover { filter: saturate(1) brightness(1.1) }`).
+  // Folded: color-DRAIN to a near-black recessed square (the brand signal —
+  // the color drained out). On hover, restore the full vivid kind color so the
+  // human can momentarily "light up" a folded block to read which kind it was.
   let baseColor = rawColor;
-  if (spec.folded && !opts.hovered && !isGroup) {
-    baseColor = desaturateCached(rawColor);
+  if (spec.folded && !isGroup) {
+    baseColor = opts.hovered ? rawColor : drainCached(rawColor);
   }
 
   // ---- base rounded rect fill ----
   ctx.save();
-
-  if (spec.folded && !isGroup) {
-    // folded: recessed toward Ink so aged sessions trend dark (brand grid:
-    // color is the exception). Full brightness on hover.
-    ctx.globalAlpha = opts.hovered ? 0.85 : 0.4;
-  }
 
   if (isGroup) {
     // Folded group = the brand spectrum gradient, made smoky over Ink. A
@@ -565,8 +574,11 @@ export function drawTile(
   const spriteCanvas = sprites.get(spec.face);
   if (spriteCanvas) {
     if (spec.folded) {
+      // Drained tiles read as near-black recessed squares — keep the pips a faint
+      // ghost (the weight is still legible up close) so the tile doesn't sprout
+      // loud white dots that fight the drain. Hover relights toward full.
       ctx.save();
-      ctx.globalAlpha = opts.hovered ? 0.75 : 0.55;
+      ctx.globalAlpha = opts.hovered ? 0.7 : 0.22;
       ctx.drawImage(spriteCanvas, x, y, w, h);
       ctx.restore();
     } else {

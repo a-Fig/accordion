@@ -32,7 +32,6 @@
 	const conductorStatusDetails = $derived(store.conductorStatus.text ? store.conductorStatus.details : conductorStatus.details);
 	// fmt/k formatters must round their input because AnimatedNumber passes a float mid-tween
 	const fmt = (n: number) => Math.round(n).toLocaleString();
-	const pct = (n: number, d: number) => (d > 0 ? Math.round((n / d) * 100) : 0);
 	const k = (n: number) => {
 		const r = Math.round(n);
 		if (r >= 1_000_000) {
@@ -155,26 +154,35 @@
 
 <div class="hdr">
 	<div class="top">
-		<!-- ── Left: hero stat + usage pill + saved ── -->
+		<!-- ── Left: the brand data device — CONTEXT eyebrow, hero live number,
+		     live/folded mono readout (live teal · folded smoke). ── -->
 		<div class="nums">
-			<span class="hero-stat mono tnum" class:over={store.overBudget}>
-				<AnimatedNumber value={store.liveTokens} format={fmt} />
+			<!-- Eyebrow: CONTEXT · {fullTokens} (mono, uppercase, smoke) -->
+			<span class="data-eyebrow mono">
+				<span class="eyebrow-key">CONTEXT</span>
+				<span class="eyebrow-sep" aria-hidden="true">·</span>
+				<span class="eyebrow-val tnum"><AnimatedNumber value={store.fullTokens} format={k} /></span>
 			</span>
-			<span class="budget-denom tnum">/ <AnimatedNumber value={store.budget} format={fmt} /></span>
-			<span class="usage-pill tnum" class:over={store.overBudget}>
-				<span class="pill-dot" aria-hidden="true"></span>
-				{#if store.overBudget}
-					over by <AnimatedNumber value={store.liveTokens - store.budget} format={fmtOverBy} />
-				{:else}
-					<AnimatedNumber value={pct(store.liveTokens, store.budget)} format={(n) => `${Math.round(n)}%`} />
-				{/if}
-			</span>
-			{#if store.savedTokens > 0}
-				<span class="saved-stat tnum">
-					<Icon name="chevrons-down-up" size={12} />
-					<AnimatedNumber value={store.savedTokens} format={k} /> saved
+
+			<!-- Hero live number / budget denominator -->
+			<div class="hero-line">
+				<span class="hero-stat mono tnum" class:over={store.overBudget}>
+					<AnimatedNumber value={store.liveTokens} format={fmt} />
 				</span>
-			{/if}
+				<span class="budget-denom mono tnum">/ <AnimatedNumber value={store.budget} format={fmt} /></span>
+				{#if store.overBudget}
+					<span class="over-flag mono tnum">
+						over by <AnimatedNumber value={store.liveTokens - store.budget} format={fmtOverBy} />
+					</span>
+				{/if}
+			</div>
+
+			<!-- Signature readout: live {n} · folded {n} — live tinted teal, folded smoke. -->
+			<span class="lf-readout mono" class:over={store.overBudget}>
+				<span class="lf-live tnum">live <AnimatedNumber value={store.liveTokens} format={k} /></span>
+				<span class="lf-sep" aria-hidden="true">·</span>
+				<span class="lf-folded tnum">folded <AnimatedNumber value={store.savedTokens} format={k} /></span>
+			</span>
 		</div>
 
 		<!-- ── Right: controls cluster ── -->
@@ -185,7 +193,7 @@
 
 			{#if readOnly}
 				<span
-					class="ro-badge"
+					class="ro-badge mono"
 					role="status"
 					aria-label="Read-only session"
 					title="Viewing a recording — folds are local and do not affect any agent."
@@ -206,42 +214,50 @@
 						: "Folds are previewed in the view only. The agent's context is unchanged."}
 					onclick={() => setFolding(!folding.enabled)}
 				>
-					<Icon name="activity" size={13} />
 					<span class="fold-arm-dot" aria-hidden="true"></span>
-					<span class="fold-arm-label">Folding: {folding.enabled ? "steering" : "preview"}</span>
+					<span class="fold-arm-eyebrow mono">FOLDING</span>
+					<span class="fold-arm-state">{folding.enabled ? "steering" : "preview"}</span>
 				</button>
 			{/if}
 
-			<span
-				class="kl protect-read"
+			<!-- Protect readout: eyebrow + editable mono value (the dial lives on the bar). -->
+			<div
+				class="ctl-field protect-read"
 				class:ctl-locked={tailLocked}
 				aria-disabled={tailLocked}
 				title={tailLocked
 					? lockTip + " (the conductor now owns the tail)"
-					: `Actual protected tail: ${fmt(store.protectedTokens)} tokens; target: ${fmt(store.protectTokens)} tokens — click the value or drag the amber handle to change it`}
+					: `Actual protected tail: ${fmt(store.protectedTokens)} tokens; target: ${fmt(store.protectTokens)} tokens — click the value or drag the handle to change it`}
 			>
-				<Icon name="lock" size={11} />
-				<span class="kl-text">protect</span>
-				{#if tailLocked}
-					<!-- tail-size locked: a static readout, not an editable dial. -->
-					<span class="mono tnum kl-val">{k(store.protectTokens)}</span>
-				{:else}
-					<EditableNumber
-						value={store.protectTokens}
-						format={k}
-						label="Protected tail target in thousands of tokens"
-						oncommit={(n) => store.setProtect(Math.max(0, Math.min(PROT_MAX, n)))}
-					/>
-				{/if}
-				{#if Math.abs(store.protectedTokens - store.protectTokens) > 500}
-					<span class="kl-target tnum">({k(store.protectedTokens)} actual)</span>
-				{/if}
-			</span>
+				<span class="ctl-eyebrow mono">
+					<Icon name="lock" size={10} />
+					PROTECT
+				</span>
+				<span class="ctl-value mono tnum">
+					{#if tailLocked}
+						<!-- tail-size locked: a static readout, not an editable dial. -->
+						<span class="kl-val">{k(store.protectTokens)}</span>
+					{:else}
+						<EditableNumber
+							value={store.protectTokens}
+							format={k}
+							label="Protected tail target in thousands of tokens"
+							oncommit={(n) => store.setProtect(Math.max(0, Math.min(PROT_MAX, n)))}
+						/>
+					{/if}
+					{#if Math.abs(store.protectedTokens - store.protectTokens) > 500}
+						<span class="kl-target tnum">({k(store.protectedTokens)})</span>
+					{/if}
+				</span>
+			</div>
 
-			<div class="knob">
-				<span class="kl">
-					<Icon name="target" size={11} />
-					<span class="kl-text">budget</span>
+			<!-- Budget: eyebrow + editable mono value + fill slider. -->
+			<div class="ctl-field knob">
+				<span class="ctl-eyebrow mono">
+					<Icon name="target" size={10} />
+					BUDGET
+				</span>
+				<span class="ctl-value mono tnum">
 					<EditableNumber
 						value={store.budget}
 						format={k}
@@ -262,7 +278,7 @@
 			</div>
 
 			<button
-				class="reset-btn"
+				class="btn-secondary reset-btn"
 				onclick={() => store.resetAll()}
 				disabled={editCount === 0 || steerLocked}
 				aria-disabled={steerLocked}
@@ -274,7 +290,7 @@
 			>
 				<Icon name="rotate-ccw" size={13} />
 				Revert to auto
-				{#if editCount > 0}<span class="reset-cnt tnum">{editCount}</span>{/if}
+				{#if editCount > 0}<span class="reset-cnt mono tnum">{editCount}</span>{/if}
 			</button>
 		</div>
 	</div>
@@ -366,23 +382,51 @@
 	/* ── Top row: nums left, ctl right ── */
 	.top {
 		display: flex;
-		align-items: center;
+		align-items: flex-start;
 		gap: var(--sp-4);
 	}
 
-	/* ── Nums cluster ── */
+	/* ── Nums cluster — the brand data device ── */
 	.nums {
+		display: flex;
+		flex-direction: column;
+		gap: var(--sp-1);
+		min-width: 0;
+	}
+
+	/* CONTEXT · {n} eyebrow — mono, uppercase, smoke, wide tracking */
+	.data-eyebrow {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		font-size: var(--fs-xs);
+		text-transform: uppercase;
+		letter-spacing: 0.12em;
+		color: var(--faint);
+		line-height: 1;
+	}
+	.data-eyebrow .eyebrow-key {
+		color: var(--muted);
+	}
+	.data-eyebrow .eyebrow-sep {
+		color: var(--line-strong);
+	}
+	.data-eyebrow .eyebrow-val {
+		color: var(--muted);
+		letter-spacing: 0.04em;
+	}
+
+	/* Hero line: live number + denominator + optional over-flag */
+	.hero-line {
 		display: flex;
 		align-items: baseline;
 		gap: var(--sp-2);
-		min-width: 0;
-		flex-wrap: wrap;
 	}
 
 	/* Hero stat — the primary focal point */
 	.hero-stat {
 		font-size: var(--fs-2xl);
-		font-weight: 700;
+		font-weight: 600;
 		color: var(--text);
 		line-height: 1;
 		letter-spacing: -0.01em;
@@ -398,48 +442,35 @@
 		align-self: baseline;
 	}
 
-	/* Usage pill */
-	.usage-pill {
-		display: inline-flex;
-		align-items: center;
-		gap: 5px;
+	/* Over-budget flag — danger, no pill chrome */
+	.over-flag {
 		font-size: var(--fs-xs);
 		font-weight: 600;
-		color: var(--muted);
-		background: var(--panel-2);
-		border: 1px solid var(--line);
-		padding: 2px 8px 2px 6px;
-		border-radius: var(--radius-pill);
-		transition:
-			color var(--dur-fast) var(--ease-out),
-			border-color var(--dur-fast) var(--ease-out),
-			background var(--dur-fast) var(--ease-out);
-	}
-	.usage-pill.over {
+		letter-spacing: 0.02em;
 		color: var(--danger);
-		background: color-mix(in srgb, var(--danger) 10%, var(--panel-2));
-		border-color: color-mix(in srgb, var(--danger) 40%, var(--line));
-	}
-	.pill-dot {
-		width: 6px;
-		height: 6px;
-		border-radius: 50%;
-		background: var(--muted);
-		flex: 0 0 auto;
-		transition: background var(--dur-fast) var(--ease-out);
-	}
-	.usage-pill.over .pill-dot {
-		background: var(--danger);
 	}
 
-	/* Saved stat */
-	.saved-stat {
+	/* Signature live/folded readout — live teal, folded smoke */
+	.lf-readout {
 		display: inline-flex;
 		align-items: center;
-		gap: 4px;
-		font-size: var(--fs-xs);
-		color: var(--ok);
-		opacity: 0.85;
+		gap: 8px;
+		font-size: var(--fs-sm);
+		line-height: 1;
+		letter-spacing: 0.01em;
+	}
+	.lf-live {
+		color: var(--k-tool_call);
+	}
+	.lf-folded {
+		color: var(--muted);
+	}
+	.lf-sep {
+		color: var(--line-strong);
+	}
+	/* Over budget: the live count flips to danger so the readout stays legible. */
+	.lf-readout.over .lf-live {
+		color: var(--danger);
 	}
 
 	/* ── Controls cluster ── */
@@ -447,41 +478,66 @@
 		margin-left: auto;
 		display: flex;
 		align-items: center;
-		gap: var(--sp-3);
+		gap: var(--sp-4);
 		flex: 0 0 auto;
 	}
 
-	/* Read-only badge */
+	/* Eyebrow shared by every control field — mono, uppercase, wide tracking, faint. */
+	.ctl-eyebrow {
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+		font-size: var(--fs-2xs);
+		text-transform: uppercase;
+		letter-spacing: 0.12em;
+		color: var(--faint);
+		line-height: 1;
+		user-select: none;
+	}
+	/* The mono value beneath an eyebrow. */
+	.ctl-value {
+		display: inline-flex;
+		align-items: baseline;
+		gap: 5px;
+		font-size: var(--fs-sm);
+		color: var(--text);
+		line-height: 1;
+	}
+	.ctl-field {
+		display: flex;
+		flex-direction: column;
+		gap: 5px;
+		cursor: default;
+	}
+
+	/* Read-only badge — mono eyebrow chip */
 	.ro-badge {
 		display: inline-flex;
 		align-items: center;
 		gap: 4px;
-		font-size: var(--fs-xs);
-		font-weight: 700;
-		letter-spacing: 0.04em;
+		font-size: var(--fs-2xs);
+		letter-spacing: 0.12em;
 		text-transform: uppercase;
 		color: var(--faint);
 		background: var(--panel-2);
 		border: 1px solid var(--line);
-		padding: 3px 8px 3px 6px;
-		border-radius: var(--radius-pill);
+		padding: 4px 9px 4px 7px;
+		border-radius: var(--radius-sm);
 		white-space: nowrap;
 		user-select: none;
 	}
 
-	/* Folding-arm toggle */
+	/* ── Folding-arm toggle — quiet ghost; armed → --ok green (state color) ── */
 	.fold-arm {
 		display: inline-flex;
 		align-items: center;
-		gap: 6px;
-		background: var(--panel-3);
+		gap: 7px;
+		background: transparent;
 		border: 1px solid var(--line);
 		color: var(--muted);
-		padding: 5px 11px 5px 9px;
-		border-radius: var(--radius-pill);
-		font-size: var(--fs-xs);
-		font-weight: 600;
-		letter-spacing: 0.01em;
+		padding: 6px 12px 6px 10px;
+		border-radius: var(--radius-sm);
+		line-height: 1;
 		cursor: pointer;
 		transition:
 			background var(--dur-fast) var(--ease-out),
@@ -489,9 +545,20 @@
 			color var(--dur-fast) var(--ease-out);
 	}
 	.fold-arm:hover {
-		background: var(--panel-4);
 		border-color: var(--line-strong);
+		background: var(--accent-soft);
 		color: var(--text);
+	}
+	.fold-arm-eyebrow {
+		font-size: var(--fs-2xs);
+		text-transform: uppercase;
+		letter-spacing: 0.12em;
+		color: var(--faint);
+	}
+	.fold-arm-state {
+		font-size: var(--fs-xs);
+		font-weight: 600;
+		letter-spacing: 0.01em;
 	}
 	.fold-arm-dot {
 		width: 7px;
@@ -504,48 +571,33 @@
 			box-shadow var(--dur-fast) var(--ease-out);
 	}
 	.fold-arm.on {
-		background: var(--accent-soft);
-		border-color: color-mix(in srgb, var(--accent) 60%, var(--line));
-		color: var(--accent);
+		background: color-mix(in srgb, var(--ok) 12%, transparent);
+		border-color: color-mix(in srgb, var(--ok) 55%, var(--line));
+		color: var(--ok);
 	}
 	.fold-arm.on:hover {
-		background: color-mix(in srgb, var(--accent) 22%, var(--panel));
-		border-color: var(--accent);
+		background: color-mix(in srgb, var(--ok) 20%, var(--panel));
+		border-color: var(--ok);
+	}
+	.fold-arm.on .fold-arm-eyebrow {
+		color: color-mix(in srgb, var(--ok) 70%, var(--muted));
 	}
 	.fold-arm.on .fold-arm-dot {
-		background: var(--accent);
-		box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 28%, transparent);
+		background: var(--ok);
+		box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 28%, transparent);
 	}
 
-	/* Slider knob */
-	.knob {
-		display: flex;
-		flex-direction: column;
-		gap: 4px;
-		cursor: default;
-	}
-	.kl {
-		display: inline-flex;
-		align-items: center;
-		gap: 4px;
-		font-size: var(--fs-xs);
-		color: var(--faint);
-		letter-spacing: 0.04em;
-		text-transform: uppercase;
-		user-select: none;
-	}
+	/* Protect / Budget value helpers */
 	.kl-val {
-		color: var(--muted);
+		color: var(--text);
 		font-weight: 600;
-		text-transform: none;
-		letter-spacing: 0;
 	}
 	.kl-target {
 		color: var(--faint);
-		font-weight: 500;
-		text-transform: none;
-		letter-spacing: 0;
+		font-weight: 400;
 	}
+
+	/* ── Slider knob ── */
 	.knob input[type="range"] {
 		width: 120px;
 		height: 4px;
@@ -582,15 +634,15 @@
 		border-radius: var(--radius-pill);
 	}
 
-	/* Reset button */
-	.reset-btn {
+	/* ── Secondary (outline) button — brand button system ── */
+	.btn-secondary {
 		display: inline-flex;
 		align-items: center;
-		gap: 5px;
-		background: var(--panel-3);
-		border: 1px solid var(--line);
+		gap: 6px;
+		background: transparent;
+		border: 1px solid var(--line-strong);
 		color: var(--text);
-		padding: 5px 10px 5px 8px;
+		padding: 7px 12px 7px 10px;
 		border-radius: var(--radius-sm);
 		font-size: var(--fs-xs);
 		font-weight: 500;
@@ -599,27 +651,29 @@
 			background var(--dur-fast) var(--ease-out),
 			border-color var(--dur-fast) var(--ease-out);
 	}
-	.reset-btn:hover:not(:disabled) {
-		background: var(--panel-4);
-		border-color: var(--line-strong);
+	.btn-secondary:hover:not(:disabled) {
+		border-color: var(--accent);
+		background: var(--accent-soft);
 	}
-	.reset-btn:disabled {
+	.btn-secondary:focus-visible {
+		outline: none;
+		box-shadow: var(--focus-ring);
+	}
+	.btn-secondary:disabled {
 		opacity: 0.45;
 		cursor: not-allowed;
 	}
 	.reset-cnt {
-		font-family: var(--mono);
 		font-size: 10px;
 		line-height: 1;
 		font-weight: 600;
-		color: var(--accent);
-		background: var(--accent-soft);
-		border: 1px solid color-mix(in srgb, var(--accent) 25%, var(--line));
+		color: var(--ink);
+		background: var(--paper);
 		border-radius: var(--radius-pill);
-		padding: 1px 6px;
+		padding: 2px 6px;
 	}
 
-	/* Protect readout (the slider moved onto the bar) */
+	/* Protect readout (the dial lives on the bar) */
 	.protect-read {
 		cursor: default;
 	}

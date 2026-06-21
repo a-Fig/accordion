@@ -17,6 +17,11 @@
 	--muted: #9A9A9A;          /* Smoke — AA on panels */
 	--faint: #8C8C8C;          /* neutral tertiary step — ~AA (4.5:1) on panel-2 */
 
+	/* Brand named anchors — the two extremes of the monochrome ramp. Used directly by the
+	   Paper-solid primary button (bg Paper, text Ink), the brand's one bright affordance. */
+	--ink: #0A0A0A;            /* Ink — text-on-paper, button label */
+	--paper: #F6F6F6;          /* Paper — solid primary button surface */
+
 	/* UI accent — MONOCHROME (brand rule: blue is the user, never a button) */
 	--accent: #E8E8E8;         /* Cloud — primary actions / focus */
 	--accent-hover: #FFFFFF;

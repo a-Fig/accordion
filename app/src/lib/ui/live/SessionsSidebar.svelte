@@ -179,7 +179,7 @@
 			</span>
 			<span class="wordmark">Accordion</span>
 
-			<span class="count tnum" aria-label="{activeCount} sessions">{activeCount}</span>
+			<span class="count mono" aria-label="{activeCount} sessions">{activeCount}</span>
 
 			<button
 				class="collapse-btn"
@@ -191,22 +191,30 @@
 			</button>
 		</div>
 
-		<!-- Source switcher on its own row so the header stays slim and the collapse
-		     button is never clipped in the narrow (232px) rail. -->
-		<div class="source-row">
-			<SegControl
-				options={[
-					{ id: "pi", label: "pi", icon: "terminal" },
-					{ id: "claude", label: "Claude Code", icon: "message-square" },
-				]}
-				value={source}
-				onchange={(v) => onsource(v as "pi" | "claude")}
-				ariaLabel="Session source"
-				iconSize={11}
-			/>
+		<!-- Source eyebrow + switcher -->
+		<div class="source-section">
+			<span class="eyebrow">Source</span>
+			<div class="source-row">
+				<SegControl
+					options={[
+						{ id: "pi", label: "pi", icon: "terminal" },
+						{ id: "claude", label: "Claude Code", icon: "message-square" },
+					]}
+					value={source}
+					onchange={(v) => onsource(v as "pi" | "claude")}
+					ariaLabel="Session source"
+					iconSize={11}
+				/>
+			</div>
 		</div>
 
 		{#if source === "pi"}
+			<!-- Sessions eyebrow -->
+			<div class="list-header">
+				<span class="eyebrow">Sessions</span>
+				<span class="eyebrow-count mono">{sessions.length}</span>
+			</div>
+
 			<div class="scroll">
 				{#if sessions.length === 0}
 					<div class="empty">
@@ -229,7 +237,7 @@
 									{#if p !== null}
 										<span class="usage" title={`${s.tokens} / ${s.contextWindow} tokens`}>
 											<span class="bar"><span class="fill" class:hot={p >= 80} style:width={`${p}%`}></span></span>
-											<span class="pct tnum"><AnimatedNumber value={s.tokens ?? 0} format={fmtTokens} /></span>
+											<span class="pct mono"><AnimatedNumber value={s.tokens ?? 0} format={fmtTokens} /></span>
 										</span>
 									{/if}
 								</button>
@@ -241,17 +249,28 @@
 
 			<!-- Bundled demo, pinned at the foot -->
 			<div class="demo-foot">
-				<button class="row demo" class:sel={demoSelected} onclick={ondemo} title="Bundled sample session — a static demo transcript">
-					<span class="status-dot demo-dot"></span>
-					<span class="body">
-						<span class="t1">Demo session</span>
-						<span class="t2">Bundled sample · static</span>
-					</span>
-					<span class="badge">demo</span>
-				</button>
+				<div class="list-header list-header-demo">
+					<span class="eyebrow">Demo</span>
+				</div>
+				<div class="demo-inner">
+					<button class="row demo" class:sel={demoSelected} onclick={ondemo} title="Bundled sample session — a static demo transcript">
+						<span class="status-dot demo-dot"></span>
+						<span class="body">
+							<span class="t1">Demo session</span>
+							<span class="t2 mono">bundled · static</span>
+						</span>
+						<span class="badge mono">demo</span>
+					</button>
+				</div>
 			</div>
 		{:else}
 			<!-- Claude Code session list -->
+			<!-- Sessions eyebrow -->
+			<div class="list-header">
+				<span class="eyebrow">Transcripts</span>
+				<span class="eyebrow-count mono">{claudeSessions.length}</span>
+			</div>
+
 			<div class="scroll">
 				{#if claudeSessions.length === 0}
 					<div class="empty">
@@ -273,11 +292,11 @@
 									<Icon name="file-text" size={13} class="cc-icon" />
 									<span class="body">
 										<span class="t1">{s.title || s.project || s.sessionId}</span>
-										<span class="t2">{s.project}</span>
+										<span class="t2 mono">{s.project}</span>
 									</span>
 									<span class="cc-meta">
-										<span class="ro-badge"><Icon name="eye" size={9} />READ</span>
-										<span class="rel-time tnum" title={new Date(s.mtime).toLocaleString()}>{relTime(s.mtime)}</span>
+										<span class="ro-badge mono"><Icon name="eye" size={9} />RO</span>
+										<span class="rel-time mono" title={new Date(s.mtime).toLocaleString()}>{relTime(s.mtime)}</span>
 									</span>
 								</button>
 							</li>
@@ -285,7 +304,7 @@
 					</ul>
 				{/if}
 			</div>
-			<div class="cc-foot">
+			<div class="cc-foot mono">
 				50 newest · use Open… for older
 			</div>
 		{/if}
@@ -388,9 +407,10 @@
 
 	/* ===== Collapsed source pill ===== */
 	.src-pill {
+		font-family: var(--mono);
 		font-size: var(--fs-xs);
 		font-weight: 700;
-		letter-spacing: 0.05em;
+		letter-spacing: 0.1em;
 		text-transform: uppercase;
 		color: var(--muted);
 		background: var(--panel-2);
@@ -410,6 +430,23 @@
 		background: var(--panel-3);
 	}
 
+	/* ===== Mono eyebrow — the signature brand device ===== */
+	.eyebrow {
+		font-family: var(--mono);
+		font-size: var(--fs-2xs);
+		font-weight: 400;
+		text-transform: uppercase;
+		letter-spacing: 0.12em;
+		color: var(--faint);
+		line-height: 1;
+		white-space: nowrap;
+	}
+	.eyebrow-count {
+		font-size: var(--fs-2xs);
+		color: var(--faint);
+		line-height: 1;
+	}
+
 	/* ===== Expanded header ===== */
 	.head {
 		display: flex;
@@ -419,14 +456,19 @@
 		border-bottom: 1px solid var(--line);
 		flex: 0 0 auto;
 	}
-	/* Source switcher gets its own row beneath the header (keeps the collapse
-	   button in the header from being pushed out of the 232px rail). */
-	.source-row {
+	/* Source section: eyebrow label + switcher control */
+	.source-section {
 		display: flex;
-		padding: var(--sp-2) var(--sp-3);
+		flex-direction: column;
+		gap: var(--sp-2);
+		padding: var(--sp-3) var(--sp-3) var(--sp-2);
 		border-bottom: 1px solid var(--line);
 		flex: 0 0 auto;
 	}
+	.source-row {
+		display: flex;
+	}
+
 	.logo-wrap {
 		flex: 0 0 auto;
 		color: var(--accent);
@@ -437,7 +479,7 @@
 		font-size: var(--fs-sm);
 		font-weight: 700;
 		color: var(--text);
-		letter-spacing: 0.02em;
+		letter-spacing: -0.02em;
 		white-space: nowrap;
 		overflow: hidden;
 		/* fade out when collapsing so text doesn't squash/reflow */
@@ -450,7 +492,7 @@
 
 	.count {
 		margin-left: auto;
-		font-size: var(--fs-xs);
+		font-size: var(--fs-2xs);
 		color: var(--faint);
 		background: var(--panel-2);
 		border: 1px solid var(--line);
@@ -458,6 +500,7 @@
 		padding: 1px var(--sp-2);
 		flex: 0 0 auto;
 		line-height: 1.6;
+		letter-spacing: 0.06em;
 	}
 	.collapse-btn {
 		background: transparent;
@@ -479,6 +522,19 @@
 	.collapse-btn:hover {
 		color: var(--text);
 		background: var(--panel-2);
+	}
+
+	/* ===== Section list header (eyebrow + count) ===== */
+	.list-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding: var(--sp-3) var(--sp-3) var(--sp-1);
+		flex: 0 0 auto;
+	}
+	.list-header-demo {
+		padding-top: var(--sp-2);
+		padding-bottom: var(--sp-1);
 	}
 
 	/* ===== Scroll region ===== */
@@ -525,7 +581,7 @@
 	.list {
 		list-style: none;
 		margin: 0;
-		padding: var(--sp-2) var(--sp-2) var(--sp-1);
+		padding: 0 var(--sp-2) var(--sp-1);
 	}
 	.row {
 		position: relative;
@@ -559,8 +615,9 @@
 	.row:hover {
 		background: var(--panel-2);
 	}
+	/* Selected row: neutral/monochrome tint — blue is reserved for user block kind */
 	.row.sel {
-		background: color-mix(in srgb, var(--accent) 11%, transparent);
+		background: color-mix(in srgb, var(--accent) 8%, transparent);
 	}
 	.row.sel::before {
 		opacity: 1;
@@ -622,6 +679,7 @@
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
+		letter-spacing: -0.01em;
 	}
 	.t2 {
 		font-size: var(--fs-xs);
@@ -657,8 +715,9 @@
 		background: var(--danger);
 	}
 	.pct {
-		font-size: var(--fs-xs);
+		font-size: var(--fs-2xs);
 		color: var(--faint);
+		letter-spacing: 0.04em;
 	}
 
 	/* ===== CC meta (rel-time + read-only badge) ===== */
@@ -673,24 +732,27 @@
 		display: flex;
 		align-items: center;
 		gap: 2px;
-		font-size: var(--fs-xs);
-		font-weight: 600;
-		letter-spacing: 0.05em;
+		font-size: var(--fs-2xs);
+		font-weight: 400;
+		letter-spacing: 0.1em;
 		text-transform: uppercase;
 		color: var(--faint);
 		opacity: 0.65;
 	}
 	.rel-time {
-		font-size: var(--fs-xs);
+		font-size: var(--fs-2xs);
 		color: var(--faint);
 		white-space: nowrap;
+		letter-spacing: 0.04em;
 	}
 
 	/* ===== Demo footer ===== */
 	.demo-foot {
 		flex: 0 0 auto;
-		padding: var(--sp-1) var(--sp-2);
 		border-top: 1px solid var(--line);
+	}
+	.demo-inner {
+		padding: 0 var(--sp-2) var(--sp-2);
 	}
 	/* demo row: dashed border treatment */
 	.row.demo {
@@ -701,13 +763,13 @@
 		background: var(--panel-2);
 	}
 	.row.demo.sel {
-		border-color: color-mix(in srgb, var(--accent) 50%, transparent);
-		background: color-mix(in srgb, var(--accent) 11%, transparent);
+		border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+		background: color-mix(in srgb, var(--accent) 8%, transparent);
 	}
 	.badge {
 		flex: 0 0 auto;
 		font-size: var(--fs-2xs);
-		letter-spacing: 0.06em;
+		letter-spacing: 0.1em;
 		text-transform: uppercase;
 		color: var(--faint);
 		background: var(--panel-2);
@@ -721,10 +783,10 @@
 		flex: 0 0 auto;
 		padding: var(--sp-2) var(--sp-4);
 		border-top: 1px solid var(--line);
-		font-size: var(--fs-xs);
+		font-size: var(--fs-2xs);
+		letter-spacing: 0.06em;
 		color: var(--faint);
 		text-align: center;
-		letter-spacing: 0.02em;
 	}
 
 	/* ===== Accent icon helper (applied via class prop on Icon) ===== */
@@ -763,7 +825,6 @@
 	}
 
 	/* ===== Settings icon — collapsed icon rail ===== */
-	/* margin-top: auto removed — now handled by .rail-foot wrapper */
 	.settings-icon:focus-visible {
 		outline: none;
 		box-shadow: var(--focus-ring);

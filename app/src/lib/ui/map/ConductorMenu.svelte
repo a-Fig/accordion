@@ -330,6 +330,7 @@
 		onclick={toggle}
 	>
 		<Icon name={activeExclusive ? "lock" : "sliders-horizontal"} size={11} />
+		<span class="cond-trigger-eyebrow">CONDUCTOR</span>
 		<span class="cond-trigger-label">{activeLabel}</span>
 		{#if isRemote}
 			<span
@@ -344,6 +345,7 @@
 
 	{#if open}
 		<div class="cond-pop" role="menu" aria-label="Conductors">
+			<p class="cond-eyebrow mono">STRATEGY</p>
 			<!-- In-process conductors (registry-driven — Built-in + any compiled-in sibling) -->
 			{#each IN_PROCESS_CONDUCTORS as c (c.id)}
 				<button
@@ -555,19 +557,19 @@
 		display: inline-flex;
 	}
 
-	/* ── Trigger: clickable version of the old .cond-status badge ── */
+	/* ── Trigger: brand outline button (secondary), with a CONDUCTOR eyebrow ── */
 	.cond-trigger {
 		display: inline-flex;
 		align-items: center;
-		gap: 5px;
+		gap: 6px;
 		font-size: var(--fs-xs);
-		font-weight: 600;
+		font-weight: 500;
 		letter-spacing: 0.01em;
-		color: var(--muted);
-		background: var(--panel-2);
-		border: 1px solid var(--line);
-		padding: 3px 7px 3px 7px;
-		border-radius: var(--radius-pill);
+		color: var(--text);
+		background: transparent;
+		border: 1px solid var(--line-strong);
+		padding: 7px 10px 7px 10px;
+		border-radius: var(--radius-sm);
 		white-space: nowrap;
 		user-select: none;
 		cursor: pointer;
@@ -576,10 +578,18 @@
 			border-color var(--dur-fast) var(--ease-out),
 			color var(--dur-fast) var(--ease-out);
 	}
+	/* Mono eyebrow prefix on the trigger ("CONDUCTOR"). */
+	.cond-trigger-eyebrow {
+		font-family: var(--mono);
+		font-size: var(--fs-2xs);
+		text-transform: uppercase;
+		letter-spacing: 0.12em;
+		color: var(--faint);
+	}
 	.cond-trigger:hover,
 	.cond-trigger.open {
-		background: var(--panel-4);
-		border-color: var(--line-strong);
+		background: var(--accent-soft);
+		border-color: var(--accent);
 		color: var(--text);
 	}
 	.cond-trigger:focus-visible {
@@ -650,6 +660,16 @@
 		border: 1px solid var(--line);
 		border-radius: var(--radius-sm);
 		box-shadow: var(--shadow-2);
+	}
+
+	/* Mono eyebrow section label inside the popover. */
+	.cond-eyebrow {
+		margin: 3px 8px 4px;
+		font-size: var(--fs-2xs);
+		text-transform: uppercase;
+		letter-spacing: 0.12em;
+		color: var(--faint);
+		user-select: none;
 	}
 
 	.cond-item {
