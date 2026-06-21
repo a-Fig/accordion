@@ -11,7 +11,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { WebSocket } from "ws";
+import WebSocket from "ws"; // default export = the WebSocket class (works whether ws resolves as CJS or ESM)
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const PORT = 7790; // isolated from the default 7703

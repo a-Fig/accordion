@@ -1499,12 +1499,18 @@ export async function warmEmbeddings(
 	}
 	if (texts.length === 0) return;
 
+	let timer: ReturnType<typeof setTimeout> | undefined;
 	try {
-		const timeout = new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timed out")), timeoutMs));
+		const timeout = new Promise<never>((_, reject) => {
+			timer = setTimeout(() => reject(new Error("timed out")), timeoutMs);
+		});
 		const vectors = await Promise.race([provider(texts), timeout]);
 		for (let i = 0; i < keys.length; i++) state.embeddingCache[keys[i]] = vectors[i];
 	} catch {
 		// Non-throwing bounded timeout; relevance() falls back to keyword matching.
+	} finally {
+		// Clear the race timer on the success path so it doesn't dangle and pin the event loop.
+		if (timer) clearTimeout(timer);
 	}
 }
 
@@ -1515,10 +1521,12 @@ function hasEmbeddings(state: AccordionState): boolean {
 function relevance(blockText: string, promptText: string, state: AccordionState): number {
 	const bv = state.embeddingCache[textHash(blockText)];
 	const pv = state.embeddingCache[textHash(promptText)];
-	if (bv && pv) {
+	// Guard against a malformed/short provider return (mismatched dims would dot to NaN/garbage
+	// and poison relevance). The rerank path already validates; this matches it for embeddings.
+	if (bv && pv && bv.length === pv.length && bv.length > 0) {
 		let dot = 0;
 		for (let i = 0; i < bv.length; i++) dot += bv[i] * pv[i];
-		return dot; // L2-normalized vectors → cosine similarity
+		return Number.isFinite(dot) ? dot : keywordOverlap(blockText, promptText); // L2-normalized → cosine
 	}
 	return keywordOverlap(blockText, promptText);
 }
@@ -1546,8 +1554,11 @@ export async function warmRerank(
 		}
 	}
 	if (pending.length === 0) return;
+	let timer: ReturnType<typeof setTimeout> | undefined;
 	try {
-		const timeout = new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timed out")), 2000));
+		const timeout = new Promise<never>((_, reject) => {
+			timer = setTimeout(() => reject(new Error("timed out")), 2000);
+		});
 		const scores = await Promise.race([provider(query, pending), timeout]);
 		for (let i = 0; i < pending.length; i++) {
 			const score = scores[i];
@@ -1555,6 +1566,8 @@ export async function warmRerank(
 		}
 	} catch {
 		// Non-throwing: leave the cache as-is; unfold falls back to relevance().
+	} finally {
+		if (timer) clearTimeout(timer);
 	}
 }
 
@@ -2141,30 +2154,44 @@ export function lastCompletedTurnFromMessages(messages: AgentMessage[]): LastCom
 	};
 }
 
-export function createHaikuSummaryProvider(apiKey = process?.env?.ANTHROPIC_API_KEY, model = SUMMARY_MODEL) {
+export function createHaikuSummaryProvider(
+	apiKey = process?.env?.ANTHROPIC_API_KEY,
+	model = SUMMARY_MODEL,
+	timeoutMs = DEFAULT_SUMMARY_TIMEOUT_MS,
+) {
 	if (!apiKey) return undefined;
 	return async ({ block, digest }: SummaryRequest): Promise<string> => {
-		const response = await fetch("https://api.anthropic.com/v1/messages", {
-			method: "POST",
-			headers: {
-				"content-type": "application/json",
-				"x-api-key": apiKey,
-				"anthropic-version": "2023-06-01",
-			},
-			body: JSON.stringify({
-				model,
-				max_tokens: 180,
-				messages: [
-					{
-						role: "user",
-						content: summaryPrompt(block, digest),
-					},
-				],
-			}),
-		});
-		if (!response.ok) throw new Error(`Anthropic ${response.status}`);
-		const json = (await response.json()) as any;
-		return getText(json.content) || digest;
+		// Bound the request: a hung fetch would otherwise never clear its hash from
+		// pendingSummaryHashes, so that block could never be re-summarized. (The OpenAI-compatible
+		// provider already does this; the default Haiku path must too.)
+		const controller = new AbortController();
+		const timer = setTimeout(() => controller.abort(), timeoutMs);
+		try {
+			const response = await fetch("https://api.anthropic.com/v1/messages", {
+				method: "POST",
+				headers: {
+					"content-type": "application/json",
+					"x-api-key": apiKey,
+					"anthropic-version": "2023-06-01",
+				},
+				body: JSON.stringify({
+					model,
+					max_tokens: 180,
+					messages: [
+						{
+							role: "user",
+							content: summaryPrompt(block, digest),
+						},
+					],
+				}),
+				signal: controller.signal,
+			});
+			if (!response.ok) throw new Error(`Anthropic ${response.status}`);
+			const json = (await response.json()) as any;
+			return getText(json.content) || digest;
+		} finally {
+			clearTimeout(timer);
+		}
 	};
 }
 
