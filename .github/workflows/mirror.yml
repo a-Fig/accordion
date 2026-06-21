@@ -24,17 +24,21 @@ jobs:
           BEFORE: ${{ github.event.before }}
           AFTER: ${{ github.sha }}
         run: |
-          git config user.email "sync@accordion.dev"
-          git config user.name "Accordion Sync"
+          # Configure credentials for all github.com git operations
+          git config --global credential.helper store
+          echo "https://x-token-auth:${TOKEN}@github.com" > ~/.git-credentials
+          chmod 600 ~/.git-credentials
+
+          git config --global user.email "sync@accordion.dev"
+          git config --global user.name "Accordion Sync"
 
           NEW=$(git log --reverse --format="%H" "$BEFORE..$AFTER")
           if [ -z "$NEW" ]; then echo "Nothing to sync."; exit 0; fi
+          echo "Commits to sync: $(echo "$NEW" | wc -l)"
 
-          git clone "https://$TOKEN@github.com/a-Fig/Accordion-AI-hackBerkeley.git" /tmp/pub
+          git clone https://github.com/a-Fig/Accordion-AI-hackBerkeley.git /tmp/pub
           cd /tmp/pub
-          git config user.email "sync@accordion.dev"
-          git config user.name "Accordion Sync"
-          git remote add src "https://github.com/a-Fig/accordion.git"
+          git remote add src https://github.com/a-Fig/accordion.git
           git fetch src --no-tags
 
           for SHA in $NEW; do
@@ -42,10 +46,12 @@ jobs:
             NOW="$(date -u +%s) +0000"
             if [ "$NPARENTS" -gt "1" ]; then
               GIT_AUTHOR_DATE="$NOW" GIT_COMMITTER_DATE="$NOW" \
-                git cherry-pick -m 1 --allow-empty "$SHA" || { git cherry-pick --abort 2>/dev/null; echo "Skipped merge $SHA"; }
+                git cherry-pick -m 1 --allow-empty "$SHA" \
+                || { git cherry-pick --abort 2>/dev/null; echo "Skipped merge $SHA"; }
             else
               GIT_AUTHOR_DATE="$NOW" GIT_COMMITTER_DATE="$NOW" \
-                git cherry-pick --allow-empty "$SHA" || { git cherry-pick --abort 2>/dev/null; echo "Skipped $SHA"; }
+                git cherry-pick --allow-empty "$SHA" \
+                || { git cherry-pick --abort 2>/dev/null; echo "Skipped $SHA"; }
             fi
             echo "Synced $SHA"
           done
