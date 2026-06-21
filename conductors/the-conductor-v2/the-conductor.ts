@@ -44,6 +44,8 @@ import {
 	createHaikuSummaryProvider,
 	createGeminiSummaryProvider,
 	EMBEDDING_MODEL,
+	FOLD_TARGET_MIN,
+	FOLD_TARGET_MAX,
 	DEFAULT_OLLAMA_BASE_URL,
 	DEFAULT_OLLAMA_MODEL,
 	type AccordionState,
@@ -387,11 +389,20 @@ function sendStatus(
 	const pct = cap > 0 ? Math.round((plan.assembledTokens / cap) * 100) : 0;
 	const folded = [...plan.levels.values()].filter((l) => l > 0).length;
 	const pressure = pct < 70 ? "comfortable" : pct < 85 ? "normal" : "tight";
+	const toStage = (stage: number | undefined) => stage === 3 ? "rerank" : stage === 2 ? "embed" : stage === 1 ? "keyword" : undefined;
 
 	const foldedTurns = [
 		...new Set(blocks.filter((b) => (plan.levels.get(b.id) ?? 0) > 0).map((b) => b.turn)),
 	].sort((a, b) => a - b);
 	const foldedTurnSet = new Set(foldedTurns);
+	const proactiveUnfolds = plan.proactiveUnfolds.map((id) => {
+		const b = blocks.find((block) => block.id === id);
+		return { blockId: id, turn: b?.turn, reason: "relative-outlier relevance" };
+	});
+	const unitTrace = plan.unitTrace.map((unit) => ({
+		...unit,
+		stage: toStage(unit.stage),
+	}));
 
 	const text =
 		`${pct}% · target ${(plan.foldTarget * 100).toFixed(0)}% · ${folded} folded · ` +
@@ -417,8 +428,41 @@ function sendStatus(
 				relevanceTOC: foldedTurns.length ? buildRelevanceTOC(blocks, foldedTurnSet, prompt, state.accState).slice(0, 600) : "",
 			},
 			details: {
+				health: {
+					foldTargetCalibrated: state.accState.foldTargetCalibrated,
+					foldTargetThisTurn: plan.foldTarget,
+					foldTargetBand: { min: FOLD_TARGET_MIN, max: FOLD_TARGET_MAX },
+					assembledTokens: plan.assembledTokens,
+					budgetTokens: cap,
+					contextWindow: view.contextWindow,
+					pressure,
+				},
+				unitTrace,
 				factLedger: buildFactLedgerStructured(blocks),
 				relevanceTOC: foldedTurns.length ? buildRelevanceTOCStructured(blocks, foldedTurnSet, prompt, state.accState) : [],
+				proactiveUnfolds,
+				calibration: {
+					events: state.accState.calibrationEvents.slice(-40),
+				},
+				caches: {
+					summary: {
+						provider: state.summaryProviderKind,
+						pending: state.pendingCompletions.size,
+						size: Object.keys(state.accState.summaryCache).length,
+						errors: state.summaryErrors,
+						latestError: state.lastSummaryError,
+					},
+					embedding: {
+						size: Object.keys(state.accState.embeddingCache).length,
+						provider: EMBEDDINGS_DISABLED ? "disabled" : embeddingProvider ? EMBEDDING_MODEL : "keyword",
+					},
+					rerank: {
+						size: Object.keys(state.accState.rerankCache).length,
+						provider: RERANK_ENABLED ? (rerankProvider ? "cross-encoder" : "fallback") : "disabled",
+					},
+					latestProviderError: state.accState.providerError || state.lastSummaryError,
+				},
+				// Backward-compatible shape for the existing MapHeader tooltip.
 				summary: {
 					provider: state.summaryProviderKind,
 					pending: state.pendingCompletions.size,

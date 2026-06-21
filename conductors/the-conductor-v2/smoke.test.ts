@@ -53,10 +53,11 @@ test("WS round-trip: hello → context/update → valid commands", async () => {
 		const foldable = new Set(["text", "thinking", "tool_result"]);
 		const byId = new Map(view.blocks.map((b: any) => [b.id, b]));
 
-		const commands: any[] = await new Promise((resolve, reject) => {
+		const result: { commands: any[]; status: any } = await new Promise((resolve, reject) => {
 			const timer = setTimeout(() => reject(new Error("timed out waiting for commands")), 8000);
 			let gotHello = false;
 			let gotHostComplete = false;
+			let status: any = null;
 			ws.on("open", () => {
 				ws.send(JSON.stringify({
 					type: "host/hello", conductorProtocol: 3,
@@ -75,16 +76,23 @@ test("WS round-trip: hello → context/update → valid commands", async () => {
 					assert.equal(msg.capability, "complete");
 					assert.ok(msg.reqId.startsWith("summary-"));
 					gotHostComplete = true;
+				} else if (msg.type === "conductor/status") {
+					status = msg;
 				} else if (msg.type === "conductor/commands") {
 					assert.ok(gotHello, "hello precedes commands");
 					assert.ok(gotHostComplete, "v2 asks the host for summaries by default");
+					assert.ok(status, "status telemetry precedes commands");
+					assert.ok(status.details?.health, "status includes health details");
+					assert.ok(Array.isArray(status.details?.unitTrace), "status includes unit trace");
+					assert.ok(status.details?.caches?.summary, "status includes cache diagnostics");
 					clearTimeout(timer);
-					resolve(msg.commands);
+					resolve({ commands: msg.commands, status });
 				}
 			});
 			ws.on("error", reject);
 		});
 
+		const commands = result.commands;
 		assert.ok(commands.length > 0, "expected folds under pressure");
 		for (const c of commands) {
 			assert.ok(["fold", "replace", "group"].includes(c.kind), `known command kind: ${c.kind}`);
