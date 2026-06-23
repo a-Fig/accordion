@@ -1,0 +1,152 @@
+# release.yml — Accordion desktop app release workflow
+#
+# TRIGGERS:
+#   - Push of a tag matching v* (e.g. v0.1.0)  →  creates a GitHub draft release
+#   - workflow_dispatch  →  manual run from the Actions tab (also creates a draft)
+#
+# WHAT IT DOES:
+#   Builds the Tauri 2 app on all three desktop OSes in parallel and attaches
+#   the native installers (.dmg, .msi/.exe, .deb/.AppImage/…) to a DRAFT
+#   GitHub Release.  A human must review and publish the draft — nothing ships
+#   automatically.
+#
+# SIGNING NOTE (IMPORTANT):
+#   The binaries produced here are UNSIGNED.
+#     • macOS: Gatekeeper will quarantine the .dmg; users must right-click → Open.
+#     • Windows: SmartScreen will show an "unknown publisher" warning on first run.
+#   To add signing later:
+#     • macOS: add APPLE_CERTIFICATE / APPLE_CERTIFICATE_PASSWORD /
+#       APPLE_SIGNING_IDENTITY / APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID secrets
+#       and un-comment the relevant tauri-action inputs.
+#     • Windows: add a Base64-encoded PFX as TAURI_SIGNING_PRIVATE_KEY and its
+#       passphrase as TAURI_SIGNING_PRIVATE_KEY_PASSWORD in repo secrets, then set
+#       the tauri.conf.json windows.certificateThumbprint or use the tauri-action
+#       signing inputs.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+# Grant the GITHUB_TOKEN permission to create/update releases and upload assets.
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build (${{ matrix.platform }} ${{ matrix.rust-targets }})
+    strategy:
+      fail-fast: false   # keep the other OS builds going if one fails
+      matrix:
+        include:
+          # ── macOS Apple Silicon ────────────────────────────────────────────
+          # We build each arch separately (aarch64 + x86_64) rather than a
+          # universal binary because universal builds require both toolchains on
+          # the same runner and notarisation is per-binary; separate .dmgs are
+          # the simpler, well-tested path (this is the canonical tauri-action
+          # matrix). Both legs run on macos-latest (arm64) and the Intel leg
+          # CROSS-COMPILES x86_64 — GitHub retired the standalone macos-13 Intel
+          # runner, and Rust cross-compiles to x86_64-apple-darwin cleanly on an
+          # Apple-Silicon runner once the target is installed below.
+          - platform: macos-latest   # arm64 runner (M-series)
+            args: '--target aarch64-apple-darwin'
+            rust-targets: aarch64-apple-darwin
+
+          # ── macOS Intel (cross-compiled on the arm64 runner) ──────────────
+          - platform: macos-latest
+            args: '--target x86_64-apple-darwin'
+            rust-targets: x86_64-apple-darwin
+
+          # ── Linux ─────────────────────────────────────────────────────────
+          # ubuntu-22.04 (not ubuntu-latest) for the widest glibc compatibility
+          # and because webkit2gtk-4.1 is reliably available there.
+          - platform: ubuntu-22.04
+            args: ''
+            rust-targets: ''
+
+          # ── Windows ───────────────────────────────────────────────────────
+          - platform: windows-latest
+            args: ''
+            rust-targets: ''
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Node ──────────────────────────────────────────────────────────────
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          # Point at the lockfile inside app/ so npm cache keys are correct.
+          cache-dependency-path: app/package-lock.json
+
+      # ── Rust ──────────────────────────────────────────────────────────────
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # Add the cross-compile target on macOS matrix legs; empty string is
+          # fine on Linux/Windows (the default host target is used).
+          targets: ${{ matrix.rust-targets }}
+
+      - name: Rust build cache
+        uses: swatinem/rust-cache@v2
+        with:
+          # Tell the cache action where Cargo.lock / target/ live.
+          workspaces: app/src-tauri -> target
+
+      # ── Linux system deps ─────────────────────────────────────────────────
+      # Required by Tauri 2 on Linux (webkit2gtk 4.1 + appindicator + friends).
+      # Skipped on macOS/Windows via the conditional.
+      - name: Install Linux system dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libssl-dev \
+            libxdo-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      # ── Frontend deps ─────────────────────────────────────────────────────
+      - name: Install npm dependencies
+        working-directory: app
+        run: npm ci
+
+      # ── Build & release ───────────────────────────────────────────────────
+      - name: Build and upload release assets
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # Path to the Tauri project root (where src-tauri/ lives), relative
+          # to the repo root.  The action locates tauri.conf.json from here.
+          projectPath: app
+
+          # __VERSION__ is replaced by tauri-action with the version from
+          # tauri.conf.json (currently "0.1.0").
+          tagName: ${{ github.ref_name }}
+          releaseName: 'Accordion __VERSION__'
+          releaseBody: |
+            See the attached assets for installers.
+
+            **Note: these binaries are unsigned.**
+            - macOS: right-click the .dmg and choose Open to bypass Gatekeeper.
+            - Windows: click "More info → Run anyway" on the SmartScreen prompt.
+          releaseDraft: true
+          prerelease: false
+
+          # Pass the per-matrix Cargo target flag (e.g. --target aarch64-apple-darwin).
+          # Empty string on Linux/Windows — no extra args needed.
+          args: ${{ matrix.args }}
