@@ -5,8 +5,7 @@
   <img alt="Accordion" src="docs/assets/logo-lockup-black.png" width="440">
 </picture>
 
-### /compact a naive solution — Developers hate it.
-### Accordion is different
+### /compact is the naive solution, Accordion is the intelligent one.
 
 **See everything your AI agent holds in context — and fold it like an accordion instead.**
 
