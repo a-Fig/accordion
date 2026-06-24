@@ -17,30 +17,30 @@
 ---
 
 Accordion is a [pi](https://github.com/earendil-works/pi) extension that shows you
-your agent's entire context window at a glance — as a grid of colored blocks — and
-lets you manage it manually or with intelligence.
+your agent's entire context window at a glance and lets you manage it manually or with intelligence through a conductor.
 
 <div align="center">
 
 <a href="docs/assets/accordion-demo.mp4"><img src="docs/assets/map-hero.png" alt="Accordion's context Map — a live pi session rendered as a grid of colored blocks" width="860"></a>
 
-<sub>Your whole context window, one square per block — live above, protected working tail below</sub>
+<sub>Your whole context window split in 2 sections. The lower section represents your agents most recent context and is protected against any interference</sub>
 
 </div>
 
-> 📖 **[VISION.md](VISION.md)** is the full product north star. This page is the short version.
-
 ## Why it's different
 
-### No blocking calls for compaction 
+#### 1. No blocking calls for compaction 
 your context window is automatically managed for you in the background, with cashe optimizations in mind.
 
-### longer more useful sessions
+#### 2. longer more useful sessions
+The relevance of each block is ranked so we only cut bloat, and keep whats important. 
 
-### Cheaper inference costs
+#### 3. Cheaper inference costs
+Accordion keeps your context window lean.
+
 
 Every long-running agent hits the same wall: the context fills up, and something has to
-go. Today's answers are both bad:
+go. Today's answers are dumb and dumber:
 
 - **Compaction** blasts your whole history into one lossy summary — slow, destructive,
   all-or-nothing.
@@ -48,7 +48,7 @@ go. Today's answers are both bad:
 
 Both treat context as a buffer to flush. You never saw it go, and you can't get it back.
 
-| | Sliding window | `/compact` | Black-box memory | 🪗 Accordion |
+| | Sliding window | `/compact` | skills & memory | 🪗 Accordion |
 |---|:---:|:---:|:---:|:---:|
 | Keeps old context usable | ❌ | ⚠️ lossy | ⚠️ if retrieved | ✅ |
 | **Reversible** to full detail | ❌ | ❌ | ❌ | ✅ |
