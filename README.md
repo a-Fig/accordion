@@ -68,11 +68,6 @@ second — click it (or run `/accordion` in that terminal) and watch its context
 live. Folding is **off by default**; flip the header toggle to arm it and start steering
 what the agent is shown.
 
-<div align="center">
-<img src="docs/assets/sessions-sidebar.png" alt="Sessions sidebar — every running pi session auto-appears, with live token counts" width="260">
-<br><sub>Every running pi session auto-appears in the sidebar, with a live token count.</sub>
-</div>
-
 ## How it works
 
 The **context Map** is the whole window at a glance: one square per block, sized by token
@@ -95,8 +90,8 @@ Every block is **Full**, **Folded** (shown as a short tagged summary), or **Pinn
 (locked open).
 
 <div align="center">
-<img src="docs/assets/fold-region.png" alt="A region of folded blocks — dimmed and hatched, still on the wire as compact digests" width="820">
-<br><sub>Folded blocks recede — dimmed and hatched — but stay on the wire as a <code>{#code FOLDED}</code> digest the agent can <code>unfold</code> or <code>recall</code> at any time.</sub>
+<img src="docs/assets/attention-conductor.png" alt="Attention conductor view — each block tinted by how much the working tail still attends back to it" width="600">
+<br><sub>Folded blocks are shown with dull colors </sub>
 </div>
 
 Folds nest: cold turns fold into groups, groups into bigger groups, so a session of
@@ -119,12 +114,7 @@ In an early run on **SlopCodeBench** (a long-horizon coding benchmark), Thermocl
 | Conductor | Budget | Score | Checkpoints reached |
 |---|:---:|:---:|:---:|
 | **Thermocline** | 100k | **83.3%** | 5 / 6 |
-| naive compaction | 100k | 33.3% | 2 / 4 |
-
-<div align="center">
-<img src="docs/assets/attention-conductor.png" alt="Attention conductor view — each block tinted by how much the working tail still attends back to it" width="600">
-<br><sub>The attention view: each block tinted by how much the working tail still attends back to it. Cold blocks fold first.</sub>
-</div>
+| naive compaction | 100k | 33.3% | 2 / 6 |
 
 > ⚠️ **Read this as a signal, not a guarantee.** It's a single hackathon-scale run on one
 > problem set — not a published benchmark. Broader, repeatable evaluation is on the roadmap.
