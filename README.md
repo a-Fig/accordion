@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="docs/assets/accordion-hero.gif" alt="Accordion — the context map demo: blocks folding and unfolding while the protected tail stays intact" width="820">
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo-lockup-white.png">
   <img alt="Accordion" src="docs/assets/logo-lockup-black.png" width="440">
