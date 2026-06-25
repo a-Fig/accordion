@@ -66,7 +66,7 @@ In a test run on **SlopCodeBench** (a long-horizon coding benchmark), Thermoclin
 | **Thermocline** | 100k | **83.3%** | 5 / 6 |
 | naive compaction | 100k | 33.3% | 2 / 6 |
 
-> ⚠️ **Read this as a signal, not a guarantee.** It's a single hackathon-scale run on one
+> ⚠️ **Read this as a signal, not a guarantee.** It's a single hackathon-scale run on a
 > subset of the problems — not a published benchmark. Broader, repeatable evaluation is on the roadmap.
 
 ## How it works
