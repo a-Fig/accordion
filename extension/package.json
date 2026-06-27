@@ -1,6 +1,6 @@
 {
   "name": "@a-fig/accordion",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "Accordion live link — a pi extension that streams context to the Accordion GUI and applies the fold plan the GUI returns.",
   "keywords": ["pi-package"],
@@ -16,7 +16,8 @@
   "files": [
     "accordion.js",
     "dist",
-    "skills"
+    "skills",
+    "README.md"
   ],
   "dependencies": {
     "ws": "^8.18.0"

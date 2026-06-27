@@ -137,39 +137,14 @@ groups, no replay. That's the build ahead.
 
 ### Part 1 — Browser (no Rust, no desktop app)
 
-The fastest path. The pi extension HTTP-serves Accordion in your browser — no Rust, no
-desktop app needed. Single session only.
-
-**1. Clone, build the browser UI, and install the extension:**
-
 ```bash
-git clone https://github.com/a-Fig/accordion.git
-cd accordion
-npm install --prefix app && npm run build --prefix app   # builds the static browser bundle (app/build)
-cd extension && npm install                              # the pi extension that serves it
+pi install npm:@a-fig/accordion
 ```
-
-> The extension serves the UI from `app/build` (produced by `npm run build` above).
-> Without that build, `/accordion` opens to a "No browser build found" page.
-
-**2. Register it with pi** — add to `~/.pi/agent/settings.json`:
-
-```json
-{ "extensions": ["<absolute-path-to-repo>/extension/accordion.ts"] }
-```
-
-**3. Run pi in any project, then open Accordion in your browser:**
-
-```bash
-/accordion   # prints the local URL and opens it
-```
-
-That's it. The page auto-connects to the running session. Folding is **off by default**;
-flip the **Folding** toggle in the header to start steering what the agent sees.
+That's it, assuming you have [pi](https://github.com/earendil-works/pi)
 
 ---
 
-### Part 2 — Desktop app (full feature set)
+### Part 2 — Desktop app (Optional - full feature set)
 
 The desktop app adds **multi-session discovery** (switch between running pi sessions from
 a sidebar), conductors that require local model resources, and the `/accordion` command
@@ -187,7 +162,7 @@ git clone https://github.com/a-Fig/accordion.git
 cd accordion/app && npm install
 ```
 
-**2. Register the extension with pi** — same as above, in `~/.pi/agent/settings.json`:
+**2. Register the extension with pi** — add to `~/.pi/agent/settings.json`:
 
 ```json
 { "extensions": ["<absolute-path-to-repo>/extension/accordion.ts"] }
