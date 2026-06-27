@@ -140,6 +140,10 @@ groups, no replay. That's the build ahead.
 ```bash
 pi install npm:@a-fig/accordion
 ```
+restart pi if it is already running, then inside of pi run:                                      
+ ```bash
+    /accordion                                                                       
+ ```
 That's it, assuming you have [pi](https://github.com/earendil-works/pi)
 
 ---
