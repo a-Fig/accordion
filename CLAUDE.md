@@ -6,7 +6,6 @@ Guidance for AI coding sessions. [VISION.md](VISION.md) = product north star · 
 
 - **Marketing site:** https://get-accordion.dev/
 - **Public repo:** https://github.com/a-Fig/Accordion
-- **Private repo:** https://github.com/a-Fig/accordion-private
 
 ## Terminology
 
