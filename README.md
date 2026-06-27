@@ -137,33 +137,14 @@ groups, no replay. That's the build ahead.
 
 ### Part 1 — Browser (no Rust, no desktop app)
 
-The fastest path. `pi install` the published package and the pi extension HTTP-serves
-Accordion in your browser — no clone, no build, no Rust. Single session only.
-
-**1. Install the package:**
-
 ```bash
 pi install npm:@a-fig/accordion
 ```
-
-This adds `npm:@a-fig/accordion` to `~/.pi/agent/settings.json` (the extension, the
-browser UI, and the `unfold` / `recall` skills are all in the package).
-
-**2. Restart pi**, then in any project run:
-
-```bash
-/accordion   # prints the local URL and opens it
-```
-
-That's it. The page auto-connects to the running session. Folding is **off by default**;
-flip the **Folding** toggle in the header to start steering what the agent sees.
-
-> To try it without writing to settings, use `pi -e npm:@a-fig/accordion` (installs to a
-> temporary directory for the current run only).
+That's it, assuming you have [pi](https://github.com/earendil-works/pi)
 
 ---
 
-### Part 2 — Desktop app (full feature set)
+### Part 2 — Desktop app (Optional - full feature set)
 
 The desktop app adds **multi-session discovery** (switch between running pi sessions from
 a sidebar), conductors that require local model resources, and the `/accordion` command
