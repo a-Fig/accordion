@@ -179,19 +179,26 @@ async function sendCompletion(req: CompletionRequest): Promise<CompletionResult>
 	});
 }
 
-export function connectLive(port: number = DEFAULT_PORT): void {
+export function connectLive(port: number = DEFAULT_PORT, opts: { host?: string; token?: string } = {}): void {
 	if (typeof window === "undefined" || typeof WebSocket === "undefined") return;
 	cancelPendingLoad(); // invalidate any pending file/CC load that would otherwise clobber the live store
 	disconnectLive(); // drop any prior socket
 	manualClose = false;
+	// Host defaults to loopback (the desktop app is always co-located with pi). In
+	// browser-served mode the caller passes window.location.hostname so a remote
+	// browser reaches a 0.0.0.0-bound session. The token — only needed when dialing
+	// off-loopback — is forwarded on the WS URL; the browser-served page already has
+	// it in its own URL (?token=…), so the user never types it.
+	const host = opts.host ?? "127.0.0.1";
+	const tokenQs = opts.token ? `/?token=${encodeURIComponent(opts.token)}` : "";
 	live.status = "connecting";
-	live.detail = `ws://127.0.0.1:${port}`;
+	live.detail = `ws://${host}:${port}`;
 	live.sessionId = null;
 	session.error = "";
 
 	let ws: WebSocket;
 	try {
-		ws = new WebSocket(`ws://127.0.0.1:${port}`);
+		ws = new WebSocket(`ws://${host}:${port}${tokenQs}`);
 	} catch (e) {
 		live.status = "error";
 		live.detail = e instanceof Error ? e.message : String(e);

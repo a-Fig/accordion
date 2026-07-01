@@ -138,10 +138,21 @@
 	// Browser-served mode is single-session: the extension that served this page hosts the
 	// live WS on the SAME origin port. This is the "way back" to the live session — e.g.
 	// after viewing the Demo — since the browser has no multi-session discovery to pick from.
+	// The per-session token the browser-served page carries (?token=… or the
+	// accordion_token cookie). Forwarded on the WS upgrade so an off-loopback
+	// (0.0.0.0-bound) session can be steered from a remote browser safely.
+	function readServedToken(): string | null {
+		if (typeof window === "undefined") return null;
+		const q = new URLSearchParams(window.location.search).get("token");
+		if (q) return q;
+		const m = typeof document.cookie === "string" ? document.cookie.match(/accordion_token=([0-9a-f]+)/) : null;
+		return m ? m[1] : null;
+	}
+
 	function reconnectServed(): void {
 		discovery.selected = null;
 		claudeDiscovery.selected = null;
-		connectLive(Number(window.location.port) || DEFAULT_PORT);
+		connectLive(Number(window.location.port) || DEFAULT_PORT, { host: window.location.hostname, token: readServedToken() ?? undefined });
 	}
 
 	// A Claude Code transcript: load it read-only and tail it for appends. There is
@@ -178,7 +189,7 @@
 					browserServed = true;
 					servedSessionId = body.sessionId ?? null;
 					const port = Number(window.location.port) || DEFAULT_PORT;
-					connectLive(port);
+					connectLive(port, { host: window.location.hostname, token: readServedToken() ?? undefined });
 				} catch {
 					// 404, network error, non-JSON — leave browserServed false; manual UI stays.
 				}
@@ -376,7 +387,7 @@
 								<input class="port" type="number" min="1" max="65535" bind:value={manualPort} aria-label="pi port" />
 								<button
 									class="btn-primary"
-									onclick={() => connectLive(manualPort)}
+									onclick={() => connectLive(manualPort, !isTauriEnv ? { host: window.location.hostname, token: readServedToken() ?? undefined } : {})}
 									disabled={live.status === "connecting"}
 								>
 									<Icon name="activity" size={14} />
