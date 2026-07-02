@@ -138,10 +138,23 @@
 	// Browser-served mode is single-session: the extension that served this page hosts the
 	// live WS on the SAME origin port. This is the "way back" to the live session — e.g.
 	// after viewing the Demo — since the browser has no multi-session discovery to pick from.
+	// Forward the per-session token (when present in the page URL ?token=…) on the
+	// WS upgrade so an off-loopback (0.0.0.0-bound) session can be steered from a
+	// remote browser. NOTE: the accordion_token cookie is HttpOnly, so JS cannot read
+	// it here — that is deliberate. On a reload without ?token=…, readServedToken()
+	// returns null and the WS URL carries no token, but the browser still sends the
+	// HttpOnly cookie on the same-origin WS upgrade and the extension's verifyWsUpgrade
+	// accepts that cookie (mirroring isWebAuthed). So the cookie fallback lives on the
+	// server side of the upgrade, not in JS.
+	function readServedToken(): string | null {
+		if (typeof window === "undefined") return null;
+		return new URLSearchParams(window.location.search).get("token");
+	}
+
 	function reconnectServed(): void {
 		discovery.selected = null;
 		claudeDiscovery.selected = null;
-		connectLive(Number(window.location.port) || DEFAULT_PORT);
+		connectLive(Number(window.location.port) || DEFAULT_PORT, { host: window.location.hostname, token: readServedToken() ?? undefined });
 	}
 
 	// A Claude Code transcript: load it read-only and tail it for appends. There is
@@ -178,7 +191,7 @@
 					browserServed = true;
 					servedSessionId = body.sessionId ?? null;
 					const port = Number(window.location.port) || DEFAULT_PORT;
-					connectLive(port);
+					connectLive(port, { host: window.location.hostname, token: readServedToken() ?? undefined });
 				} catch {
 					// 404, network error, non-JSON — leave browserServed false; manual UI stays.
 				}
@@ -376,7 +389,7 @@
 								<input class="port" type="number" min="1" max="65535" bind:value={manualPort} aria-label="pi port" />
 								<button
 									class="btn-primary"
-									onclick={() => connectLive(manualPort)}
+									onclick={() => connectLive(manualPort, !isTauriEnv ? { host: window.location.hostname, token: readServedToken() ?? undefined } : {})}
 									disabled={live.status === "connecting"}
 								>
 									<Icon name="activity" size={14} />

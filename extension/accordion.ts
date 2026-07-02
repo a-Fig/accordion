@@ -73,6 +73,64 @@ const FOCUS_PATH = path.join(REGISTRY_ROOT, FOCUS_FILE);
 const ACCORDION_APP_FLAG = "accordion-app";
 const ACCORDION_APP_ENV = "ACCORDION_APP_PATH";
 
+// Bind knobs (issue #42): the host/interface and port the live link listens on.
+// Defaults keep the original loopback + OS-assigned-ephemeral behavior; setting
+// the host to 0.0.0.0 (or a specific interface) lets a remote browser reach the
+// session. Flag wins over env, which wins over the default — same precedence as
+// the ACCORDION_APP path knob above.
+const ACCORDION_HOST_FLAG = "accordion-host";
+const ACCORDION_HOST_ENV = "ACCORDION_HOST";
+const ACCORDION_PORT_FLAG = "accordion-port";
+const ACCORDION_PORT_ENV = "ACCORDION_PORT";
+
+/** Resolve the bind host: flag -> env -> 127.0.0.1 (loopback, the safe default). */
+function resolveBindHost(pi: ExtensionAPI): string {
+	const flagVal = pi.getFlag(ACCORDION_HOST_FLAG);
+	if (typeof flagVal === "string" && flagVal.trim()) return flagVal.trim();
+	const envVal = process.env[ACCORDION_HOST_ENV];
+	if (typeof envVal === "string" && envVal.trim()) return envVal.trim();
+	return "127.0.0.1";
+}
+
+/** Resolve the bind port: flag -> env -> 0 (OS-assigned ephemeral). Invalid/empty -> 0. */
+function resolveBindPort(pi: ExtensionAPI): number {
+	const flagVal = pi.getFlag(ACCORDION_PORT_FLAG);
+	const raw = (typeof flagVal === "string" ? flagVal : "") || process.env[ACCORDION_PORT_ENV] || "";
+	const n = Number.parseInt(String(raw).trim(), 10);
+	return Number.isFinite(n) && n >= 0 && n <= 65535 ? n : 0;
+}
+
+/** True if a BIND HOST string names only loopback (so off-loopback peers can't reach). */
+function isLoopbackHost(host: string): boolean {
+	const h = host.toLowerCase();
+	return h === "127.0.0.1" || h === "::1" || h === "localhost";
+}
+
+/** True if a socket peer address is loopback (127.0.0.1 / ::1, incl. IPv4-mapped IPv6). */
+function isLoopbackPeer(addr: string | undefined | null): boolean {
+	if (!addr) return false;
+	const a = addr.toLowerCase();
+	// Strip the IPv4-mapped IPv6 prefix so 127.0.0.1 is recognized under dual-stack.
+	const v4 = a.startsWith("::ffff:") ? a.slice(7) : a;
+	return v4 === "127.0.0.1" || v4 === "::1" || v4 === "localhost";
+}
+
+/** Best-effort first non-internal IPv4 from the network interfaces, for the remote hint. */
+function firstLanIp(): string | null {
+	try {
+		const ifaces = os.networkInterfaces();
+		for (const list of Object.values(ifaces)) {
+			if (!list) continue;
+			for (const i of list) {
+				if (i.family === "IPv4" && !i.internal) return i.address;
+			}
+		}
+	} catch {
+		/* best-effort */
+	}
+	return null;
+}
+
 type LaunchSource = "cli" | "env" | "default";
 type LaunchResult =
 	| { ok: true; path: string; source: LaunchSource }
@@ -205,16 +263,27 @@ export default function accordionLive(pi: ExtensionAPI): void {
 		description: "Path to the Accordion desktop app executable for /accordion launch/focus",
 		type: "string",
 	});
+	pi.registerFlag(ACCORDION_HOST_FLAG, {
+		description: "Host/interface the Accordion live link binds (default 127.0.0.1; use 0.0.0.0 to allow remote browsers)",
+		type: "string",
+	});
+	pi.registerFlag(ACCORDION_PORT_FLAG, {
+		description: "Fixed port for the Accordion live link (default 0 = OS-assigned ephemeral)",
+		type: "string",
+	});
 
 	let wss: WebSocketServer | null = null;
 	// The HTTP server that BOTH hosts the WebSocket upgrade AND serves the browser
 	// build of the Accordion app on the same ephemeral port (feat/browser-served-extension).
 	// One server per pi session; closed alongside `wss` at shutdown.
 	let httpServer: http.Server | null = null;
-	// Per-session token gating the HTTP static-file serving ONLY. Generated once when
-	// the server starts. The WS upgrade path stays UNAUTHENTICATED (see startServer's
-	// banner): the desktop Tauri app dials ws://127.0.0.1:<port> with no token and must
-	// keep working unchanged, so the token never guards the WebSocket — only file serving.
+	// Per-session token gating the HTTP static-file surface AND (when bound off-loopback)
+	// the WS upgrade for non-loopback peers. Generated once when the server starts.
+	// A loopback peer (the desktop Tauri app, or a same-machine browser) dials tokenless
+	// and keeps working unchanged; a NON-loopback peer — only reachable when the bind host
+	// is 0.0.0.0 or a specific interface — must present this token on the upgrade. The
+	// browser-served page already carries it in its URL (?token=…), so the real user never
+	// types it; the gate keeps a network port-scanner from steering the agent's context.
 	let webToken = "";
 	let client: WebSocket | null = null; // the GUI (one driver at a time in M1)
 	let sessionId = "";
@@ -571,28 +640,68 @@ export default function accordionLive(pi: ExtensionAPI): void {
 		}
 	}
 
+	/**
+	 * Gate the WS upgrade by peer address. A loopback peer (the desktop app, or a
+	 * same-machine browser) connects tokenless — unchanged from the original design.
+	 * A NON-loopback peer — only reachable when the bind host is 0.0.0.0 or a specific
+	 * interface — must present the per-session `webToken`, which the browser-served page
+	 * already carries in its URL (?token=…) and forwards on the upgrade. This keeps
+	 * remote reachability safe by default: the token the user already has unlocks
+	 * steering for them, while a port-scanner on the network is refused.
+	 */
+	// The static-file surface (isWebAuthed) accepts the token via query OR the
+	// accordion_token cookie. The WS upgrade must accept the SAME cookie too: the cookie
+	// is HttpOnly (so JS can't read it to forward it on a reconnect without ?token=…),
+	// but the browser auto-sends it on a same-origin WS upgrade, which is the only path
+	// that lets a bookmarked/reloaded browser-served session re-steer off-loopback.
+	function hasAccordionCookie(req: http.IncomingMessage): boolean {
+		const cookie = req.headers["cookie"];
+		return typeof cookie === "string"
+			&& cookie.split(";").some((c) => c.trim() === `accordion_token=${webToken}`);
+	}
+
+	function verifyWsUpgrade(info: { req: http.IncomingMessage }, cb: (res: boolean, code?: number, message?: string) => void): void {
+		const peer = info.req.socket.remoteAddress;
+		if (isLoopbackPeer(peer)) { cb(true); return; }
+		// Off-loopback peer: require the per-session token. The browser-served page
+		// forwards it on the upgrade URL (?token=…) on first load; on a later reload
+		// without ?token=… the browser still sends the HttpOnly accordion_token cookie,
+		// which we accept here so the same source of truth authorizes both halves.
+		const u = new URL(info.req.url || "/", "http://accordion.local");
+		const token = u.searchParams.get("token");
+		if (webToken && (token === webToken || hasAccordionCookie(info.req))) { cb(true); return; }
+		cb(false, 401, "unauthorized — open Accordion via the /accordion Browser link (it carries the session token)");
+	}
+
 	function startServer(): void {
 		if (wss || httpServer) return;
-		// Per-session token for the HTTP static surface. The WS upgrade is NEVER gated by
-		// it (see the file banner + handleHttp): the desktop app dials the WS tokenless and
-		// must keep working, so authentication lives only on file serving, not the socket.
+		// Per-session token for the HTTP static surface AND (when bound off-loopback) the
+		// WS upgrade for non-loopback peers — see verifyWsUpgrade for the auth split: a
+		// loopback peer (the desktop app, or a same-machine browser) dials tokenless and
+		// must keep working; a NON-loopback peer — only reachable when the bind host is
+		// 0.0.0.0 or a specific interface — must present this token, which the browser-
+		// served page already carries in its URL (?token=…). Without it anyone on the
+		// network could connect to the steering WS and fold/unfold/pin the agent's context.
 		webToken = crypto.randomBytes(16).toString("hex");
+		const bindHost = resolveBindHost(pi);
+		const bindPort = resolveBindPort(pi);
 		try {
-			// One HTTP server hosts BOTH halves on the SAME ephemeral port:
+			// One HTTP server hosts BOTH halves on the SAME port:
 			//   • HTTP GETs → handleHttp (the browser build, token-gated)
-			//   • WS upgrades → the WebSocketServer below (UNAUTHENTICATED, unchanged)
+			//   • WS upgrades → the WebSocketServer below (loopback tokenless;
+			//     off-loopback token-gated via verifyWsUpgrade)
 			// port 0 ⇒ OS assigns a free ephemeral port (one server per pi session).
 			httpServer = http.createServer(handleHttp);
 			// Attach the WS server to the HTTP server (NOT { port: 0 }) so the upgrade
-			// shares the port. `wss.on("connection")` below is byte-for-byte unchanged.
-			wss = new WebSocketServer({ server: httpServer });
+			// shares the port. verifyWsUpgrade gates non-loopback peers (see above).
+			wss = new WebSocketServer({ server: httpServer, verifyClient: verifyWsUpgrade });
 			httpServer.on("error", () => {
 				// e.g. unexpected bind failure — run headless (passthrough).
 				try { httpServer?.close(); } catch { /* ignore */ }
 				httpServer = null;
 				wss = null;
 			});
-			httpServer.listen(0, "127.0.0.1", () => {
+			httpServer.listen(bindPort, bindHost, () => {
 				const addr = httpServer?.address();
 				if (addr && typeof addr === "object") {
 					port = addr.port;
@@ -1105,8 +1214,17 @@ export default function accordionLive(pi: ExtensionAPI): void {
 			// Browser entry point: the extension also serves the web build of Accordion on
 			// the same ephemeral port, gated by a per-session token. Surface the tokenized
 			// URL so the user can open the UI in a browser instead of the desktop app.
-			if (port && webToken) lines.push(`Browser: http://127.0.0.1:${port}/?token=${webToken}`);
-			else lines.push("Browser: starting…");
+			if (port && webToken) {
+				const bh = resolveBindHost(pi);
+				const displayHost = isLoopbackHost(bh) ? "127.0.0.1" : bh;
+				// Keep the token-bearing line FIRST so the smoke regex (token=…) still matches.
+				lines.push(`Browser: http://${displayHost}:${port}/?token=${webToken}`);
+				// When bound off-loopback, surface a remote-friendly hint using the machine's LAN IP.
+				if (!isLoopbackHost(bh)) {
+					const lan = firstLanIp();
+					if (lan) lines.push(`Remote:  http://${lan}:${port}/?token=${webToken}`);
+				}
+			} else lines.push("Browser: starting…");
 			ctx.ui.notify(lines.join("\n"), action.type);
 		},
 	});
