@@ -1869,15 +1869,14 @@
 		cursor: pointer;
 	}
 	/* Remaining-digit (0-9) badge on sliver-mode summary tiles + open-group parent
-	   tiles. Smoke mono, inset at the tile bottom — the same calm recessed label the
-	   canvas draws via the cached digit sprite. Information, not decoration (brand:
-	   folded = calm). */
+	   tiles. Smoke mono, inset at the tile's top-right corner — the same calm recessed
+	   label the canvas draws via the cached digit sprite. Information, not decoration
+	   (brand: folded = calm). */
 	.cell-pct {
 		position: absolute;
-		left: 0;
-		right: 0;
-		bottom: 1px;
-		text-align: center;
+		top: 1px;
+		right: 2px;
+		text-align: right;
 		font-family: var(--mono);
 		font-size: 7px;
 		font-weight: 500;

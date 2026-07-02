@@ -364,15 +364,15 @@ function getPctSprite(pct: number, size: number, dpr: number): HTMLCanvasElement
   cv.height = px;
   const cx = cv.getContext("2d")!;
   cx.scale(dpr, dpr);
-  // Smoke (--muted #9A9A9A) mono label, bottom-centered, inset 2px. Faint alpha keeps
+  // Smoke (--muted #9A9A9A) mono label, top-right corner, inset 2px. Faint alpha keeps
   // the folded tile's recessed, drained calm (the #1 brand signal) - information, not
   // decoration. Never a spectrum hue; never on a live tile.
   const fs = Math.max(7, Math.round(size * 0.32));
   cx.font = `500 ${fs}px "IBM Plex Mono", ui-monospace, monospace`;
   cx.fillStyle = "rgba(154,154,154,0.8)";
-  cx.textAlign = "center";
-  cx.textBaseline = "bottom";
-  cx.fillText(String(digit), size / 2, size - 2);
+  cx.textAlign = "right";
+  cx.textBaseline = "top";
+  cx.fillText(String(digit), size - 2, 2);
   _pctSprites.set(digit, cv);
   return cv;
 }
@@ -636,8 +636,8 @@ export function drawTile(
   }
 
   // ---- remaining digit badge: folded blocks + collapsed groups (drawn LAST so it
-  // ---- stays readable over any selection/hover overlays; inset at the tile bottom
-  // ---- so the edge selection/pinned rings stay crisp). Cached sprite blit - O(1) per tile.
+  // ---- stays readable over any selection/hover overlays; inset at the tile's top-right
+  // ---- corner so the edge selection/pinned rings stay crisp). Cached sprite blit - O(1) per tile.
   // ---- < 100 (not >= 0) is the gate: 100 means nothing was folded away, so there's
   // ---- nothing worth badging.
   if (spec.remainingPct != null && spec.remainingPct < 100) {
