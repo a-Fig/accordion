@@ -25,3 +25,33 @@ export function firstLine(s: string, n = 100): string {
 	const line = (s.split("\n").find((l) => l.trim()) ?? "").trim();
 	return clip(line, n);
 }
+
+
+/**
+ * Remaining percentage of a fold: the whole-percent of tokens STILL on the
+ * wire (live / full x 100). Pure - no store access; callers supply the full and
+ * live token counts. Returns 100 for a zero-token block (divide-by-zero guard ->
+ * reads as "fully intact", since there was nothing to remove). The Map header
+ * already reports "saves X tok", so "% remains" reads as how much of the
+ * original content the human can still see and stays consistent with that
+ * existing copy.
+ */
+export function remainingPct(full: number, live: number): number {
+	if (full <= 0) return 100;
+	// Clamp to [0, 100]: a conductor substitution can be LARGER than the original
+	// block, which would otherwise yield a >100% remaining value. 100 = nothing
+	// removed (fully intact), 0 = fully gone.
+	const pct = Math.round((live / full) * 100);
+	return Math.max(0, Math.min(100, pct));
+}
+
+/**
+ * Remaining percentage as a single decile digit (0-9): drop the ones place,
+ * keep the tens digit of remainingPct. Used only for the compact badge
+ * stamped directly on a folded tile — a coarser, faster-to-scan signal than
+ * the precise "X% remains" text shown in tooltips/Transcript/Inspector.
+ * Clamped to 9 so a 100% (fully intact) value doesn't overflow to two digits.
+ */
+export function remainingDigit(pct: number): number {
+	return Math.min(9, Math.max(0, Math.floor(pct / 10)));
+}

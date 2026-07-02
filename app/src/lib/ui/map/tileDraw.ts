@@ -13,6 +13,7 @@
  */
 
 import type { BlockKind } from "../../engine/types";
+import { remainingDigit } from "../../engine/tokens";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -39,6 +40,18 @@ export type TileSpec = {
    * Mirrors the old `.cell.ghost.k-{kind}` CSS class. Defaults to "text" if absent.
    */
   colorKind?: BlockKind;
+  /**
+   * Fold remaining: whole-percent of tokens STILL on the wire (0-100). When
+   * present and < 100, a small Smoke-mono single-digit badge is blitted onto
+   * folded block tiles and collapsed-group tiles so the human can read how
+   * much of the original content is still visible, at a glance (drop the ones
+   * place, keep the tens digit -> 0-9; a 100% (fully intact) value clamps to
+   * 9, but that case is gated out below since nothing was folded). Absent/100
+   * -> no badge. Live tiles never carry this. Drawn via a cached offscreen
+   * sprite (one per digit, 0-9 -> <=10 sprites), blitted like the dice/hatch
+   * sprites - no per-tile fillText in the hot loop, no filter/gradient.
+   */
+  remainingPct?: number;
 };
 
 export type Palette = {
@@ -324,6 +337,47 @@ function getHatchSprite(size: number, dpr: number): HTMLCanvasElement {
 }
 
 // ---------------------------------------------------------------------------
+// Remaining-digit sprite cache (PERF) - a folded tile's "how much is left" badge.
+// Like the hatch/dice sprites: rendered ONCE per distinct digit (0-9 -> <=10
+// entries) to an offscreen canvas, then blitted with drawImage in the hot loop.
+// NO per-tile ctx.fillText, NO filter/gradient. The cache is keyed by
+// (cellSize, dpr); it is rebuilt wholesale when either changes (mirrors the
+// hatch sprite's single-entry rebuild on size change, bounding memory).
+// ---------------------------------------------------------------------------
+let _pctSprites: Map<number, HTMLCanvasElement> | null = null;
+let _pctKey = "";
+function getPctSprite(pct: number, size: number, dpr: number): HTMLCanvasElement {
+  const key = `${size}:${dpr}`;
+  if (!_pctSprites || _pctKey !== key) {
+    _pctSprites = new Map();
+    _pctKey = key;
+  }
+  // Drop the ones place, keep the tens digit (0-9). The exact whole-percent is
+  // shown in the Inspector/Transcript/tooltips; the dense Map tile trades
+  // precision for a single glanceable digit + a cached, O(1)-per-tile blit.
+  const digit = remainingDigit(pct);
+  const c = _pctSprites.get(digit);
+  if (c) return c;
+  const cv = document.createElement("canvas");
+  const px = Math.max(1, Math.round(size * dpr));
+  cv.width = px;
+  cv.height = px;
+  const cx = cv.getContext("2d")!;
+  cx.scale(dpr, dpr);
+  // Smoke (--muted #9A9A9A) mono label, top-right corner, inset 2px. Faint alpha keeps
+  // the folded tile's recessed, drained calm (the #1 brand signal) - information, not
+  // decoration. Never a spectrum hue; never on a live tile.
+  const fs = Math.max(7, Math.round(size * 0.32));
+  cx.font = `500 ${fs}px "IBM Plex Mono", ui-monospace, monospace`;
+  cx.fillStyle = "rgba(154,154,154,0.8)";
+  cx.textAlign = "right";
+  cx.textBaseline = "top";
+  cx.fillText(String(digit), size - 2, 2);
+  _pctSprites.set(digit, cv);
+  return cv;
+}
+
+// ---------------------------------------------------------------------------
 // Geometry
 // ---------------------------------------------------------------------------
 
@@ -579,6 +633,15 @@ export function drawTile(
     ctx.lineWidth = 1;
     roundRect(ctx, x + 0.5, y + 0.5, w - 1, h - 1, r);
     ctx.stroke();
+  }
+
+  // ---- remaining digit badge: folded blocks + collapsed groups (drawn LAST so it
+  // ---- stays readable over any selection/hover overlays; inset at the tile's top-right
+  // ---- corner so the edge selection/pinned rings stay crisp). Cached sprite blit - O(1) per tile.
+  // ---- < 100 (not >= 0) is the gate: 100 means nothing was folded away, so there's
+  // ---- nothing worth badging.
+  if (spec.remainingPct != null && spec.remainingPct < 100) {
+    ctx.drawImage(getPctSprite(spec.remainingPct, w, opts.dpr ?? 1), x, y, w, h);
   }
 
   ctx.restore();
